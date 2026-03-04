@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Lambda that queries ARC health check status and publishes per-region active metrics"
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+  PlanArn:
+    Type: String
+    Description: ARC Region Switch Plan ARN
+  HostedZoneId:
+    Type: String
+    Description: Route53 Hosted Zone ID
+  RecordName:
+    Type: String
+    Description: DNS record name (e.g. store.demo.io)
+
+Resources:
+  DnsStatusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: arc-and-metrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - arc-region-switch:ListRoute53HealthChecks
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  DnsStatusFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub app-dns-status${Env}
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt DnsStatusRole.Arn
+      Timeout: 30
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:boto3-latest:1
+      Environment:
+        Variables:
+          PLAN_ARN: !Ref PlanArn
+          HOSTED_ZONE_ID: !Ref HostedZoneId
+          RECORD_NAME: !Ref RecordName
+      Code:
+        ZipFile: |
+          import boto3, os
+
+          def handler(event, context):
+              arc = boto3.client('arc-region-switch')
+              cw = boto3.client('cloudwatch')
+
+              resp = arc.list_route53_health_checks(
+                  arn=os.environ['PLAN_ARN'],
+                  hostedZoneId=os.environ['HOSTED_ZONE_ID'],
+                  recordName=os.environ['RECORD_NAME']
+              )
+
+              metrics = []
+              for hc in resp.get('healthChecks', []):
+                  metrics.append({
+                      'MetricName': 'RegionDNSActive',
+                      'Dimensions': [{'Name': 'Region', 'Value': hc['region']}],
+                      'Value': 1.0 if hc.get('status') == 'healthy' else 0.0,
+                      'Unit': 'None'
+                  })
+
+              if metrics:
+                  cw.put_metric_data(Namespace='ARC/DNSStatus', MetricData=metrics)
+              return {'metrics': metrics}
+
+  DnsStatusSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Id: DnsStatusFunction
+          Arn: !GetAtt DnsStatusFunction.Arn
+
+  DnsStatusPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DnsStatusFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DnsStatusSchedule.Arn

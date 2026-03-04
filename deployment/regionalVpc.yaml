@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: 'Base Infrastructure (SO9020)'
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  NamingPrefix:
+    Type: String
+    Description: The prefix to be used for resources created by this template.
+    Default: mr-app
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  StandbyRegion:
+    Type: String
+    Description: Enter the Standby Region
+    Default: "us-west-2"
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      "VPCCidrBlock": 10.1.0.0/16
+      "PrivateCidrBlock1": 10.1.0.0/20
+      "PrivateCidrBlock2": 10.1.16.0/20
+      "PrivateCidrBlock3": 10.1.32.0/20
+      "AvailabilityZoneId1": use1-az1
+      "AvailabilityZoneId2": use1-az4
+      "AvailabilityZoneId3": use1-az6
+    us-west-2:
+      "VPCCidrBlock": 10.2.0.0/16
+      "PrivateCidrBlock1": 10.2.0.0/20
+      "PrivateCidrBlock2": 10.2.16.0/20
+      "PrivateCidrBlock3": 10.2.32.0/20
+      "AvailabilityZoneId1": usw2-az1
+      "AvailabilityZoneId2": usw2-az2
+      "AvailabilityZoneId3": usw2-az3
+
+Conditions:
+  isPrimary: !Equals
+    - !Ref AWS::Region
+    - us-east-1
+  isStandby: !Equals
+    - !Ref AWS::Region
+    - us-west-2
+
+Resources:
+  #VPC
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", "VPCCidrBlock"]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  VpcIdSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub VpcId-${AWS::Region}${Env}
+      Description: "VPC Id"
+      KmsKeyId: !Ref KmsKey
+      SecretString: !Ref Vpc
+      ReplicaRegions:
+        - Region: !If [isPrimary, us-west-2, us-east-1]
+  Peer:
+    Condition: isStandby
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties: 
+      PeerRegion: !Ref PrimaryRegion
+      PeerVpcId: !Sub '{{resolve:secretsmanager:VpcId-${PrimaryRegion}${Env}}}'
+      VpcId: !Ref Vpc
+  VpcPeerIdSecret:
+    Condition: isStandby
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub VpcPeerId${Env}
+      Description: "VPC Id"
+      KmsKeyId: !Ref KmsKey
+      SecretString: !Ref Peer
+      ReplicaRegions:
+        - Region: !Ref PrimaryRegion
+
+  #Canaries pres-reqs
+  canaryPolicy:
+      Type: "AWS::IAM::ManagedPolicy"
+      Properties:
+        #ManagedPolicyName: !Sub "CloudWatchSyntheticsPolicy${Env}"
+        Path: "/service-role/"
+        PolicyDocument: !Sub |
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:PutObject",
+                            "s3:GetObject"
+                        ],
+                        "Resource": [
+                            "arn:aws:s3:::${canaryBucket}/canary/${AWS::Region}/*"
+                        ]
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:GetBucketLocation"
+                        ],
+                        "Resource": [
+                            "arn:aws:s3:::${canaryBucket}"
+                        ]
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "logs:CreateLogStream",
+                            "logs:PutLogEvents",
+                            "logs:CreateLogGroup"
+                        ],
+                        "Resource": [
+                            "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/cwsyn-*"
+                        ]
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:ListAllMyBuckets",
+                            "xray:PutTraceSegments"
+                        ],
+                        "Resource": [
+                            "*"
+                        ]
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Resource": "*",
+                        "Action": "cloudwatch:PutMetricData",
+                        "Condition": {
+                            "StringEquals": {
+                                "cloudwatch:namespace": "CloudWatchSynthetics"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:CreateNetworkInterface",
+                            "ec2:DescribeNetworkInterfaces",
+                            "ec2:DeleteNetworkInterface"
+                        ],
+                        "Resource": [
+                            "*"
+                        ]
+                    }
+                ]
+            }
+
+  canaryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteAfter24Hours
+            Status: Enabled
+            ExpirationInDays: 1
+  canaryRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      Path: "/service-role/"
+      AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+      MaxSessionDuration: 3600
+      ManagedPolicyArns: 
+        - !Ref canaryPolicy
+      Description: "CloudWatch Synthetics lambda execution role for running canaries"
+  canaryRoleArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub canaryRoleArn${Env}
+      Value: !GetAtt canaryRole.Arn
+  canaryBucketName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub canaryBucketName${Env}
+      Value: !Ref canaryBucket
+  canaryBucketArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub canaryBucketArn${Env}
+      Value: !GetAtt canaryBucket.Arn
+
+  KmsKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      Enabled: true
+      EnableKeyRotation: true
+      Description: "retail-store-ar CMK"
+      KeyUsage: "ENCRYPT_DECRYPT"
+      KeyPolicy: !Sub |
+        {
+          "Version" : "2012-10-17",
+          "Id" : "key-default-1",
+          "Statement" : [ 
+            {
+            "Sid" : "Enable IAM User Permissions",
+            "Effect" : "Allow",
+            "Principal" : {
+              "AWS" : "arn:aws:iam::${AWS::AccountId}:root"
+            },
+            "Action" : "kms:*",
+            "Resource" : "*"
+          },
+          {
+            "Sid": "Allow access through AWS Secrets Manager for all principals in the account that are authorized to use AWS Secrets Manager",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": [
+                "*"
+              ]
+            },
+            "Action": [
+              "kms:Encrypt",
+              "kms:Decrypt",
+              "kms:ReEncrypt*",
+              "kms:CreateGrant",
+              "kms:DescribeKey"
+            ],
+            "Resource": "*",
+            "Condition": {
+              "StringEquals": {
+                "kms:CallerAccount": "${AWS::AccountId}",
+                "kms:ViaService": "secretsmanager.${AWS::Region}.amazonaws.com"
+              }
+            }
+          },
+          {
+            "Sid": "Allow access through AWS Secrets Manager for all principals in the account that are authorized to use AWS Secrets Manager",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": [
+                "*"
+              ]
+            },
+            "Action": "kms:GenerateDataKey*",
+            "Resource": "*",
+            "Condition": {
+              "StringEquals": {
+                "kms:CallerAccount": "${AWS::AccountId}"
+              },
+              "StringLike": {
+                "kms:ViaService": "secretsmanager.${AWS::Region}.amazonaws.com"
+              }
+            }
+          } ]
+        }   
+      KeySpec: "SYMMETRIC_DEFAULT"
+      MultiRegion: false
+  KmsKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub retail-store-ar${Env}
+      Value: !Ref KmsKey

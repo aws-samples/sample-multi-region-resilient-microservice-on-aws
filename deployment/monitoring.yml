@@ -1,0 +1,746 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Canaries"
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
+  PrimaryEcsCluster:
+    Type: String
+    Description: ECS cluster name in primary region (for Application Signals Environment dimension)
+    Default: ""
+  SecondaryEcsCluster:
+    Type: String
+    Description: ECS cluster name in secondary region (for Application Signals Environment dimension)
+    Default: ""
+
+Conditions:
+  IsPrimaryRegion: !Equals [!Ref AWS::Region, !Ref PrimaryRegion]
+
+Resources:
+  CriticalAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'critical-alarms-${AWS::Region}${Env}'
+
+  InfoAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'info-alarms-${AWS::Region}${Env}'
+
+  AuroraCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'aurora-cpu-${AWS::Region}${Env}'
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+      TreatMissingData: notBreaching
+
+  AuroraConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'aurora-connections-${AWS::Region}${Env}'
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+      TreatMissingData: notBreaching
+
+  AuroraReplicaLagAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'aurora-lag-${AWS::Region}${Env}'
+      MetricName: AuroraGlobalDBReplicationLag
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+      TreatMissingData: notBreaching
+
+  AuroraDatabaseComposite:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub 'aurora-degraded-${AWS::Region}${Env}'
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+      AlarmRule: !Sub '(ALARM(${AuroraConnectionsAlarm}) AND (ALARM(${AuroraCPUAlarm}) OR ALARM(${AuroraReplicaLagAlarm})))'
+
+  DynamoDBUserErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'dynamodb-user-errors-${AWS::Region}${Env}'
+      MetricName: UserErrors
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Sub 'cartsTable${Env}'
+      TreatMissingData: notBreaching
+
+  DynamoDBSystemErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'dynamodb-system-errors-${AWS::Region}${Env}'
+      MetricName: SystemErrors
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Sub 'cartsTable${Env}'
+      TreatMissingData: notBreaching
+
+  DynamoDBComposite:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub 'dynamodb-errors-${AWS::Region}${Env}'
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+      AlarmRule: !Sub '(ALARM(${DynamoDBUserErrorsAlarm}) OR ALARM(${DynamoDBSystemErrorsAlarm}))'
+
+  OrdersCreatedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'orders-created-zero-${AWS::Region}${Env}'
+      MetricName: !Sub 'OrdersCreated${Env}'
+      Namespace: ecommerce
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: LessThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref InfoAlarmTopic
+
+  CanarySuccessRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'canary-success-low-${AWS::Region}${Env}'
+      MetricName: SuccessPercent
+      Namespace: CloudWatchSynthetics
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 90
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  SystemDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'System-Dashboard-${AWS::Region}${Env}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "height": 6, "width": 12, "y": 0, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Active Regions in DNS (1 = Active, 0 = Removed)",
+                "metrics": [
+                  [ "ARC/DNSStatus", "RegionDNSActive", "Region", "${PrimaryRegion}", { "region": "${PrimaryRegion}", "label": "${PrimaryRegion}", "color": "#2ca02c" } ],
+                  [ "ARC/DNSStatus", "RegionDNSActive", "Region", "${SecondaryRegion}", { "region": "${SecondaryRegion}", "label": "${SecondaryRegion}", "color": "#1f77b4" } ]
+                ],
+                "view": "singleValue", "region": "${PrimaryRegion}", "stat": "Minimum", "period": 60
+              }
+            },
+                        {
+              "height": 6, "width": 6, "y": 0, "x": 12,
+              "type": "metric",
+              "properties": {
+                "metrics": [[ "ecommerce", "OrdersCreated${Env}", { "region": "${PrimaryRegion}" } ]],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "title": "OrdersCreated-${PrimaryRegion}",
+                "period": 60, "stat": "Sum"
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 0, "x": 18,
+              "type": "metric",
+              "properties": {
+                "metrics": [[ "ecommerce", "OrdersCreated${Env}", { "region": "${SecondaryRegion}" } ]],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "title": "OrdersCreated-${SecondaryRegion}",
+                "period": 60, "stat": "Sum"
+              }
+            },
+            {
+              "type": "text", "height": 1, "width": 24, "y": 6, "x": 0,
+              "properties": { "markdown": "## Canary Success Rate by Journey" }
+            },
+            {
+              "height": 6, "width": 6, "y": 7, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home - Success % (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-home${Env}", { "region": "${PrimaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-home${Env}", { "region": "${PrimaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-home${Env}", { "region": "${PrimaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 7, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog - Success % (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-catalog${Env}", { "region": "${PrimaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-catalog${Env}", { "region": "${PrimaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-catalog${Env}", { "region": "${PrimaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 7, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart - Success % (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-cart${Env}", { "region": "${PrimaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-cart${Env}", { "region": "${PrimaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-cart${Env}", { "region": "${PrimaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 7, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders - Success % (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-orders${Env}", { "region": "${PrimaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-orders${Env}", { "region": "${PrimaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-orders${Env}", { "region": "${PrimaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 13, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home - Success % (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-home${Env}", { "region": "${SecondaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-home${Env}", { "region": "${SecondaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-home${Env}", { "region": "${SecondaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 13, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog - Success % (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-catalog${Env}", { "region": "${SecondaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-catalog${Env}", { "region": "${SecondaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-catalog${Env}", { "region": "${SecondaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 13, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart - Success % (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-cart${Env}", { "region": "${SecondaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-cart${Env}", { "region": "${SecondaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-cart${Env}", { "region": "${SecondaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 13, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders - Success % (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-orders${Env}", { "region": "${SecondaryRegion}", "label": "local" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "rmt-rgnl-orders${Env}", { "region": "${SecondaryRegion}", "label": "remote" } ],
+                  [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-orders${Env}", { "region": "${SecondaryRegion}", "label": "global" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Average", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "type": "text", "height": 1, "width": 24, "y": 19, "x": 0,
+              "properties": { "markdown": "## Canary Response Time by Journey" }
+            },
+            {
+              "height": 6, "width": 6, "y": 20, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home - Duration ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-home${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-home${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 20, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog - Duration ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-catalog${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-catalog${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 20, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart - Duration ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-cart${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-cart${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 20, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders - Duration ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-orders${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-orders${Env}", { "region": "${PrimaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 26, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home - Duration ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-home${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-home${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 26, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog - Duration ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-catalog${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-catalog${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 26, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart - Duration ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-cart${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-cart${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 26, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders - Duration ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-orders${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "local p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "local p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "local p99" } ],
+                  [ "CloudWatchSynthetics", "Duration", "CanaryName", "rmt-rgnl-orders${Env}", { "region": "${SecondaryRegion}", "stat": "p50", "label": "remote p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "remote p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "remote p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "period": 60
+              }
+            },
+            {
+              "type": "text", "height": 1, "width": 24, "y": 32, "x": 0,
+              "properties": { "markdown": "## Application Signals - All Traffic (Success Rate)" }
+            },
+            {
+              "height": 6, "width": 6, "y": 33, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home Success Rate (${PrimaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${PrimaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${PrimaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${PrimaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 33, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog Success Rate (${PrimaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${PrimaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${PrimaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${PrimaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 33, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart Success Rate (${PrimaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${PrimaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${PrimaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${PrimaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 33, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders Success Rate (${PrimaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${PrimaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${PrimaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${PrimaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 39, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home Success Rate (${SecondaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${SecondaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${SecondaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${SecondaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 39, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog Success Rate (${SecondaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${SecondaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${SecondaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${SecondaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 39, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart Success Rate (${SecondaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${SecondaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${SecondaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${SecondaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 39, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders Success Rate (${SecondaryRegion})",
+                "metrics": [
+                  [ { "expression": "100*(1-(e1+f1)/IF(r1>0,r1,1))", "label": "Success %", "id": "expr1" } ],
+                  [ "ApplicationSignals", "Error", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${SecondaryRegion}", "id": "e1", "visible": false } ],
+                  [ "ApplicationSignals", "Fault", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${SecondaryRegion}", "id": "f1", "visible": false } ],
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${SecondaryRegion}", "id": "r1", "visible": false, "stat": "SampleCount" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}",
+                "stat": "Sum", "period": 60,
+                "yAxis": { "left": { "min": 0, "max": 100 } }
+              }
+            },
+            {
+              "type": "text", "height": 1, "width": 24, "y": 45, "x": 0,
+              "properties": { "markdown": "## Application Signals - All Traffic (Latency p50/p90/p99)" }
+            },
+            {
+              "height": 6, "width": 6, "y": 46, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home Latency ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${PrimaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 46, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog Latency ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${PrimaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 46, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart Latency ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${PrimaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 46, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders Latency ms (${PrimaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${PrimaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${PrimaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${PrimaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 52, "x": 0,
+              "type": "metric",
+              "properties": {
+                "title": "Home Latency ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /home", { "region": "${SecondaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 52, "x": 6,
+              "type": "metric",
+              "properties": {
+                "title": "Catalog Latency ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /catalog", { "region": "${SecondaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 52, "x": 12,
+              "type": "metric",
+              "properties": {
+                "title": "Cart Latency ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /cart", { "region": "${SecondaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            },
+            {
+              "height": 6, "width": 6, "y": 52, "x": 18,
+              "type": "metric",
+              "properties": {
+                "title": "Orders Latency ms (${SecondaryRegion})",
+                "metrics": [
+                  [ "ApplicationSignals", "Latency", "Environment", "ecs:${SecondaryEcsCluster}", "Service", "ui", "Operation", "GET /orders", { "region": "${SecondaryRegion}", "stat": "p50", "label": "p50" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p90", "label": "p90" } ],
+                  [ "...", { "region": "${SecondaryRegion}", "stat": "p99", "label": "p99" } ]
+                ],
+                "view": "timeSeries", "stacked": false,
+                "region": "${PrimaryRegion}", "period": 60
+              }
+            }
+          ]
+        }

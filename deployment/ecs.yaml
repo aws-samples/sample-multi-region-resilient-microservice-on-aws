@@ -1,0 +1,1468 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Applications"
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  StandbyRegion:
+    Type: String
+    Description: Enter the Standby Region
+    Default: "us-west-2"
+  Tag:
+    Type: String
+    Description: Docker image tag
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: KmsKey
+    Description: CMK Id 
+
+Conditions:
+  isPrimary: !Equals
+    - !Ref AWS::Region
+    - us-east-1
+Resources:
+  #Backends
+  OrdersMqBroker:
+    Type: "AWS::AmazonMQ::Broker"
+    Properties:
+      AutoMinorVersionUpgrade: true
+      BrokerName: !Sub "retail-store-ar-ordersmq${Env}"
+      DeploymentMode: "SINGLE_INSTANCE"
+      EngineType: "RabbitMQ"
+      EngineVersion: "3.13"
+      HostInstanceType: "mq.t3.micro"
+      PubliclyAccessible: false
+      StorageType: "ebs"
+      AuthenticationStrategy: "simple"
+      MaintenanceWindowStartTime: 
+          DayOfWeek: "SUNDAY"
+          TimeOfDay: "03:00"
+          TimeZone: "UTC"
+      Logs: 
+          General: true
+      SecurityGroups: 
+        - !Ref sgMq
+      SubnetIds: 
+        - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+      Tags: 
+        - 
+          Key: "environment-name"
+          Value: "retail-store-ar"
+        - 
+          Key: "created-by"
+          Value: "retail-store-sample-app"
+        - 
+          Key: "Name"
+          Value: "retail-store-arordersmq-broker"
+      EncryptionOptions: 
+          UseAwsOwnedKey: true
+      Users:
+        - 
+          Username: mq
+          Password: !Sub '{{resolve:secretsmanager:${MqPassword}}}'
+
+  CheckoutEcCluster:
+    Type: "AWS::ElastiCache::CacheCluster"
+    Properties:
+      CacheNodeType: "cache.t3.micro"
+      Engine: "redis"
+      EngineVersion: "4.0.10"
+      NumCacheNodes: 1
+      PreferredMaintenanceWindow: "wed:03:00-wed:04:00"
+      CacheParameterGroupName: !Ref CheckoutEcParameterGroup
+      CacheSubnetGroupName: !Ref CheckoutEcSubnetGroup
+      AutoMinorVersionUpgrade: true
+      VpcSecurityGroupIds: 
+        - !Ref sgRedis
+      SnapshotRetentionLimit: 0
+      SnapshotWindow: "06:30-07:30"
+      Tags: 
+        - 
+          Key: "environment-name"
+          Value: "retail-store-ar"
+        - 
+          Key: "created-by"
+          Value: "retail-store-sample-app"
+        - 
+          Key: "Name"
+          Value: "retail-store-ar-checkout"
+  CheckoutEcSubnetGroup:
+      Type: "AWS::ElastiCache::SubnetGroup"
+      Properties:
+        Description: "Elasticache subnet group for retail-store-ar-checkout"
+        SubnetIds: 
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+  CheckoutEcParameterGroup:
+    Type: "AWS::ElastiCache::ParameterGroup"
+    Properties:
+      CacheParameterGroupFamily: "redis4.0"
+      Description: "Elasticache parameter group for retail-store-ar-checkout"
+
+  #Security Groups  
+  sgTask:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: ECS Task
+      SecurityGroupIngress:
+        -
+          SourceSecurityGroupId: !Ref sgAlb
+          IpProtocol: tcp
+          FromPort: 8080
+          ToPort:  8080
+          Description: 'Allow ingress traffic'
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+  sgTaskIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties: 
+      SourceSecurityGroupId: !Ref sgTask
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort:  8080
+      GroupId: !GetAtt sgTask.GroupId
+      Description: 'Allow Ingress Traffic'
+  VPCEndpointSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointSecretsManagerSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref sgTask
+  VPCEndpointSSMSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointSSMSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref sgTask
+  VPCEndpointECRApiSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointECRApiSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointECRDkrSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointECRDkrSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointLogsSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointLogsSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointSTSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointSTSSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointKMSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointKMSSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointMonitoringSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointMonitoringSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointXRaySecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointXRaySGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointECSSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointECSSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointDSQLSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointDSQLSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  VPCEndpointDSQLSecurityGroupIngress5432:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointDSQLSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt sgTask.GroupId
+  sgAlb:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: ECS Alb
+      SecurityGroupIngress:
+        #Public ALB
+        CidrIp: 0.0.0.0/0
+        IpProtocol: tcp
+        FromPort: 80
+        ToPort:  80
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+  sgMq:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "security group for MQ Broker"
+      Tags: 
+        - 
+          Key: "environment-name"
+          Value: "retail-store-ar"
+        - 
+          Key: "Name"
+          Value: "retail-store-ar-orders-mq-broker"
+        - 
+          Key: "created-by"
+          Value: "retail-store-sample-app"
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      SecurityGroupIngress: 
+        - 
+          SourceSecurityGroupId: !Ref sgTask
+          SourceSecurityGroupOwnerId: !Ref AWS::AccountId
+          Description: "Allow all ports"
+          FromPort: 0
+          IpProtocol: "tcp"
+          ToPort: 65535
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+        - 
+          CidrIpv6: "::/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+  CatalogAuroraMySqlComputeSecurityGroupInboundRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: "Allow traffic on MySql Port"
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref sgTask
+      GroupId: !Sub '{{resolve:ssm:catalog-aurora-mysql-sg-${AWS::Region}${Env}}}'
+  sgRedis:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Security group for Elasticache Redis"
+      Tags: 
+        - 
+          Key: "environment-name"
+          Value: "retail-store-ar"
+        - 
+          Key: "Name"
+          Value: "retail-store-ar-checkout-redis"
+        - 
+          Key: "created-by"
+          Value: "retail-store-sample-app"
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      SecurityGroupIngress: 
+        - 
+          SourceSecurityGroupId: !Ref sgTask
+          SourceSecurityGroupOwnerId: !Ref AWS::AccountId
+          Description: "Selectively allow inbound traffic"
+          FromPort: 6379
+          IpProtocol: "tcp"
+          ToPort: 6379
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+        - 
+          CidrIpv6: "::/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+  
+  #Secrets
+
+  CWAgentConfSSM:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub 'CWAgentConf${Env}'
+      Type: String
+      Value: !Sub "{\"traces\": {\"traces_collected\": {\"application_signals\": {}}},\"logs\": {\"metrics_collected\": {\"application_signals\": {}}}}"
+      Description: "CW Agent Config"
+
+  MqSecret:
+    DependsOn: 
+      - MqPassword 
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub 'retail-store-ar-mq${Env}'
+      KmsKeyId: !Ref KmsKey
+      SecretString: !Sub "{\"host\":\"amqps://${OrdersMqBroker}.mq.${AWS::Region}.on.aws:5671\",\"password\":\"{{resolve:secretsmanager:retail-store-ar-mq-password${Env}}}\",\"username\":\"mq\"}"
+  
+  MqPassword:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub 'retail-store-ar-mq-password${Env}'
+      KmsKeyId: !Ref KmsKey
+      GenerateSecretString: 
+        ExcludePunctuation: true
+
+  LogGroupKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-loggroup
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - !Sub 'arn:${AWS::Partition}:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Enable Cloudwatch access
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 3
+      KmsKeyId: !GetAtt LogGroupKey.Arn
+
+  Alb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      LoadBalancerAttributes:
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: true
+      SecurityGroups: 
+        - !Ref sgAlb
+      Subnets:
+        - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+        - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+        - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+      Type: application
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      TargetGroupAttributes:
+      - 
+        Key: load_balancing.algorithm.type
+        Value: weighted_random
+      -
+        Key: load_balancing.algorithm.anomaly_mitigation
+        Value: 'on'
+      -
+        Key: deregistration_delay.timeout_seconds
+        Value: '5'
+      HealthCheckEnabled: true
+      HealthCheckPath: '/actuator'
+      Port: 8080
+      Protocol: HTTP
+      Matcher:
+        HttpCode: '200,302,303'
+      TargetType: ip
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroup
+      LoadBalancerArn: !Ref Alb
+      Port: 80
+      Protocol: HTTP
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ServiceConnectDefaults:
+        Namespace: !Sub retail-store-ar${Env}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      Tags:
+        - Key: Name
+          Value: !Sub mr-app-ecs-cluster${Env}
+  
+  #Carts Service
+  CartsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: ecs 
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CWAgentConf${Env}'
+                Action:
+                  - "ssm:GetParameters"
+                  - "ssm:DescribeParameters"
+              - Effect: "Allow"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:CreateLogGroup"
+                  - "logs:DescribeLogStreams"
+                  - "logs:PutRetentionPolicy"
+                  - "logs:PutLogEvents"
+              - Effect: "Allow"
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/{{resolve:secretsmanager:cartsTable${Env}Secret}}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/{{resolve:secretsmanager:cartsTable${Env}Secret}}/*'
+                Action:
+                  - "dynamodb:GetItem"
+                  - "dynamodb:BatchGetItem"
+                  - "dynamodb:Query"
+                  - "dynamodb:PutItem"
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:DeleteItem"
+                  - "dynamodb:BatchWriteItem"
+  CartsTaskDefinition:
+    Type:  AWS::ECS::TaskDefinition
+    Properties:
+      Volumes: 
+        - Name:  opentelemetry-auto-instrumentation
+      ExecutionRoleArn: !Ref CartsTaskExecutionRole
+      TaskRoleArn: !Ref CartsTaskExecutionRole
+      NetworkMode: awsvpc 
+      Cpu: 256
+      Memory: 512
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        -
+          Name: "carts"
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation
+              ContainerPath: /otel-auto-instrumentation
+              ReadOnly: false
+          PortMappings:
+            - ContainerPort: 8080
+              Name: carts
+              AppProtocol: http
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/carts${Env}:${Tag}"
+          Cpu: 0
+          MemoryReservation: 50
+          Essential: true
+          Environment:
+            - Name: CARTS_DYNAMODB_TABLENAME
+              Value: !Sub '{{resolve:secretsmanager:cartsTable${Env}Secret}}'
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: dynamodb
+            - Name: OTEL_RESOURCE_ATTRIBUTES
+              Value: !Sub "service.name=carts${Env},service.namespace=retail-store-ar,aws.log.group.names=${LogGroup}"
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_ENABLED
+              Value: true
+            - Name: OTEL_EXPORTER_OTLP_PROTOCOL
+              Value: http/protobuf
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_EXPORTER_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
+            - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              Value: http://localhost:4316/v1/traces
+            - Name: OTEL_TRACES_SAMPLER
+              Value: xray
+            - Name: OTEL_PROPAGATORS
+              Value: "tracecontext,baggage,b3,xray"
+            - Name: JAVA_TOOL_OPTIONS
+              Value: " -javaagent:/otel-auto-instrumentation/javaagent.jar"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs  
+        -
+          Name: ecs-cwagent
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cloudwatch-agent${Env}:latest'
+          Essential: true
+          Secrets: 
+            - Name: CW_CONFIG_CONTENT
+              ValueFrom: !Ref CWAgentConfSSM
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/ecs-cwagent
+              awslogs-create-group: true
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+        -
+          Name: init
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v1.32.5'
+          Essential: false
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation
+              ContainerPath: /otel-auto-instrumentation
+              ReadOnly: false
+          Command: 
+            - cp
+            - /javaagent.jar
+            - /otel-auto-instrumentation/javaagent.jar
+
+  CartsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub carts${Env}
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Cluster:  !Ref EcsCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref CartsTaskDefinition
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub retail-store-ar${Env}
+        Services:
+          -
+            ClientAliases:
+              -
+                DnsName: carts
+                Port: 8080
+            PortName: carts
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !GetAtt sgTask.GroupId
+          Subnets:
+            - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+
+  #Orders Service
+  OrdersTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: ecs 
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CWAgentConf${Env}'
+                Action:
+                  - "ssm:GetParameters"
+                  - "ssm:DescribeParameters"
+              - Effect: "Allow"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:CreateLogGroup"
+                  - "logs:DescribeLogStreams"
+                  - "logs:PutRetentionPolicy"
+                  - "logs:PutLogEvents"
+              - Effect: "Allow"
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mr-app/*'
+                  - !Ref MqSecret
+                Action:
+                  - "secretsmanager:GetSecretValue"
+              - Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}"
+                Action:
+                  - "kms:Decrypt*"
+              - Effect: "Allow"
+                Resource:
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*'
+                Action:
+                  - "ssm:GetParameters"
+              - Effect: "Allow"
+                Resource:
+                  - !Sub 'arn:aws:dsql:${AWS::Region}:${AWS::AccountId}:cluster/*'
+                Action:
+                  - "dsql:DbConnectAdmin"
+  OrdersTaskDefinition:
+    Type:  AWS::ECS::TaskDefinition
+    Properties:
+      Volumes: 
+        - Name:  opentelemetry-auto-instrumentation
+      ExecutionRoleArn: !Ref OrdersTaskExecutionRole
+      TaskRoleArn: !Ref OrdersTaskExecutionRole
+      NetworkMode: awsvpc 
+      Cpu: 1024
+      Memory: 2048
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        -
+          Name: ecs-cwagent
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cloudwatch-agent${Env}:latest'
+          Essential: true
+          Secrets: 
+            - Name: CW_CONFIG_CONTENT
+              ValueFrom: !Ref CWAgentConfSSM
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/ecs-cwagent
+              awslogs-create-group: true
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+        -
+          Name: init
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v1.32.5'
+          Essential: false
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation
+              ContainerPath: /otel-auto-instrumentation
+              ReadOnly: false
+          Command: 
+            - cp
+            - javaagent.jar
+            - otel-auto-instrumentation/javaagent.jar
+        -
+          Name: "orders"
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation
+              ContainerPath: /otel-auto-instrumentation
+              ReadOnly: false
+          PortMappings:
+            - ContainerPort: 8080
+              AppProtocol: http
+              Name: orders
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/orders${Env}:${Tag}"
+          Cpu: 0
+          MemoryReservation: 50
+          Essential: true
+          Environment:
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: dsql,rabbitmq
+            - Name: DSQL_ENDPOINT
+              Value: !Sub '{{resolve:ssm:orders-dsql-cluster-Endpoint${Env}}}'
+            - Name: DSQL_AUTH_HOSTNAME
+              Value: !Sub '{{resolve:ssm:orders-dsql-cluster-PublicEndpoint${Env}}}'
+            - Name: DSQL_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: OTEL_RESOURCE_ATTRIBUTES
+              Value: !Sub "service.name=orders${Env},service.namespace=retail-store-ar,aws.log.group.names=${LogGroup}"
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_ENABLED
+              Value: true
+            - Name: OTEL_EXPORTER_OTLP_PROTOCOL
+              Value: http/protobuf
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_EXPORTER_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
+            - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              Value: http://localhost:4316/v1/traces
+            - Name: OTEL_TRACES_SAMPLER
+              Value: xray
+            - Name: OTEL_PROPAGATORS
+              Value: "tracecontext,baggage,b3,xray"
+            - Name: JAVA_TOOL_OPTIONS
+              Value: " -javaagent:/otel-auto-instrumentation/javaagent.jar"
+          Secrets:
+            -
+              Name: "SPRING_RABBITMQ_USER"
+              ValueFrom: !Sub "${MqSecret}:username::"
+            -
+              Name: "SPRING_RABBITMQ_ADDRESSES"
+              ValueFrom: !Sub "${MqSecret}:host::"
+            -
+              Name: "SPRING_RABBITMQ_PASSWORD"
+              ValueFrom: !Sub "${MqSecret}:password::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs  
+  OrdersService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub orders${Env}
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Cluster:  !Ref EcsCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref OrdersTaskDefinition
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub retail-store-ar${Env}
+        Services:
+          -
+            ClientAliases:
+              -
+                DnsName: orders
+                Port: 8080
+            PortName: orders
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !GetAtt sgTask.GroupId
+          Subnets:
+            - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+
+  #Assets Service
+  AssetsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+  AssetsTaskDefinition:
+    Type:  AWS::ECS::TaskDefinition
+    Properties:
+      ExecutionRoleArn: !Ref AssetsTaskExecutionRole
+      TaskRoleArn: !Ref AssetsTaskExecutionRole
+      NetworkMode: awsvpc 
+      Cpu: 256
+      Memory: 512
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        -
+          Name: "assets"
+          PortMappings:
+            - ContainerPort: 8080
+              Name: assets
+              AppProtocol: http
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/assets${Env}:${Tag}"
+          Cpu: 0
+          MemoryReservation: 50
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs  
+  AssetsService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub assets${Env}
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Cluster:  !Ref EcsCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref AssetsTaskDefinition
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub retail-store-ar${Env}
+        Services:
+          -
+            ClientAliases:
+              -
+                DnsName: assets
+                Port: 8080
+            PortName: assets
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !GetAtt sgTask.GroupId
+          Subnets:
+            - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+
+  #Catalog Service
+  CatalogTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: ecs 
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+                Action: 
+                  - "logs:CreateLogStream"
+                  - "logs:CreateLogGroup"
+                  - "logs:DescribeLogStreams"
+                  - "logs:PutRetentionPolicy"
+                  - "logs:PutLogEvents"
+              - Effect: "Allow"
+                Resource: 
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:mr-app/*'
+                Action:
+                  - "secretsmanager:GetSecretValue"
+              - Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}"
+                Action: 
+                  - "kms:Decrypt*"
+              - Effect: "Allow"
+                Resource: 
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:*'
+                Action:
+                  - "ssm:GetParameters"
+  CatalogTaskDefinition:
+    Type:  AWS::ECS::TaskDefinition
+    Properties:
+      ExecutionRoleArn: !Ref CatalogTaskExecutionRole
+      TaskRoleArn: !Ref CatalogTaskExecutionRole
+      NetworkMode: awsvpc 
+      Cpu: 1024
+      Memory: 2048
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        -
+          Name: "catalog"
+          PortMappings:
+            - ContainerPort: 8080
+              Name: catalog
+              AppProtocol: http
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/catalog${Env}:${Tag}"
+          Cpu: 0
+          MemoryReservation: 50
+          Essential: true
+          Environment:
+            -
+              Name: "DB_NAME"
+              Value: "catalog"
+            -
+              Name: "DB_CREDENTIALS_SECRET_ID"
+              Value: !Sub "mr-app/catalog-global-db-cluster-UserCredentials${Env}"
+          Secrets:
+            -
+              Name: "DB_ENDPOINT"
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/catalog-global-db-cluster-Hostname${Env}"
+            -
+              Name: "DB_READ_ENDPOINT"
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/catalog-global-db-cluster-Hostname${Env}"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs  
+  CatalogService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub catalog${Env}
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Cluster:  !Ref EcsCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref CatalogTaskDefinition
+      ServiceConnectConfiguration:
+        Enabled: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref LogGroup
+            awslogs-region: !Sub ${AWS::Region}
+            awslogs-stream-prefix: ecs
+        Namespace: !Sub retail-store-ar${Env}
+        Services:
+          -
+            ClientAliases:
+              -
+                DnsName: catalog
+                Port: 8080
+            PortName: catalog
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !GetAtt sgTask.GroupId
+          Subnets:
+            - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+
+  #Checkout Service
+  CheckoutTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: ecs 
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CWAgentConf${Env}'
+                Action:
+                  - "ssm:GetParameters"
+                  - "ssm:DescribeParameters"
+  CheckoutTaskDefinition:
+    Type:  AWS::ECS::TaskDefinition
+    Properties:
+      Volumes: 
+        - Name:  opentelemetry-auto-instrumentation-node
+      ExecutionRoleArn: !Ref CheckoutTaskExecutionRole
+      TaskRoleArn: !Ref CheckoutTaskExecutionRole
+      NetworkMode: awsvpc 
+      Cpu: 1024
+      Memory: 2048
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        -
+          Name: "checkout"
+          DependsOn:
+            - ContainerName: init
+              Condition: SUCCESS
+          MountPoints:
+            - SourceVolume: opentelemetry-auto-instrumentation-node
+              ContainerPath: /otel-auto-instrumentation-node
+              ReadOnly: false
+          PortMappings:
+            - ContainerPort: 8080
+              Name: checkout
+              AppProtocol: http
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/checkout${Env}:${Tag}"
+          Cpu: 0
+          MemoryReservation: 50
+          Essential: true
+          Environment:
+            - Name: OTEL_RESOURCE_ATTRIBUTES
+              Value: !Sub "service.name=checkout${Env},service.namespace=retail-store-ar,aws.log.group.names=${LogGroup}"
+            - Name: "ENDPOINTS_ORDERS"
+              Value: http://orders:8080
+            - Name: "REDIS_URL"
+              Value: !Sub "redis://${CheckoutEcCluster.RedisEndpoint.Address}:${CheckoutEcCluster.RedisEndpoint.Port}"
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_ENABLED
+              Value: true
+            - Name: OTEL_EXPORTER_OTLP_PROTOCOL
+              Value: http/protobuf
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_EXPORTER_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
+            - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              Value: http://localhost:4316/v1/traces
+            - Name: OTEL_TRACES_SAMPLER
+              Value: xray
+            - Name: OTEL_PROPAGATORS
+              Value: "xray"
+            - Name: NODE_OPTIONS
+              Value: "--require /otel-auto-instrumentation-node/autoinstrumentation.js"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs  
+        -
+          Name: ecs-cwagent
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cloudwatch-agent${Env}:latest'
+          Essential: true
+          Secrets: 
+            - Name: CW_CONFIG_CONTENT
+              ValueFrom: !Ref CWAgentConfSSM
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/ecs-cwagent
+              awslogs-create-group: true
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+        -
+          Name: init
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-node${Env}:v0.3.0'
+          Essential: false
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation-node
+              ContainerPath: /otel-auto-instrumentation-node
+              ReadOnly: false
+          Command: 
+            - cp
+            - -a
+            - /autoinstrumentation/.
+            - /otel-auto-instrumentation-node
+  CheckoutService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - OrdersService
+    Properties:
+      ServiceName: !Sub checkout${Env}
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Cluster:  !Ref EcsCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref CheckoutTaskDefinition
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !Sub retail-store-ar${Env}
+        Services:
+          -
+            ClientAliases:
+              -
+                DnsName: checkout
+                Port: 8080
+            PortName: checkout
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !GetAtt sgTask.GroupId
+          Subnets:
+            - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+
+  #UI Service
+  UiTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: 
+                - "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+        - PolicyName: ecs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+            - Effect: "Allow"
+              Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/CWAgentConf${Env}'
+              Action:
+                - "ssm:GetParameters"
+                - "ssm:DescribeParameters"
+  UiTaskDefinition:
+    DependsOn:
+      - CatalogService
+    Type:  AWS::ECS::TaskDefinition
+    Properties:
+      Volumes: 
+        - Name:  opentelemetry-auto-instrumentation
+      ExecutionRoleArn: !Ref UiTaskExecutionRole
+      TaskRoleArn: !Ref UiTaskExecutionRole
+      NetworkMode: awsvpc 
+      Cpu: 1024
+      Memory: 2048
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        -
+          Name: "ui"
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation
+              ContainerPath: /otel-auto-instrumentation
+              ReadOnly: false
+          PortMappings:
+            - ContainerPort: 8080
+              Name: ui
+              AppProtocol: http
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ui${Env}:${Tag}"
+          Cpu: 0
+          MemoryReservation: 50
+          Essential: true
+          Environment:
+            - Name: OTEL_RESOURCE_ATTRIBUTES
+              Value: !Sub "service.name=ui${Env},service.namespace=retail-store-ar,aws.log.group.names=${LogGroup}"
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_ENABLED
+              Value: true
+            - Name: OTEL_EXPORTER_OTLP_PROTOCOL
+              Value: http/protobuf
+            - Name: OTEL_AWS_APPLICATION_SIGNALS_EXPORTER_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
+            - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              Value: http://localhost:4316/v1/traces
+            - Name: OTEL_TRACES_SAMPLER
+              Value: xray
+            - Name: OTEL_PROPAGATORS
+              Value: "tracecontext,baggage,b3,xray"
+            - Name: JAVA_TOOL_OPTIONS
+              Value: " -javaagent:/otel-auto-instrumentation/javaagent.jar" 
+            - Name: "ENDPOINTS_CATALOG"
+              Value: http://catalog:8080
+            - Name: "ENDPOINTS_CARTS"
+              Value: http://carts:8080
+            - Name: "ENDPOINTS_CHECKOUT"
+              Value: http://checkout:8080
+            - Name: "ENDPOINTS_ORDERS"
+              Value: http://orders:8080
+            - Name: "ENDPOINTS_ASSETS"
+              Value: http://assets:8080   
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs  
+        -
+          Name: ecs-cwagent
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cloudwatch-agent${Env}:latest'
+          Essential: true
+          Secrets: 
+            - Name: CW_CONFIG_CONTENT
+              ValueFrom: !Ref CWAgentConfSSM
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/ecs-cwagent
+              awslogs-create-group: true
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+        -
+          Name: init
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v1.32.5'
+          Essential: false
+          MountPoints: 
+            - SourceVolume: opentelemetry-auto-instrumentation
+              ContainerPath: /otel-auto-instrumentation
+              ReadOnly: false
+          Command: 
+            - cp
+            - /javaagent.jar
+            - /otel-auto-instrumentation/javaagent.jar
+  UiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - CartsService
+      - OrdersService
+      - AssetsService
+      - CatalogService
+      - CheckoutService
+    Properties:
+      ServiceName: !Sub ui${Env}
+      LoadBalancers:
+        - TargetGroupArn: !Ref AlbTargetGroup
+          ContainerName: ui 
+          ContainerPort: 8080
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE_SPOT
+          Weight: 1
+      Cluster:  !Ref EcsCluster
+      DesiredCount: 2
+      TaskDefinition: !Ref UiTaskDefinition
+      ServiceConnectConfiguration:
+        Enabled: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref LogGroup
+            awslogs-region: !Sub ${AWS::Region}
+            awslogs-stream-prefix: ecs  
+        Namespace: !Sub retail-store-ar${Env}
+        Services:
+          -
+            ClientAliases:
+              -
+                DnsName: ui
+                Port: 8080
+            PortName: ui
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: 
+            - !GetAtt sgTask.GroupId
+          Subnets:
+            - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+            - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+
+#Secrets
+  AlbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub Alb-${AWS::Region}${Env}
+      Description: "Alb Info"
+      KmsKeyId: !Ref KmsKey
+      SecretString: !Sub "{\"DnsName\":\"${Alb.DNSName}\",\"HostedZoneId\":\"${Alb.CanonicalHostedZoneID}\"}"
+      ReplicaRegions:
+        - Region: !If [isPrimary, us-west-2, us-east-1]
+
+  EcsClusterArnSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'mr-app/ecs-cluster-arn-${AWS::Region}${Env}'
+      SecretString: !GetAtt EcsCluster.Arn
+      KmsKeyId: !Ref KmsKey
+      ReplicaRegions:
+        - Region: !If [isPrimary, !Ref StandbyRegion, !Ref PrimaryRegion]
+
+  OrdersCreatedMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: !Sub 'Orders-Created-${AWS::Region}'
+      FilterPattern: 'c.a.s.o.s.OrderService                    Created Order'
+      LogGroupName: !Ref LogGroup
+      MetricTransformations:
+        - MetricValue: "1"
+          MetricNamespace: "ecommerce"
+          MetricName: !Sub 'OrdersCreated${Env}'
+
+  # Auto Scaling - both regions scale based on CPU utilization
+  CartsScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub
+        - 'service/${ClusterName}/${ServiceName}'
+        - ClusterName: !Select [1, !Split ["/", !GetAtt EcsCluster.Arn]]
+          ServiceName: !GetAtt CartsService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  CartsScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'carts-scaling${Env}'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref CartsScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  OrdersScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub
+        - 'service/${ClusterName}/${ServiceName}'
+        - ClusterName: !Select [1, !Split ["/", !GetAtt EcsCluster.Arn]]
+          ServiceName: !GetAtt OrdersService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  OrdersScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'orders-scaling${Env}'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref OrdersScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  AssetsScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub
+        - 'service/${ClusterName}/${ServiceName}'
+        - ClusterName: !Select [1, !Split ["/", !GetAtt EcsCluster.Arn]]
+          ServiceName: !GetAtt AssetsService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  AssetsScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'assets-scaling${Env}'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AssetsScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  CatalogScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub
+        - 'service/${ClusterName}/${ServiceName}'
+        - ClusterName: !Select [1, !Split ["/", !GetAtt EcsCluster.Arn]]
+          ServiceName: !GetAtt CatalogService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  CatalogScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'catalog-scaling${Env}'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref CatalogScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  CheckoutScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub
+        - 'service/${ClusterName}/${ServiceName}'
+        - ClusterName: !Select [1, !Split ["/", !GetAtt EcsCluster.Arn]]
+          ServiceName: !GetAtt CheckoutService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  CheckoutScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'checkout-scaling${Env}'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref CheckoutScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60
+
+  UiScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 2
+      ResourceId: !Sub
+        - 'service/${ClusterName}/${ServiceName}'
+        - ClusterName: !Select [1, !Split ["/", !GetAtt EcsCluster.Arn]]
+          ServiceName: !GetAtt UiService.Name
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  UiScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub 'ui-scaling${Env}'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref UiScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 70
+        ScaleInCooldown: 300
+        ScaleOutCooldown: 60

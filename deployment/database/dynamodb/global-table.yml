@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: 'DDB Global Resources Stack'
+Transform:
+  - AWS::LanguageExtensions
+Parameters:
+  NamingPrefix:
+    Type: String
+    Description: Enter the Naming Prefix for resources created
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  SecondaryRegion:
+    Type: String
+    Description: Enter the Secondary Region
+    Default: "us-west-2"
+  WitnessRegion:
+    Type: String
+    Description: Enter the Witness Region for MRSC quorum
+    Default: "us-east-2"
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: KmsKey
+    Description: CMK Id
+
+Resources:
+  DDBGlobalTable:
+    Type: AWS::DynamoDB::GlobalTable
+    Properties:
+      TableName: !Sub '${NamingPrefix}Table${Env}'
+      BillingMode: PAY_PER_REQUEST
+      MultiRegionConsistency: STRONG
+      AttributeDefinitions:
+        - AttributeName: "customerId"
+          AttributeType: "S"
+        - AttributeName: "itemId"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "customerId"
+          KeyType: "HASH"
+        - AttributeName: "itemId"
+          KeyType: "RANGE"
+      Replicas:
+        - Region: !Ref PrimaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+          Tags:
+            - Key: ChaosAllowed
+              Value: True
+        - Region: !Ref SecondaryRegion
+          PointInTimeRecoverySpecification:
+            PointInTimeRecoveryEnabled: true
+          Tags:
+            - Key: ChaosAllowed
+              Value: True
+      GlobalTableWitnesses:
+        - Region: !Ref WitnessRegion
+      SSESpecification:
+        SSEEnabled: true
+  DDBGlobalTableSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${NamingPrefix}Table${Env}Secret'
+      Description: "DDB Global Table"
+      KmsKeyId: !Ref KmsKey
+      SecretString: !Ref DDBGlobalTable
+      ReplicaRegions:
+        - Region: !Ref SecondaryRegion

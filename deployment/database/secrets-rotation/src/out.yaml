@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Solution that sets up Secrets Rotation for DB Credentials of Aurora MySql
+  database
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  CatalogDBCredentialsSecretId:
+    Type: String
+    Description: CatalogDB Credentials SecretId to enable Rotation
+Resources:
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId:
+        Fn::Sub: '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: Lambda function access to aurora mysql databases
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Sub: secrets-rotation-aurora-mysql-security-group${Env}
+      SecurityGroupEgress:
+      - DestinationSecurityGroupId:
+          Fn::Sub: '{{resolve:ssm:catalog-aurora-mysql-sg-${AWS::Region}${Env}}}'
+        Description: Allow all egress to MySQL Port 3306
+        IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+      - DestinationSecurityGroupId:
+          Fn::Sub: '{{resolve:ssm:VPCEndpointSecretsManagerSGId${Env}}}'
+        Description: Allow VPC Endpoint Access
+        IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+      - DestinationSecurityGroupId:
+          Fn::Sub: '{{resolve:ssm:VPCEndpointLogsSGId${Env}}}'
+        Description: Allow VPC Endpoint Access for CloudWatch Logs
+        IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+  CatalogAuroraMySqlComputeSecurityGroupInboundRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic on MySql Port
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId:
+        Ref: LambdaSecurityGroup
+      GroupId:
+        Fn::Sub: '{{resolve:ssm:catalog-aurora-mysql-sg-${AWS::Region}${Env}}}'
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: rotate-secrets.lambda_handler
+      CodeUri: s3://basevpc-canarybucket-30rr5itdxjvw/b12f1642832f97fa1e539ea9c3e03294
+      Runtime: python3.12
+      Architectures:
+      - x86_64
+      EphemeralStorage:
+        Size: 512
+      Timeout: 600
+      ReservedConcurrentExecutions: 5
+      PackageType: Zip
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: LambdaSecurityGroup
+        SubnetIds:
+        - Fn::Sub: '{{resolve:ssm:Subnet1${Env}}}'
+        - Fn::Sub: '{{resolve:ssm:Subnet2${Env}}}'
+        - Fn::Sub: '{{resolve:ssm:Subnet3${Env}}}'
+        Ipv6AllowedForDualStack: false
+      Layers:
+      - Ref: libs
+      Policies:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      - Statement:
+        - Effect: Allow
+          Action:
+          - secretsmanager:DescribeSecret
+          - secretsmanager:GetSecretValue
+          - secretsmanager:PutSecretValue
+          - secretsmanager:UpdateSecretVersionStage
+          Resource: '*'
+        - Effect: Allow
+          Action:
+          - secretsmanager:GetRandomPassword
+          Resource: '*'
+  libs:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: secrets-rotation-python-function-lib
+      Description: Dependencies for the secrets-rotation-python function.
+      ContentUri: s3://basevpc-canarybucket-30rr5itdxjvw/9b59f33d12118cdcc96b7950fa32c3e2
+      CompatibleRuntimes:
+      - python3.12
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: LambdaFunction
+    Properties:
+      FunctionName:
+        Ref: LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: secretsmanager.amazonaws.com
+  CatalogDBCredentialsSecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn:
+    - LambdaInvokePermission
+    Properties:
+      SecretId:
+        Ref: CatalogDBCredentialsSecretId
+      RotationLambdaARN:
+        Fn::GetAtt:
+        - LambdaFunction
+        - Arn
+      RotationRules:
+        AutomaticallyAfterDays: 90
+  VPCEndpointSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::Sub: '{{resolve:ssm:VPCEndpointSecretsManagerSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId:
+        Ref: LambdaSecurityGroup
+  VPCEndpointLogsRotationLambdaSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::Sub: '{{resolve:ssm:VPCEndpointLogsSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - LambdaSecurityGroup
+        - GroupId
+Outputs:
+  LambdaFunction:
+    Value:
+      Ref: LambdaFunction

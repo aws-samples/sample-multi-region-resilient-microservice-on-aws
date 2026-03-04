@@ -1,0 +1,1650 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Canaries"
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  RemoteRegion:
+    Type: String
+    Description: The alternate AWS Region...not this one that the stack is in
+  PrimaryOnly:
+    Type: String
+    Default: false
+    
+Conditions:
+  notPrimaryOnly: !Not 
+    - !Equals
+      - !Ref PrimaryOnly
+      - true
+
+Resources:
+  # Canaries
+  localSyntheticsCanaryHome:
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub lcl-rgnl-home${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              status = response.status
+              conn.close()
+              return status
+          def main():
+              url1 = "http://{{resolve:secretsmanager:Alb-${AWS::Region}${Env}:SecretString:DnsName}}/home"
+              method1 = 'GET'
+              postData1 = ""
+              headers1 = {}
+              verify_request(method1, url1, None, headers1)
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  localSyntheticsCanaryCart:
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub lcl-rgnl-cart${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              resp_headers = dict(response.headers)
+              conn.close()
+              return resp_headers
+          def main():
+              import uuid
+              base = "http://{{resolve:secretsmanager:Alb-${AWS::Region}${Env}:SecretString:DnsName}}"
+              body = "productId=6d62d909-f957-430e-8689-b5129c0bb75e"
+              new_session = "SESSIONID=" + str(uuid.uuid4())
+              post_hdrs = {"Content-Type": "application/x-www-form-urlencoded", "Cookie": new_session}
+              cart_hdrs = verify_request('POST', f"{base}/cart", body, post_hdrs, expected_status=303)
+              cookie = cart_hdrs.get("set-cookie", new_session).split(";")[0]
+              post_hdrs["Cookie"] = cookie
+              verify_request('GET', f"{base}/cart", None, {"Cookie": cookie})
+              verify_request('POST', f"{base}/cart/remove", body, post_hdrs, expected_status=303)
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub 's3://{{resolve:ssm:canaryBucketName${Env}}}'
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  localSyntheticsCanaryCatalog:
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub lcl-rgnl-catalog${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              status = response.status
+              conn.close()
+              return status
+          def main():
+              base = "http://{{resolve:secretsmanager:Alb-${AWS::Region}${Env}:SecretString:DnsName}}"
+              verify_request('GET', f"{base}/catalog", None, {})
+              verify_request('GET', f"{base}/catalog/6d62d909-f957-430e-8689-b5129c0bb75e", None, {})
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  localSyntheticsCanaryOrders:
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub lcl-rgnl-orders${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              resp_headers = dict(response.headers)
+              conn.close()
+              return resp_headers
+          def main():
+              base = "http://{{resolve:secretsmanager:Alb-${AWS::Region}${Env}:SecretString:DnsName}}"
+              form_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+              cart_headers = verify_request('POST', f"{base}/cart", "productId=a0a4f044-b040-410d-8ead-4de0446aec7e", {**form_headers}, expected_status=303)
+              cookie = cart_headers.get("set-cookie", "").split(";")[0]
+              session_headers = {**form_headers, "Cookie": cookie}
+              verify_request('GET', f"{base}/checkout", None, {"Cookie": cookie})
+              verify_request('POST', f"{base}/checkout", "firstName=Canary&lastName=Test&email=canary@test.local&address1=123+Test+St&city=Anytown&state=WA&zip=98101", {**session_headers})
+              verify_request('POST', f"{base}/checkout/delivery", "token=priority-mail", {**session_headers})
+              verify_request('POST', f"{base}/checkout/payment", "", {**session_headers})
+              verify_request('POST', f"{base}/checkout/confirm", "", {**session_headers})
+              verify_request('GET', f"{base}/orders", None, {"Cookie": cookie})
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 30
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  remoteSyntheticsCanaryHome:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub rmt-rgnl-home${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              status = response.status
+              conn.close()
+              return status
+          def main():
+              url1 = "http://{{resolve:secretsmanager:Alb-${RemoteRegion}${Env}:SecretString:DnsName}}/home"
+              method1 = 'GET'
+              postData1 = ""
+              headers1 = {}
+              verify_request(method1, url1, None, headers1)
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  remoteSyntheticsCanaryCart:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub rmt-rgnl-cart${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              resp_headers = dict(response.headers)
+              conn.close()
+              return resp_headers
+          def main():
+              import uuid
+              base = "http://{{resolve:secretsmanager:Alb-${RemoteRegion}${Env}:SecretString:DnsName}}"
+              body = "productId=6d62d909-f957-430e-8689-b5129c0bb75e"
+              new_session = "SESSIONID=" + str(uuid.uuid4())
+              post_hdrs = {"Content-Type": "application/x-www-form-urlencoded", "Cookie": new_session}
+              cart_hdrs = verify_request('POST', f"{base}/cart", body, post_hdrs, expected_status=303)
+              cookie = cart_hdrs.get("set-cookie", new_session).split(";")[0]
+              post_hdrs["Cookie"] = cookie
+              verify_request('GET', f"{base}/cart", None, {"Cookie": cookie})
+              verify_request('POST', f"{base}/cart/remove", body, post_hdrs, expected_status=303)
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub 's3://{{resolve:ssm:canaryBucketName${Env}}}'
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  remoteSyntheticsCanaryCatalog:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub rmt-rgnl-catalog${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              status = response.status
+              conn.close()
+              return status
+          def main():
+              base = "http://{{resolve:secretsmanager:Alb-${RemoteRegion}${Env}:SecretString:DnsName}}"
+              verify_request('GET', f"{base}/catalog", None, {})
+              verify_request('GET', f"{base}/catalog/6d62d909-f957-430e-8689-b5129c0bb75e", None, {})
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  remoteSyntheticsCanaryOrders:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub rmt-rgnl-orders${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              resp_headers = dict(response.headers)
+              conn.close()
+              return resp_headers
+          def main():
+              base = "http://{{resolve:secretsmanager:Alb-${RemoteRegion}${Env}:SecretString:DnsName}}"
+              form_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+              cart_hdrs = verify_request('POST', f"{base}/cart", "productId=a0a4f044-b040-410d-8ead-4de0446aec7e", {**form_headers}, expected_status=303)
+              cookie = cart_hdrs.get("set-cookie", "").split(";")[0]
+              sh = {**form_headers, "Cookie": cookie}
+              verify_request('GET', f"{base}/checkout", None, {"Cookie": cookie})
+              verify_request('POST', f"{base}/checkout", "firstName=Canary&lastName=Test&email=canary@test.local&address1=123+Test+St&city=Anytown&state=WA&zip=98101", {**sh})
+              verify_request('POST', f"{base}/checkout/delivery", "token=priority-mail", {**sh})
+              verify_request('POST', f"{base}/checkout/payment", "", {**sh})
+              verify_request('POST', f"{base}/checkout/confirm", "", {**sh})
+              verify_request('GET', f"{base}/orders", None, {"Cookie": cookie})
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 30
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  globalSyntheticsCanaryHome:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub global-home${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              status = response.status
+              conn.close()
+              return status
+          def main():
+              url1 = "http://{{resolve:secretsmanager:DNSRecordSecret${Env}}}/home"
+              method1 = 'GET'
+              postData1 = ""
+              headers1 = {}
+              verify_request(method1, url1, None, headers1)
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  globalSyntheticsCanaryCart:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub global-cart${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:DNSRecordSecret${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              resp_headers = dict(response.headers)
+              conn.close()
+              return resp_headers
+          def main():
+              import uuid
+              base = "http://{{resolve:secretsmanager:DNSRecordSecret${Env}}}"
+              body = "productId=6d62d909-f957-430e-8689-b5129c0bb75e"
+              new_session = "SESSIONID=" + str(uuid.uuid4())
+              post_hdrs = {"Content-Type": "application/x-www-form-urlencoded", "Cookie": new_session}
+              cart_hdrs = verify_request('POST', f"{base}/cart", body, post_hdrs, expected_status=303)
+              cookie = cart_hdrs.get("set-cookie", new_session).split(";")[0]
+              post_hdrs["Cookie"] = cookie
+              verify_request('GET', f"{base}/cart", None, {"Cookie": cookie})
+              verify_request('POST', f"{base}/cart/remove", body, post_hdrs, expected_status=303)
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub 's3://{{resolve:ssm:canaryBucketName${Env}}}'
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  globalSyntheticsCanaryCatalog:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub global-catalog${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              status = response.status
+              conn.close()
+              return status
+          def main():
+              base = "http://{{resolve:secretsmanager:DNSRecordSecret${Env}}}"
+              verify_request('GET', f"{base}/catalog", None, {})
+              verify_request('GET', f"{base}/catalog/6d62d909-f957-430e-8689-b5129c0bb75e", None, {})
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 20
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  globalSyntheticsCanaryOrders:
+    Condition: notPrimaryOnly
+    Type: 'AWS::Synthetics::Canary'
+    Properties:
+      Name: !Sub global-orders${Env}
+      ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
+      VPCConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      Code:
+        Handler: pageLoadBlueprint.handler
+        Script: !Sub |
+          import json
+          import http.client
+          from selenium.webdriver.common.by import By
+          import urllib.parse
+          from aws_synthetics.selenium import synthetics_webdriver as syn_webdriver
+          from aws_synthetics.common import synthetics_logger as logger
+          
+          def verify_request(method, url, post_data=None, headers={}, expected_status=None):
+              parsed_url = urllib.parse.urlparse(url)
+              user_agent = str(syn_webdriver.get_canary_user_agent_string())
+              if "User-Agent" in headers:
+                  headers["User-Agent"] = f"{user_agent} {headers['User-Agent']}"
+              else:
+                  headers["User-Agent"] = user_agent
+              logger.info(f"Making request with Method: '{method}' URL: {url}: Data: {json.dumps(post_data)} Headers: {json.dumps(headers)}")
+              if parsed_url.scheme == "https":
+                  conn = http.client.HTTPSConnection(parsed_url.hostname, parsed_url.port)
+              else:
+                  conn = http.client.HTTPConnection(parsed_url.hostname, parsed_url.port)
+              conn.request(method, url, post_data, headers)
+              response = conn.getresponse()
+              logger.info(f"Status Code: {response.status}")
+              logger.info(f"Response Headers: {json.dumps(response.headers.as_string())}")
+
+              if expected_status is not None:
+                  status_ok = response.status == expected_status
+              else:
+                  status_ok = 200 <= response.status <= 299
+
+              if not status_ok:
+                  try:
+                      logger.error(f"Response: {response.read().decode()}")
+                  finally:
+                      if response.reason:
+                          conn.close()
+                          raise Exception(f"Failed: {response.reason}")
+                      else:
+                          conn.close()
+                          raise Exception(f"Failed with status code: {response.status}")
+              logger.info(f"Response: {response.read().decode()}")
+              logger.info("HTTP request successfully executed.")
+              resp_headers = dict(response.headers)
+              conn.close()
+              return resp_headers
+          def main():
+              base = "http://{{resolve:secretsmanager:DNSRecordSecret${Env}}}"
+              form_headers = {"Content-Type": "application/x-www-form-urlencoded"}
+              cart_hdrs = verify_request('POST', f"{base}/cart", "productId=a0a4f044-b040-410d-8ead-4de0446aec7e", {**form_headers}, expected_status=303)
+              cookie = cart_hdrs.get("set-cookie", "").split(";")[0]
+              sh = {**form_headers, "Cookie": cookie}
+              verify_request('GET', f"{base}/checkout", None, {"Cookie": cookie})
+              verify_request('POST', f"{base}/checkout", "firstName=Canary&lastName=Test&email=canary@test.local&address1=123+Test+St&city=Anytown&state=WA&zip=98101", {**sh})
+              verify_request('POST', f"{base}/checkout/delivery", "token=priority-mail", {**sh})
+              verify_request('POST', f"{base}/checkout/payment", "", {**sh})
+              verify_request('POST', f"{base}/checkout/confirm", "", {**sh})
+              verify_request('GET', f"{base}/orders", None, {"Cookie": cookie})
+              logger.info("Canary successfully executed.")
+          def handler(event, context):
+              logger.info("Selenium Python API canary.")
+              main()
+      ArtifactS3Location: !Sub s3://{{resolve:ssm:canaryBucketName${Env}}}
+      RuntimeVersion: syn-python-selenium-8.0
+      Schedule:
+        Expression: 'rate(1 minute)'
+        DurationInSeconds: 0
+      RunConfig:
+        TimeoutInSeconds: 30
+      FailureRetentionPeriod: 1
+      SuccessRetentionPeriod: 1
+      StartCanaryAfterCreation: true
+
+  SyntheticsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub Synthetics-HealthCheck-Dashboard-${AWS::Region}${Env}
+      DashboardBody: !Sub '{
+    "widgets": [
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", { "label": "Canary count" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "singleValue",
+                "title": "Canaries",
+                "stat": "SampleCount",
+                "sparkline": true,
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 4,
+            "y": 0,
+            "width": 4,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", { "label": "Average duration" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "singleValue",
+                "title": "Duration",
+                "sparkline": true,
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 8,
+            "y": 0,
+            "width": 4,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", { "label": "Success percentage" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "singleValue",
+                "title": "SuccessPercent",
+                "sparkline": true,
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 0,
+            "width": 4,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Failed", { "label": "Failed count", "stat": "Sum" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "singleValue",
+                "title": "Failed",
+                "sparkline": true,
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 16,
+            "y": 0,
+            "width": 4,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "4xx", { "label": "Errors count" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "singleValue",
+                "title": "Errors (4xx)",
+                "stat": "Sum",
+                "sparkline": true,
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 20,
+            "y": 0,
+            "width": 4,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "5xx", { "label": "Fault count" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "singleValue",
+                "title": "Faults (5xx)",
+                "stat": "Sum",
+                "sparkline": true,
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 4,
+            "width": 12,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ { "expression": "m2 - m1", "label": "Passed", "id": "e1" } ],
+                    [ "CloudWatchSynthetics", "SuccessPercent", { "id": "m2", "label": "SuccessPercent", "visible": false } ],
+                    [ ".", "Failed", { "id": "m1", "label": "Failed", "color": "#d62728", "stat": "Sum" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "view": "pie",
+                "title": "Status",
+                "stat": "SampleCount",
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 4,
+            "width": 12,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", { "label": "Passed (%)" } ],
+                    [ ".", "Failed", { "color": "#d62728", "stat": "SampleCount", "yAxis": "right", "label": "Failed (count)" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "title": "Canary run",
+                "yAxis": {
+                    "left": {
+                        "max": 100,
+                        "min": 0
+                    }
+                },
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 8,
+            "width": 24,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", { "label": "p50", "stat": "p50" } ],
+                    [ "...", { "label": "p90" } ],
+                    [ "...", { "stat": "p95", "label": "p95" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "title": "Duration",
+                "stat": "p90",
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 12,
+            "width": 8,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", { "id": "m1" } ],
+                    [ { "expression": "ANOMALY_DETECTION_BAND(m1,2)", "label": "Duration (expected)", "color": "#95A5A6", "id": "e1" } ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "title": "Canary duration",
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 8,
+            "y": 12,
+            "width": 8,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent" ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "yAxis": {
+                    "left": {
+                        "max": 100,
+                        "min": 0
+                    }
+                },
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC",
+                "title": ""
+            }
+        },
+        {
+            "type": "metric",
+            "x": 16,
+            "y": 12,
+            "width": 8,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Failed" ]
+                ],
+                "legend": {
+                    "position": "bottom"
+                },
+                "title": "Failed canary runs",
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 0,
+            "y": 16,
+            "width": 12,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", "CanaryName", "lcl-rgnl-cart", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "lcl-rgnl-home", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "global-catalog", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "global-cart", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "global-orders", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "lcl-rgnl-orders", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "global-home", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "rmt-rgnl-orders", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "rmt-rgnl-home", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "rmt-rgnl-cart", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "rmt-rgnl-catalog", { "period": 300, "stat": "Maximum" } ],
+                    [ "...", "lcl-rgnl-catalog", { "period": 300, "stat": "Maximum" } ]
+                ],
+                "legend": {
+                    "position": "right"
+                },
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC",
+                "title": "Duration: Maximum"
+            }
+        },
+        {
+            "type": "metric",
+            "x": 12,
+            "y": 16,
+            "width": 12,
+            "height": 4,
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "lcl-rgnl-cart", { "period": 300, "stat": "Average" } ],
+                    [ "...", "lcl-rgnl-home", { "period": 300, "stat": "Average" } ],
+                    [ "...", "global-catalog", { "period": 300, "stat": "Average" } ],
+                    [ "...", "global-cart", { "period": 300, "stat": "Average" } ],
+                    [ "...", "global-orders", { "period": 300, "stat": "Average" } ],
+                    [ "...", "lcl-rgnl-orders", { "period": 300, "stat": "Average" } ],
+                    [ "...", "global-home", { "period": 300, "stat": "Average" } ],
+                    [ "...", "rmt-rgnl-orders", { "period": 300, "stat": "Average" } ],
+                    [ "...", "rmt-rgnl-home", { "period": 300, "stat": "Average" } ],
+                    [ "...", "rmt-rgnl-cart", { "period": 300, "stat": "Average" } ],
+                    [ "...", "rmt-rgnl-catalog", { "period": 300, "stat": "Average" } ],
+                    [ "...", "lcl-rgnl-catalog", { "period": 300, "stat": "Average" } ]
+                ],
+                "legend": {
+                    "position": "right"
+                },
+                "yAxis": {
+                    "left": {
+                        "max": 100,
+                        "min": 0
+                    }
+                },
+                "region": "${AWS::Region}",
+                "liveData": false,
+                "timezone": "UTC",
+                "title": "SuccessPercent: Average"
+            }
+        }
+    ]
+}'
+
+  CanariesDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub Canaries-Dashboard-${AWS::Region}${Env}
+      DashboardBody: !Sub '{
+    "widgets": [
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-cart" ],
+                    [ "...", "lcl-rgnl-cart" ],
+                    [ "...", "rmt-rgnl-cart" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Cart - Success - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 6,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", "CanaryName", "global-cart" ],
+                    [ "...", "lcl-rgnl-cart" ],
+                    [ "...", "rmt-rgnl-cart" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 60,
+                "title": "Cart - Duration - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 0,
+            "x": 12,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Failed", "CanaryName", "global-cart", { "region": "${AWS::Region}" } ],
+                    [ "CloudWatchSynthetics", "Failed", "CanaryName", "lcl-rgnl-cart", { "region": "${AWS::Region}" } ],
+                    [ "CloudWatchSynthetics", "Failed", "CanaryName", "rmt-rgnl-cart", { "region": "${AWS::Region}" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Cart - Failures - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 6,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-catalog" ],
+                    [ "...", "lcl-rgnl-catalog" ],
+                    [ "...", "rmt-rgnl-catalog" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Catalog - Success - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 6,
+            "x": 6,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", "CanaryName", "global-catalog" ],
+                    [ "...", "lcl-rgnl-catalog" ],
+                    [ "...", "rmt-rgnl-catalog" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 60,
+                "title": "Catalog - Duration - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 6,
+            "x": 12,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Failed", "CanaryName", "global-catalog", { "region": "${AWS::Region}", "label": "global-catalog" } ],
+                    [ "...", "lcl-rgnl-catalog", { "region": "${AWS::Region}", "label": "lcl-rgnl-catalog" } ],
+                    [ "...", "rmt-rgnl-catalog", { "region": "${AWS::Region}", "label": "rmt-rgnl-catalog" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Catalog - Failures - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 12,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-home" ],
+                    [ "...", "lcl-rgnl-home" ],
+                    [ "...", "rmt-rgnl-home" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Home - Success - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 12,
+            "x": 6,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", "CanaryName", "global-home" ],
+                    [ "...", "lcl-rgnl-home" ],
+                    [ "...", "rmt-rgnl-home" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 60,
+                "title": "Home - Duration - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 12,
+            "x": 12,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Failed", "CanaryName", "global-home", { "region": "${AWS::Region}", "label": "global-home" } ],
+                    [ "...", "lcl-rgnl-home", { "region": "${AWS::Region}", "label": "lcl-rgnl-home" } ],
+                    [ "...", "rmt-rgnl-home", { "region": "${AWS::Region}", "label": "rmt-rgnl-home" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Home - Failures - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 18,
+            "x": 0,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "SuccessPercent", "CanaryName", "global-orders", { "region": "${AWS::Region}" } ],
+                    [ "...", "lcl-rgnl-orders", { "region": "${AWS::Region}" } ],
+                    [ "...", "rmt-rgnl-orders", { "region": "${AWS::Region}" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Orders - Success - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 18,
+            "x": 6,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Duration", "CanaryName", "global-orders", { "region": "${AWS::Region}" } ],
+                    [ "...", "lcl-rgnl-orders", { "region": "${AWS::Region}" } ],
+                    [ "...", "rmt-rgnl-orders", { "region": "${AWS::Region}" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 60,
+                "title": "Orders - Duration - ${AWS::Region}"
+            }
+        },
+        {
+            "height": 6,
+            "width": 6,
+            "y": 18,
+            "x": 12,
+            "type": "metric",
+            "properties": {
+                "metrics": [
+                    [ "CloudWatchSynthetics", "Failed", "CanaryName", "global-orders", { "region": "${AWS::Region}", "label": "global-orders" } ],
+                    [ "...", "lcl-rgnl-orders", { "region": "${AWS::Region}", "label": "lcl-rgnl-orders" } ],
+                    [ "...", "rmt-rgnl-orders", { "region": "${AWS::Region}", "label": "rmt-rgnl-orders" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "stat": "p99",
+                "period": 300,
+                "title": "Orders - Failures - ${AWS::Region}"
+            }
+        }
+    ]
+}'
+  VPCEndpointLogsCanarySecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointLogsSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+  VPCEndpointMonitoringCanarySecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointMonitoringSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+  VPCEndpointXRayCanarySecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointXRaySGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+  VPCEndpointSTSCanarySecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointSTSSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'

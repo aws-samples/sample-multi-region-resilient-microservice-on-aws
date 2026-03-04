@@ -1,0 +1,323 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS Aurora Global database standby region
+Mappings:
+  MinorUpdateMap:
+    'Yes':
+      value: 'true'
+    'No':
+      value: 'false'
+  EngineMap:
+    '5.7':
+      family: aurora-mysql5.7
+Parameters:
+  NamingPrefix:
+    Type: String
+    Description: Enter the Naming Prefix for resources created
+  Env:
+    Type: String
+    Description: Enter the environment suffix for the resources
+  MachineType:
+    # global databases support either db.r4 or db.r5
+    Default: db.serverless
+    Type: String
+    AllowedValues:
+      - db.r4.large
+      - db.r5.large
+      - db.serverless
+  DatabaseName:
+    Default: globalDatabase
+    Type: String
+  MinorVersionUpgrade:
+    Default: 'Yes'
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+  ClusterName:
+    Default: dbcluster-02
+    Type: String
+  GlobalClusterIdentifier:
+    Default: global-db-cluster
+    Type: String
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  StandbyRegion:
+    Type: String
+    Description: Enter the Standby Region
+    Default: "us-west-2"
+  DBSecretArn:
+    Type: String
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: KmsKey
+    Description: CMK Id 
+Conditions:
+  isPrimary: !Equals
+    - !Ref AWS::Region
+    - us-east-1
+  isOrders: !Equals
+    - !Ref NamingPrefix
+    - orders
+Resources:
+  AuroraMySqlComputeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: Access to aurora mysql database
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+      Tags:
+        - Key: Name
+          Value: aurora-mysql-security-group
+  AuroraMySqlSecurityGroupIdSSMParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub '${NamingPrefix}-aurora-mysql-sg-${AWS::Region}${Env}'
+      Value: !GetAtt AuroraMySqlComputeSecurityGroup.GroupId
+  DBStorageEncryptionKMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: Multi-Region Aurora Storage Encryption Key
+      MultiRegion: true
+      EnableKeyRotation: true
+      PendingWindowInDays: 10
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:ResourceAccount: !Sub ${AWS::AccountId}
+  DBHostSecret:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Type: String
+      Name: !Sub '${NamingPrefix}-${GlobalClusterIdentifier}-Hostname${Env}'
+      Description: "Secret that has the RDS-generated hostname for the database"
+      Value: !If [ isOrders, !Sub "jdbc:mariadb://${DBCluster.Endpoint.Address}:${DBCluster.Endpoint.Port}/orders" , !Sub "${DBCluster.Endpoint.Address}:${DBCluster.Endpoint.Port}"]
+  DBCredentialSecretArn:
+    Type: 'AWS::SSM::Parameter'
+    Properties:
+      Type: String
+      Name: !Sub '${NamingPrefix}-${GlobalClusterIdentifier}-CredentialSecretArn${Env}'
+      Description: !Sub 'The arn of the ${NamingPrefix} Secret'
+      Value: !Ref DBSecretArn
+  DBCluster:
+    DependsOn:
+      - SubnetGroup
+    Type: AWS::RDS::DBCluster
+    Properties:
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 1
+        MaxCapacity: 8
+      AutoMinorVersionUpgrade: true
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      DBClusterIdentifier: !Sub '${NamingPrefix}-${ClusterName}-${AWS::Region}${Env}'
+      DBSubnetGroupName: !Ref SubnetGroup
+      DeletionProtection: false
+      EnableCloudwatchLogsExports:
+        - audit
+        - error
+        - general
+        - slowquery
+      EnableIAMDatabaseAuthentication: true
+      Engine: aurora-mysql
+      EngineVersion: 8.0.mysql_aurora.3.04.0
+      GlobalClusterIdentifier: !Sub '${NamingPrefix}-${GlobalClusterIdentifier}${Env}'
+      KmsKeyId: !Ref DBStorageEncryptionKMSKey
+      Port: '3306'
+      StorageEncrypted: true
+      VpcSecurityGroupIds:
+        - !GetAtt AuroraMySqlComputeSecurityGroup.GroupId
+      Tags:
+        - Key: "NamingPrefix"
+          Value: !Ref NamingPrefix
+  DBInstance1:
+    DependsOn:
+      - DBCluster
+      - SubnetGroup
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: !FindInMap
+        - MinorUpdateMap
+        - !Ref MinorVersionUpgrade
+        - value
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceIdentifier: !Sub '${NamingPrefix}-${ClusterName}${Env}-1'
+      DBInstanceClass: !Ref MachineType
+      DBSubnetGroupName: !Ref SubnetGroup
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+      MonitoringRoleArn: !Sub '{{resolve:secretsmanager:mr-app/${NamingPrefix}-${GlobalClusterIdentifier}-MonitoringIAMRoleArn${Env}}}'
+      MonitoringInterval: 1
+  DBInstance2:
+    DependsOn:
+      - DBCluster
+      - SubnetGroup
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: !FindInMap
+        - MinorUpdateMap
+        - !Ref MinorVersionUpgrade
+        - value
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceIdentifier: !Sub '${NamingPrefix}-${ClusterName}${Env}-2'
+      DBInstanceClass: !Ref MachineType
+      DBSubnetGroupName: !Ref SubnetGroup
+      Engine: aurora-mysql      
+      PubliclyAccessible: false
+      MonitoringRoleArn: !Sub '{{resolve:secretsmanager:mr-app/${NamingPrefix}-${GlobalClusterIdentifier}-MonitoringIAMRoleArn${Env}}}'
+      MonitoringInterval: 1
+  SubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      SubnetIds:
+        - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+        - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+        - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+      DBSubnetGroupDescription: !Sub ${DatabaseName}-subnet-group
+  LambdaExecutionRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Effect: Allow
+                Resource: "arn:aws:logs:*:*:*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Sub ${AWS::AccountId}
+              - Action:
+                  - "rds:ModifyDBCluster"
+                Effect: Allow
+                Resource: "arn:aws:rds:*:*:cluster:*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Sub ${AWS::AccountId}
+            Version: "2012-10-17"
+          PolicyName: root
+    Type: "AWS::IAM::Role"
+  CustomBackedLambda:
+    DependsOn: DBCluster
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${NamingPrefix}-EnableWriteForwardingForDBCluster${Env}
+      Runtime: python3.13
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 90
+      Environment:
+        Variables:
+          DBClusterIdentifier: !Sub '${NamingPrefix}-${ClusterName}-${AWS::Region}${Env}'
+      Code:
+        ZipFile: |
+          import cfnresponse
+          import logging
+          import boto3
+          import os
+          # Init of the logging module
+          logger=logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              try:
+                rds = boto3.client('rds')
+                if event.get('RequestType') == 'Create':
+                    responseData = {}
+                    rds.modify_db_cluster(
+                        DBClusterIdentifier=os.environ['DBClusterIdentifier'],
+                        EnableGlobalWriteForwarding=True
+                    )
+                    responseData['message'] = 'Success'
+                    logger.info('Sending %s to cloudformation', responseData['message'])
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                elif event.get('RequestType') == 'Update':
+                    responseData = {}
+                    rds.modify_db_cluster(
+                        DBClusterIdentifier=os.environ['DBClusterIdentifier'],
+                        EnableGlobalWriteForwarding=True
+                    )
+                    responseData['message'] = 'Success'
+                    logger.info('Sending %s to cloudformation', responseData['message'])
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                else:
+                    logger.error('Unknown operation: %s', event.get('RequestType'))
+                    responseData = {}
+                    responseData['message'] = "Invalid operation"
+                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              except Exception as err:
+                responseData = {}
+                responseData['message'] = 'Failed'
+                logger.error(err)
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+      Description: FUnction to enable Global Write Forwarding
+
+  InvokeCustomLambda:
+    DependsOn: CustomBackedLambda
+    Type: Custom::InvokeCustomLambda
+    Properties:
+      ServiceToken: !GetAtt CustomBackedLambda.Arn
+
+  DBClusterArn:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'mr-app/${NamingPrefix}-${AWS::Region}-${GlobalClusterIdentifier}${Env}'
+      Description: !Sub 'DBCluster Arn for ${NamingPrefix}'
+      KmsKeyId: !Ref KmsKey
+      SecretString: !GetAtt DBCluster.DBClusterArn
+      ReplicaRegions:
+        - Region: us-east-1
+  
+  DBClusterEndpoint:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'mr-app/${NamingPrefix}-${AWS::Region}-${GlobalClusterIdentifier}-endpoint${Env}'
+      Description: !Sub 'DBCluster Endpoint for ${NamingPrefix}'
+      KmsKeyId: !Ref KmsKey
+      SecretString: !GetAtt DBCluster.Endpoint.Address
+      ReplicaRegions:
+        - Region: us-east-1
+  
+  AuroraStorageEncryptionKeyIdSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'mr-app/${NamingPrefix}-${AWS::Region}-${GlobalClusterIdentifier}-Snapshot-KeyArn${Env}'
+      Description: "KMS Key Id for Aurora Storage Encryption"
+      KmsKeyId: !Ref KmsKey
+      SecretString: !GetAtt DBStorageEncryptionKMSKey.Arn
+      ReplicaRegions:
+        - Region: us-east-1
+Outputs:
+  DBEndpoint:
+    Value: !GetAtt DBCluster.Endpoint.Address
+  DBPort:
+    Value: !GetAtt DBCluster.Endpoint.Port

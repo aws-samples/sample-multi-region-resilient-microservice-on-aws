@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  This template creates a single Windows server to be used as a browser to test the application
+
+Parameters:
+  Env:
+    Type: String
+    Default: '-dev'
+    Description: String to enable multiple deployments per AWS region
+  SubnetId:
+    Type: String 
+  VpcId:
+    Type: String
+  InstanceType:
+    Description: Amazon EC2 instance type
+    Type: String
+    Default: t3.small
+    ConstraintDescription: must be a valid EC2 instance type.
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: KmsKey
+    Description: CMK Id 
+
+Resources:
+  IamInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+        Path: "/"
+        AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+        MaxSessionDuration: 3600
+        ManagedPolicyArns: 
+          - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+          - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        Description: "SSM role for managed EC2 instances"
+        Policies:
+          - PolicyName: secretsManager
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: "Allow"
+                  Resource: !Ref WindowsPassword
+                  Action:
+                    - "secretsmanager:GetSecretValue"
+  IamInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+        Path: "/"
+        Roles: 
+          - !Ref IamInstanceRole
+  WindowsPassword:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub 'mr-app-windowspassword-${AWS::Region}${Env}'
+      Description: "Password for the Windows Administrator"
+      KmsKeyId: !Ref KmsKey
+      GenerateSecretString: 
+        PasswordLength: 15
+        ExcludePunctuation: true
+  WindowsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref IamInstanceProfile
+      SubnetId: !Ref SubnetId
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base}}'
+      InstanceType: !Ref 'InstanceType'
+      SecurityGroupIds:
+        - !GetAtt 'SecurityGroup.GroupId'
+      UserData: 
+        Fn::Base64: !Sub |
+          <powershell>
+          $Password = Get-SECSecretValue -SecretId "${WindowsPassword}" -Select SecretString
+          $SecPassword = convertto-securestring $Password -asplaintext -force
+          $UserAccount = Get-LocalUser -Name "Administrator"
+          $UserAccount | Set-LocalUser -Password $SecPassword
+          </powershell>
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref 'VpcId'
+      GroupDescription: OutboundOnly
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: 10.1.0.0/16
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  VPCEndpointSSMSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointSSMSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref SecurityGroup
+  VPCEndpointSecretsManagerSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Sub '{{resolve:ssm:VPCEndpointSecretsManagerSGId${Env}}}'
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref SecurityGroup

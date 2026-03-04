@@ -1,0 +1,706 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: 'Infrastructure'
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  NamingPrefix:
+    Type: String
+    Description: The prefix to be used for resources created by this template.
+    Default: mr-app
+  PrimaryRegion:
+    Type: String
+    Description: Enter the Primary Region
+    Default: "us-east-1"
+  StandbyRegion:
+    Type: String
+    Description: Enter the Standby Region
+    Default: "us-west-2"
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: KmsKey
+    Description: CMK Id
+  PrimaryOnly:
+    Type: String
+    Default: false
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      "VPCCidrBlock": 10.1.0.0/16
+      "PrivateCidrBlock1": 10.1.0.0/20
+      "PrivateCidrBlock2": 10.1.16.0/20
+      "PrivateCidrBlock3": 10.1.32.0/20
+      "AvailabilityZoneId1": use1-az1
+      "AvailabilityZoneId2": use1-az4
+      "AvailabilityZoneId3": use1-az6
+    us-west-2:
+      "VPCCidrBlock": 10.2.0.0/16
+      "PrivateCidrBlock1": 10.2.0.0/20
+      "PrivateCidrBlock2": 10.2.16.0/20
+      "PrivateCidrBlock3": 10.2.32.0/20
+      "AvailabilityZoneId1": usw2-az1
+      "AvailabilityZoneId2": usw2-az2
+      "AvailabilityZoneId3": usw2-az3
+
+Conditions:
+  isPrimary: !Equals
+    - !Ref AWS::Region
+    - us-east-1
+  isStandby: !Equals
+    - !Ref AWS::Region
+    - us-west-2
+  notPrimaryOnly: !Not
+    - !Equals
+      - !Ref PrimaryOnly
+      - true
+
+Resources:
+  #VPC
+  # Vpc:
+  #   Type: AWS::EC2::VPC
+  #   Properties: 
+  #     CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", "VPCCidrBlock"]
+  #     EnableDnsSupport: true
+  #     EnableDnsHostnames: true
+  prvRoutePeer:
+    Condition: notPrimaryOnly
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: !If [isPrimary, !FindInMap [RegionMap, !Ref StandbyRegion, "VPCCidrBlock"], !FindInMap [RegionMap, !Ref PrimaryRegion, "VPCCidrBlock"]]
+      VpcPeeringConnectionId: !Sub '{{resolve:secretsmanager:VpcPeerId${Env}}}'
+
+  FlowLogRole:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: "Wildcard logs resource permissions are required for VPC Flow Logs to dynamically create log groups and streams."
+            appliesTo:
+              - "Resource::arn:aws:logs:*:${AWS::AccountId}:*"
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: "Wildcard logs resource permissions are required for VPC Flow Logs to dynamically create log groups and streams."
+            appliesTo:
+              - "Resource::arn:aws:logs:*:${AWS::AccountId}:*"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: Allow
+            Principal:
+              Service:
+                - vpc-flow-logs.amazonaws.com
+        Version: "2012-10-17"
+      Path: /
+      Policies:
+        - PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:DescribeLogGroups"
+                  - "logs:DescribeLogStreams"
+                Resource: !Sub 'arn:aws:logs:*:${AWS::AccountId}:*'
+            Version: "2012-10-17"
+          PolicyName: flowlogspolicy
+    Type: "AWS::IAM::Role"
+  VpcFlowLogs:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      LogGroupName: VpcFlowLogs
+      ResourceId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      ResourceType: VPC
+      TrafficType: ALL
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId1]
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock1]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - Private
+        - Key: ChaosAllowed
+          Value: True
+  PrivateRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId2]
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock2]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - Private
+        - Key: ChaosAllowed
+          Value: True
+  PrivateRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId3]
+      CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock3]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Ref NamingPrefix
+              - Private
+        - Key: ChaosAllowed
+          Value: True
+  PrivateRouteTableAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet3
+  PrivateRouteTable:
+    Type:  AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+  
+#Ecr Repos
+  CheckoutRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'checkout${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  CatalogRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+          ScanOnPush: true
+      RepositoryName: !Sub 'catalog${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  CartsRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'carts${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  AssetsRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'assets${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  OrdersRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'orders${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  UIRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'ui${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  CWAgentRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'cloudwatch-agent${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  ADOTJavaRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'adot-autoinstrumentation-java${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  ADOTNodeRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'adot-autoinstrumentation-node${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+
+# Canary Security Group - In this stack since it take Lambda 20 mins to delete the ENIs it manages
+  canarySg:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: Canary - Egress Only
+      SecurityGroupEgress: 
+        - 
+          CidrIp: "0.0.0.0/0"
+          Description: "Allow all egress"
+          IpProtocol: "-1"
+
+#SSM Params
+  Subnet1Param:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub Subnet1${Env}
+      Value: !Ref PrivateSubnet1
+  Subnet2Param:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub Subnet2${Env}
+      Value: !Ref PrivateSubnet2
+  Subnet3Param:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub Subnet3${Env}
+      Value: !Ref PrivateSubnet3
+  canarySgParam:
+    Type: AWS::SSM::Parameter
+    Properties: 
+      Type: String
+      Name: !Sub canarySgId${Env}
+      Value: !Ref canarySg
+
+  VPCEndpointForSecretsManager:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecretsManagerSecurityGroup
+  VPCEndpointSecretsManagerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for Secrets Manager SG'
+  VPCEndpointSMSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointSecretsManagerSGId${Env}
+      Value: !Ref VPCEndpointSecretsManagerSecurityGroup
+  VPCEndpointForRDS:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.rds'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointRDSSecurityGroup
+  VPCEndpointRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for RDS SG'
+  VPCEndpointRDSSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointRDSSGId${Env}
+      Value: !Ref VPCEndpointRDSSecurityGroup
+  VPCEndpointForS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+  VPCEndpointForSSM:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointSSMSecurityGroup
+  VPCEndpointForSSMMessages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointSSMSecurityGroup
+  VPCEndpointForEC2Messages:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointSSMSecurityGroup
+  VPCEndpointSSMSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for SSM SG'
+  VPCEndpointSSMSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointSSMSGId${Env}
+      Value: !Ref VPCEndpointSSMSecurityGroup
+
+  VPCEndpointForECRApi:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointECRApiSecurityGroup
+  VPCEndpointECRApiSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for ECR API SG'
+  VPCEndpointECRApiSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointECRApiSGId${Env}
+      Value: !Ref VPCEndpointECRApiSecurityGroup
+
+  VPCEndpointForECRDkr:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointECRDkrSecurityGroup
+  VPCEndpointECRDkrSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for ECR Docker SG'
+  VPCEndpointECRDkrSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointECRDkrSGId${Env}
+      Value: !Ref VPCEndpointECRDkrSecurityGroup
+
+  VPCEndpointForLogs:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointLogsSecurityGroup
+  VPCEndpointLogsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for CloudWatch Logs SG'
+  VPCEndpointLogsSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointLogsSGId${Env}
+      Value: !Ref VPCEndpointLogsSecurityGroup
+
+  VPCEndpointForSTS:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointSTSSecurityGroup
+  VPCEndpointSTSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for STS SG'
+  VPCEndpointSTSSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointSTSSGId${Env}
+      Value: !Ref VPCEndpointSTSSecurityGroup
+
+  VPCEndpointForKMS:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.kms'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointKMSSecurityGroup
+  VPCEndpointKMSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for KMS SG'
+  VPCEndpointKMSSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointKMSSGId${Env}
+      Value: !Ref VPCEndpointKMSSecurityGroup
+
+  VPCEndpointForMonitoring:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.monitoring'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointMonitoringSecurityGroup
+  VPCEndpointMonitoringSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for CloudWatch Monitoring SG'
+  VPCEndpointMonitoringSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointMonitoringSGId${Env}
+      Value: !Ref VPCEndpointMonitoringSecurityGroup
+
+  VPCEndpointForXRay:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.xray'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointXRaySecurityGroup
+  VPCEndpointXRaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for X-Ray SG'
+  VPCEndpointXRaySgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointXRaySGId${Env}
+      Value: !Ref VPCEndpointXRaySecurityGroup
+
+  VPCEndpointForECS:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointECSSecurityGroup
+  VPCEndpointForECSTelemetry:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs-telemetry'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointECSSecurityGroup
+  VPCEndpointECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for ECS SG'
+  VPCEndpointECSSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointECSSGId${Env}
+      Value: !Ref VPCEndpointECSSecurityGroup
+
+  VPCEndpointForDSQL:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dsql'
+      VpcEndpointType: Interface
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref VPCEndpointDSQLSecurityGroup
+  VPCEndpointDSQLSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      GroupDescription: VPC Endpoint SG
+      Tags:
+        - Key: Name
+          Value: 'VPC Endpoint for DSQL SG'
+  VPCEndpointDSQLSgParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VPCEndpointDSQLSGId${Env}
+      Value: !Ref VPCEndpointDSQLSecurityGroup
+
+  VPCEndpointForDynamoDB:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcEndpointType: Gateway
+      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
