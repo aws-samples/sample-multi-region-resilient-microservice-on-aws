@@ -13,7 +13,7 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 
 ### 1. Operating in the active/active state
 
-![Application Running in active/active state](assets/static//01.architecture-diagram-mr-ms.png)
+![Application Running in active/active state](assets/static/01.architecture-diagram-mr-ms.png)
 
 1. Amazon Route53 Failover records use Route53 Application Recovery Controller (ARC) managed Health Checks to route requests to the active regions
 
@@ -36,7 +36,7 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 
 ### 2. Cross Region Failover 
 
-![Application Running in failover state](assets/static//02.architecture-diagram-dr-mr-ms.png)
+![Application Running in failover state](assets/static/02.architecture-diagram-dr-mr-ms.png)
 
 1. An operator executes the Application Recovery Controller (ARC) Region Switch Plan
 
