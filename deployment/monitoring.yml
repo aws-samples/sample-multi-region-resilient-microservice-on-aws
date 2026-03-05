@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Canaries"
 
@@ -31,11 +33,13 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub 'critical-alarms-${AWS::Region}${Env}'
+      KmsMasterKeyId: alias/aws/sns
 
   InfoAlarmTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub 'info-alarms-${AWS::Region}${Env}'
+      KmsMasterKeyId: alias/aws/sns
 
   AuroraCPUAlarm:
     Type: AWS::CloudWatch::Alarm

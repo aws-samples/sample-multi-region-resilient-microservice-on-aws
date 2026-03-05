@@ -197,8 +197,9 @@ primary_infrastructure: create-peer
 
 primary_ecs: build-images mirror-sidecar-images primary_region_catalog-db orders-dsql-db dsql-vpc-endpoint carts-db
 	@echo "Deploy ECS Services in ${PRIMARY_REGION}"
+	$(eval _BUCKET_PRIMARY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./ecs.yaml --region ${PRIMARY_REGION} \
-	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV}
+	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV} --s3-bucket $(_BUCKET_PRIMARY)
 
 standby_infrastructure: create-peer
 	@echo "Deploy Infrastructure resources in ${STANDBY_REGION}"
@@ -207,8 +208,9 @@ standby_infrastructure: create-peer
 
 standby_ecs: build-images mirror-sidecar-images standby_region_catalog-db orders-dsql-db dsql-vpc-endpoint-standby
 	@echo "Deploy ECS Services in ${STANDBY_REGION}"
+	$(eval _BUCKET_STANDBY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./ecs.yaml --region ${STANDBY_REGION} \
-	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV}
+	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV} --s3-bucket $(_BUCKET_STANDBY)
 
 global_routing: standby_ecs primary_ecs
 	@echo "Deploy the Global Routing layer"
@@ -432,17 +434,35 @@ monitoring: restore-reconciliation arc-dns-status
 	--stack-name monitoring${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides PrimaryRegion=${PRIMARY_REGION} Env=${ENV} SecondaryRegion=${STANDBY_REGION} \
 	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) --s3-bucket $(_CANARY_BUCKET_STANDBY)
 
-arc-dns-status: region-switch
+arc-dns-status: region-switch boto3-layer
 	@echo "Deploy ARC DNS status Lambda to both regions"
 	$(eval _PLAN_ARN:=$(shell aws arc-region-switch list-plans --query 'plans[0].arn' --output text))
 	$(eval _HZ_ID:=$(shell aws cloudformation describe-stack-resource --stack-name gr$(ENV) --logical-resource-id HostedZone --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _RECORD:=$(shell aws secretsmanager get-secret-value --secret-id DNSRecordSecret$(ENV) --region $(PRIMARY_REGION) --query 'SecretString' --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./arc-dns-status.yaml \
 	--stack-name arc-dns-status${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD)
+	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV}
 	@aws cloudformation deploy --region ${STANDBY_REGION} --template ./arc-dns-status.yaml \
 	--stack-name arc-dns-status${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD)
+	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV}
+
+boto3-layer:
+	@echo "Ensuring boto3-latest Lambda layer exists in both regions"
+	@for region in $(PRIMARY_REGION) $(STANDBY_REGION); do \
+		if ! aws lambda get-layer-version --layer-name boto3-latest --version-number 1 --region $$region >/dev/null 2>&1; then \
+			echo "  Publishing boto3-latest layer in $$region..."; \
+			TMPDIR=$$(mktemp -d); \
+			mkdir -p $$TMPDIR/python; \
+			pip3 install boto3 -t $$TMPDIR/python --quiet; \
+			cd $$TMPDIR && zip -r $$TMPDIR/boto3-latest.zip python -q; \
+			aws lambda publish-layer-version --layer-name boto3-latest \
+				--zip-file fileb://$$TMPDIR/boto3-latest.zip \
+				--compatible-runtimes python3.12 --region $$region --no-cli-pager; \
+			rm -rf $$TMPDIR; \
+		else \
+			echo "  boto3-latest layer already exists in $$region"; \
+		fi; \
+	done
 
 secrets-rotation: primary_region_catalog-db
 	@echo "Creating secrets rotation resources in ${PRIMARY_REGION}"

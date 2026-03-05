@@ -60,7 +60,7 @@ public class DsqlDataSourceConfig {
     @Bean
     public DataSource dataSource() {
         hikariDataSource = new HikariDataSource();
-        hikariDataSource.setJdbcUrl("jdbc:postgresql://" + dsqlEndpoint + ":5432/postgres");
+        hikariDataSource.setJdbcUrl(String.format("jdbc:postgresql://%s:5432/postgres", dsqlEndpoint));
         hikariDataSource.setUsername("admin");
         hikariDataSource.setPassword(generateAuthToken());
         hikariDataSource.setDriverClassName("org.postgresql.Driver");

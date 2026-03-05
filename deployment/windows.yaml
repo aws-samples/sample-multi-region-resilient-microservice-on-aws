@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
   This template creates a single Windows server to be used as a browser to test the application
@@ -83,6 +85,7 @@ Resources:
           FromPort: 3389
           ToPort: 3389
           CidrIp: 10.1.0.0/16
+          Description: 'Allow RDP from VPC CIDR'
       SecurityGroupEgress:
         - IpProtocol: tcp
           FromPort: 443
@@ -100,6 +103,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Ref SecurityGroup
+      Description: 'Allow Windows instance to access SSM VPC endpoint'
   VPCEndpointSecretsManagerSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -108,3 +112,4 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Ref SecurityGroup
+      Description: 'Allow Windows instance to access Secrets Manager VPC endpoint'

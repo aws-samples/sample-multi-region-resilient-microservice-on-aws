@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Lambda that queries ARC health check status and publishes per-region active metrics"
 
@@ -14,6 +16,10 @@ Parameters:
   RecordName:
     Type: String
     Description: DNS record name (e.g. store.demo.io)
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: retail-store-ar
+    Description: CMK Id
 
 Resources:
   DnsStatusRole:
@@ -37,6 +43,10 @@ Resources:
                   - arc-region-switch:ListRoute53HealthChecks
                   - cloudwatch:PutMetricData
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
 
   DnsStatusFunction:
     Type: AWS::Lambda::Function
@@ -46,6 +56,7 @@ Resources:
       Handler: index.handler
       Role: !GetAtt DnsStatusRole.Arn
       Timeout: 30
+      ReservedConcurrentExecutions: 1
       Layers:
         - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:boto3-latest:1
       Environment:
@@ -53,6 +64,7 @@ Resources:
           PLAN_ARN: !Ref PlanArn
           HOSTED_ZONE_ID: !Ref HostedZoneId
           RECORD_NAME: !Ref RecordName
+      KmsKeyArn: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
       Code:
         ZipFile: |
           import boto3, os

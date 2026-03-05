@@ -1,0 +1,23 @@
+Sample Multi-Region Resilient Microservice on AWS
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+**********************
+Third-Party Components
+**********************
+
+This software includes the following third-party components, each with
+its own license.
+
+---
+
+PyMySQL 1.1.0
+License: MIT
+Copyright (c) 2010, 2013 PyMySQL contributors
+Source: https://github.com/PyMySQL/PyMySQL
+
+---
+
+Apache Maven Wrapper 3.3.2 (includes MavenWrapperDownloader.java 0.5.6)
+License: Apache License 2.0
+Copyright: The Apache Software Foundation
+Source: https://github.com/apache/maven-wrapper

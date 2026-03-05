@@ -55,7 +55,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: rotate-secrets.lambda_handler
-      CodeUri: s3://basevpc-canarybucket-30rr5itdxjvw/b12f1642832f97fa1e539ea9c3e03294
+      CodeUri: s3://basevpc-canarybucket-5ywuxjuhic9l/bb028ee08909da4e2812a0a2f1168793
       Runtime: python3.12
       Architectures:
       - x86_64
@@ -93,7 +93,7 @@ Resources:
     Properties:
       LayerName: secrets-rotation-python-function-lib
       Description: Dependencies for the secrets-rotation-python function.
-      ContentUri: s3://basevpc-canarybucket-30rr5itdxjvw/9b59f33d12118cdcc96b7950fa32c3e2
+      ContentUri: s3://basevpc-canarybucket-5ywuxjuhic9l/bdcf34c876529d9a64214ff9367b3c81
       CompatibleRuntimes:
       - python3.12
   LambdaInvokePermission:
@@ -104,6 +104,8 @@ Resources:
         Ref: LambdaFunction
       Action: lambda:InvokeFunction
       Principal: secretsmanager.amazonaws.com
+      SourceAccount:
+        Ref: AWS::AccountId
   CatalogDBCredentialsSecretRotationSchedule:
     Type: AWS::SecretsManager::RotationSchedule
     DependsOn:
@@ -127,6 +129,7 @@ Resources:
       ToPort: 443
       SourceSecurityGroupId:
         Ref: LambdaSecurityGroup
+      Description: Allow rotation Lambda to access Secrets Manager VPC endpoint
   VPCEndpointLogsRotationLambdaSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -139,6 +142,7 @@ Resources:
         Fn::GetAtt:
         - LambdaSecurityGroup
         - GroupId
+      Description: Allow rotation Lambda to access CloudWatch Logs VPC endpoint
 Outputs:
   LambdaFunction:
     Value:

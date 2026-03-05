@@ -64,8 +64,7 @@ public class MongoCartService implements CartService {
         MongoCartEntity sessionCart = this.get(sessionId);
         MongoCartEntity customerCart = this.get(customerId);
 
-        // TODO: Implement this
-
+        // Merge not implemented for Mongo backend
         this.cartRepository.deleteById(sessionId);
 
         return customerCart;

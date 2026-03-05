@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 ---
 AWSTemplateFormatVersion: '2010-09-09'
 Description: AWS Aurora Global database standby region
@@ -235,9 +237,11 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Handler: index.lambda_handler
       Timeout: 90
+      ReservedConcurrentExecutions: 1
       Environment:
         Variables:
           DBClusterIdentifier: !Sub '${NamingPrefix}-${ClusterName}-${AWS::Region}${Env}'
+      KmsKeyArn: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
       Code:
         ZipFile: |
           import cfnresponse

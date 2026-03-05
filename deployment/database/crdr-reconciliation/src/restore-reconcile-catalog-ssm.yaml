@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Solution that uses SSM Automation to restore encrypted snapshots of RDS cluster Catalog DB
@@ -72,6 +74,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: 'Allow reconciliation Lambda to access Secrets Manager VPC endpoint'
   VPCEndpointLogsReconcileLambdaSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -80,6 +83,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      Description: 'Allow reconciliation Lambda to access CloudWatch Logs VPC endpoint'
 
   AutomationExecutionRole:
     Type: AWS::IAM::Role

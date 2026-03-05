@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: 2010-09-09
 Description: Solution that uses SSM Automation to create encrypted snapshots of RDS clusters and then copy those snapshots to a different AWS region for DR purposes.
 Parameters: 

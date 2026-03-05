@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: "2010-09-09"
 Description: "Canaries"
 
@@ -1624,6 +1626,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+      Description: 'Allow canaries to access CloudWatch Logs VPC endpoint'
   VPCEndpointMonitoringCanarySecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -1632,6 +1635,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+      Description: 'Allow canaries to access CloudWatch Monitoring VPC endpoint'
   VPCEndpointXRayCanarySecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -1640,6 +1644,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+      Description: 'Allow canaries to access X-Ray VPC endpoint'
   VPCEndpointSTSCanarySecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -1648,3 +1653,4 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Sub '{{resolve:ssm:canarySgId${Env}}}'
+      Description: 'Allow canaries to access STS VPC endpoint'

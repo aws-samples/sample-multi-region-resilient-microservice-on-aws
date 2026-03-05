@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 ---
 AWSTemplateFormatVersion: '2010-09-09'
 Description: AWS Aurora Global database primary region
@@ -402,6 +404,7 @@ Resources:
           DB_NAME: !Ref DatabaseName
           SecretName: !Ref DBCredentialsSecret
           DBClusterIdentifier: !Ref DBCluster
+      KmsKeyArn: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
       Runtime: python3.13
       Timeout: 300
       VpcConfig:
@@ -487,6 +490,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: 'Allow Aurora Lambda to access Secrets Manager VPC endpoint'
   VPCEndpointRDSSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -495,6 +499,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Description: 'Allow Aurora Lambda to access RDS VPC endpoint'
   VPCEndpointLogsAuroraLambdaSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -503,6 +508,7 @@ Resources:
       FromPort: 443
       ToPort: 443
       SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      Description: 'Allow Aurora Lambda to access CloudWatch Logs VPC endpoint'
 
 Outputs:
   GlobalDBCluster:

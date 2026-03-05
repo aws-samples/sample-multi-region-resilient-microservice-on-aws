@@ -74,6 +74,7 @@ Resources:
       ToPort: 443
       SourceSecurityGroupId:
         Ref: LambdaSecurityGroup
+      Description: Allow reconciliation Lambda to access Secrets Manager VPC endpoint
   VPCEndpointLogsReconcileLambdaSecurityGroupIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -86,6 +87,7 @@ Resources:
         Fn::GetAtt:
         - LambdaSecurityGroup
         - GroupId
+      Description: Allow reconciliation Lambda to access CloudWatch Logs VPC endpoint
   AutomationExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -114,7 +116,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       Handler: reconciliation-catalog.lambda_handler
-      CodeUri: s3://basevpc-canarybucket-pl5kyjqwehqy/56d3a427892a22567c577bc37b9a1e0d
+      CodeUri: s3://basevpc-canarybucket-ha56z3tq6gi2/90d4bb37ac1e3f6614ab67b7e908c1d0
       Runtime: python3.12
       Architectures:
       - x86_64
@@ -176,7 +178,7 @@ Resources:
     Properties:
       LayerName: reconcliliation-python-function-lib
       Description: Dependencies for the reconcliliation-python function.
-      ContentUri: s3://basevpc-canarybucket-pl5kyjqwehqy/df46cfd1e0b02eac2795bfe5c1fc35d1
+      ContentUri: s3://basevpc-canarybucket-ha56z3tq6gi2/af0d41462922ccca0a36aed2950fa497
       CompatibleRuntimes:
       - python3.12
   CrossRegionSnapshotRestoreSSMAutomation:

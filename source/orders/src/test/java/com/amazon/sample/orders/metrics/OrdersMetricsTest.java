@@ -60,7 +60,7 @@ public class OrdersMetricsTest {
 
         OrderCreatedEvent event = new OrderCreatedEvent();
         Order order = new Order();
-        order.setEmail("test@gmail.com");
+        order.setEmail("user@example.com");
         order.setFirstName("John");
         order.setId("id");
         order.setLastName("Doe");
