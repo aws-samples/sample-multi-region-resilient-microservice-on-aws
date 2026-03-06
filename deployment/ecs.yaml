@@ -253,12 +253,11 @@ Resources:
       VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
       GroupDescription: ECS Alb
       SecurityGroupIngress:
-        #Public ALB
-        - CidrIp: 0.0.0.0/0
+        - CidrIp: !Sub '{{resolve:ssm:VpcCidr${Env}}}'
           IpProtocol: tcp
           FromPort: 80
           ToPort:  80
-          Description: 'Allow HTTP ingress traffic'
+          Description: 'Allow HTTP ingress from VPC CIDR'
       SecurityGroupEgress: 
         - 
           CidrIp: "0.0.0.0/0"

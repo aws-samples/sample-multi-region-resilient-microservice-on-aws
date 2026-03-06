@@ -18,4 +18,4 @@ deployment/.build-done/
 .ash/
 .claude/
 .kiro/
-temporary/
+temporary/scan-report.json

@@ -336,6 +336,7 @@ Resources:
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: '0.0.0.0/0'
+          Description: 'Allow all outbound traffic'
   UpdateSecretFunction:
     Type: 'AWS::Lambda::Function'
     Metadata:
@@ -346,6 +347,7 @@ Resources:
     Properties:
       Handler: index.handler
       Role: !GetAtt LambdaExecutionRole.Arn
+      ReservedConcurrentExecutions: 1
       Code:
         ZipFile: |
           import json

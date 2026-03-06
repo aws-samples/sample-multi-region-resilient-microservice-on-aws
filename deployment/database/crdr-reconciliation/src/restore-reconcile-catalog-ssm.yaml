@@ -24,6 +24,10 @@ Parameters:
   DBClusterIdentifier:
     Default: reconciliation-db-cluster
     Type: String
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: retail-store-ar
+    Description: CMK Id
   GlobalClusterIdentifier:
     Default: global-db-cluster
     Type: String
@@ -132,6 +136,7 @@ Resources:
       Environment:
         Variables:
           DB_CREDENTIALS_SECRET_ID: !Sub 'mr-app/catalog-${GlobalClusterIdentifier}-UserCredentials${Env}'
+      KmsKeyArn: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
       Layers:
         - !Ref libs
       Policies:

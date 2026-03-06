@@ -189,6 +189,16 @@ Resources:
               Service: logdelivery.elasticloadbalancing.amazonaws.com
             Action: s3:PutObject
             Resource: !Sub '${canaryBucket.Arn}/alb-access-logs/*'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt canaryBucket.Arn
+              - !Sub '${canaryBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
   canaryRole:
     Type: "AWS::IAM::Role"
     Properties:
@@ -216,6 +226,12 @@ Resources:
       Type: String
       Name: !Sub canaryBucketArn${Env}
       Value: !GetAtt canaryBucket.Arn
+  VpcCidrParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: !Sub VpcCidr${Env}
+      Value: !FindInMap [RegionMap, !Ref "AWS::Region", "VPCCidrBlock"]
 
   KmsKey:
     Type: "AWS::KMS::Key"
