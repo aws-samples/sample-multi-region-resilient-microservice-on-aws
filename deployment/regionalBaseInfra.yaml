@@ -190,6 +190,11 @@ Resources:
 #Ecr Repos
   CheckoutRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -200,6 +205,11 @@ Resources:
         KmsKey: !Ref KmsKey
   CatalogRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
           ScanOnPush: true
@@ -210,6 +220,11 @@ Resources:
         KmsKey: !Ref KmsKey
   CartsRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -220,6 +235,11 @@ Resources:
         KmsKey: !Ref KmsKey
   AssetsRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -230,6 +250,11 @@ Resources:
         KmsKey: !Ref KmsKey
   OrdersRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -240,6 +265,11 @@ Resources:
         KmsKey: !Ref KmsKey
   UIRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -250,6 +280,11 @@ Resources:
         KmsKey: !Ref KmsKey
   CWAgentRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -260,6 +295,11 @@ Resources:
         KmsKey: !Ref KmsKey
   ADOTJavaRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true
@@ -270,6 +310,11 @@ Resources:
         KmsKey: !Ref KmsKey
   ADOTNodeRepo:
     Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
     Properties:
       ImageScanningConfiguration:
         ScanOnPush: true

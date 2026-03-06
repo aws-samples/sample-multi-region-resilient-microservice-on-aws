@@ -24,6 +24,11 @@ Parameters:
 Resources:
   DnsStatusRole:
     Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "cloudwatch:PutMetricData does not support resource-level permissions."
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -50,6 +55,13 @@ Resources:
 
   DnsStatusFunction:
     Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "Invoked by EventBridge rule on schedule, not async event-driven. DLQ does not apply."
+          - id: CKV_AWS_117
+            comment: "Calls only AWS API endpoints (ARC, CloudWatch). No VPC resources needed."
     Properties:
       FunctionName: !Sub app-dns-status${Env}
       Runtime: python3.12

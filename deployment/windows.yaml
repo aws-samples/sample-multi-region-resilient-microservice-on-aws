@@ -77,6 +77,11 @@ Resources:
           </powershell>
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: RESTRICTED_INCOMING_TRAFFIC
+            reason: "False positive. RDP ingress restricted to VPC CIDR (10.1.0.0/16), not 0.0.0.0/0."
     Properties:
       VpcId: !Ref 'VpcId'
       GroupDescription: OutboundOnly

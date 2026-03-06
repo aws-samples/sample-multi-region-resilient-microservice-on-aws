@@ -1,0 +1,4 @@
+skip-check:
+  - CKV_OPENAPI_4  # Internal service-to-service API specs, not publicly exposed
+  - CKV_OPENAPI_5  # Internal service-to-service API specs, not publicly exposed
+  - CKV_OPENAPI_21 # Internal service-to-service API specs, not publicly exposed

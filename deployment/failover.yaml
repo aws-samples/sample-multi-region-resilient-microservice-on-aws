@@ -30,6 +30,11 @@ Parameters:
 Resources:
   RegionSwitchExecutionRole:
     Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "ARC Region Switch requires broad permissions for cross-service failover orchestration."
     Properties:
       RoleName: !Sub 'RegionSwitchExecutionRole${Env}'
       AssumeRolePolicyDocument:

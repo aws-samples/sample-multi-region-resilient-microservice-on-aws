@@ -71,6 +71,11 @@ Resources:
 
   CheckoutEcCluster:
     Type: "AWS::ElastiCache::ReplicationGroup"
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_31
+            comment: "Auth token requires app code changes. TLS and at-rest encryption enabled. Redis in private subnet with SG-restricted access."
     Properties:
       ReplicationGroupDescription: "Redis replication group for checkout service"
       CacheNodeType: "cache.t3.micro"
@@ -444,6 +449,13 @@ Resources:
       VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
   AlbListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_2
+            comment: "Internal ALB (Scheme: internal) with no public exposure. Canary health checks use HTTP. In production, configure ACM certificate and HTTPS listener."
+          - id: CKV_AWS_103
+            comment: "Internal ALB (Scheme: internal) with no public exposure. In production, configure TLS v1.2+ listener."
     Properties: 
       DefaultActions: 
         - Type: forward

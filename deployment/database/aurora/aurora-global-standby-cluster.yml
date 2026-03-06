@@ -231,6 +231,13 @@ Resources:
   CustomBackedLambda:
     DependsOn: DBCluster
     Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "Invoked synchronously by CloudFormation custom resource. DLQ does not apply."
+          - id: CKV_AWS_117
+            comment: "Calls only RDS API endpoints for write forwarding. No VPC resources needed."
     Properties:
       FunctionName: !Sub ${NamingPrefix}-EnableWriteForwardingForDBCluster${Env}
       Runtime: python3.13

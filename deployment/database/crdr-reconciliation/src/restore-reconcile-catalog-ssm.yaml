@@ -114,6 +114,11 @@ Resources:
 
   LambdaFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "Invoked synchronously by SSM Automation for DB reconciliation. DLQ does not apply."
     Properties:
       Handler: reconciliation-catalog.lambda_handler
       CodeUri: function/.
