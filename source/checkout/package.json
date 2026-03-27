@@ -82,5 +82,8 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
+  },
+  "overrides": {
+    "picomatch@>=4.0.0": ">=4.0.4"
   }
 }

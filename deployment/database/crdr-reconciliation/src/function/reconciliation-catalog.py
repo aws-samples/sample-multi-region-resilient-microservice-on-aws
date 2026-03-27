@@ -32,7 +32,6 @@ def lambda_handler(event, context):
 
         print("source db endpoint: " + str(source_db_endpoint))
         print("target db endpoint:" + str(target_db_endpoint))
-        print("user:" + str(user_name))
         print("database:" + db_name)
 
         try:
