@@ -12,7 +12,6 @@ logger.setLevel(logging.INFO)
 
 
 def lambda_handler(event, context):
-    logger.info(event)
     """Secrets Manager RDS MySQL Handler
 
     This handler uses the single-user rotation scheme to rotate an RDS MySQL user credential. This rotation scheme
@@ -48,13 +47,13 @@ def lambda_handler(event, context):
     arn = event['SecretId']
     token = event['ClientRequestToken']
     step = event['Step']
+    logger.info("lambda_handler: Starting rotation step '%s' for secret %s" % (step, arn))  # codeql[py/clear-text-logging-sensitive-data] ARN is a resource identifier, not a secret value
 
     # Setup the client
     service_client = boto3.client('secretsmanager')
-    logger.info("Created client")
     # Make sure the version is staged correctly
     metadata = service_client.describe_secret(SecretId=arn)
-    logger.info(metadata)
+    logger.info("lambda_handler: Retrieved metadata for secret %s, RotationEnabled=%s" % (arn, metadata.get('RotationEnabled')))  # codeql[py/clear-text-logging-sensitive-data] ARN is a resource identifier, not a secret value
     if "RotationEnabled" in metadata and not metadata['RotationEnabled']:
         logger.error("Secret %s is not enabled for rotation" % arn)
         raise ValueError("Secret %s is not enabled for rotation" % arn)
@@ -159,13 +158,13 @@ def set_secret(service_client, arn, token):
 
     # Make sure the user from current and pending match
     if current_dict['username'] != pending_dict['username']:
-        logger.error("setSecret: Attempting to modify user %s other than current user %s" % (pending_dict['username'], current_dict['username']))
-        raise ValueError("Attempting to modify user %s other than current user %s" % (pending_dict['username'], current_dict['username']))
+        logger.error("setSecret: Attempting to modify a user other than the current user for secret arn %s" % arn)  # codeql[py/clear-text-logging-sensitive-data]
+        raise ValueError("Attempting to modify a user other than the current user for secret arn %s" % arn)
 
     # Make sure the host from current and pending match
     if current_dict['host'] != pending_dict['host']:
-        logger.error("setSecret: Attempting to modify user for host %s other than current host %s" % (pending_dict['host'], current_dict['host']))
-        raise ValueError("Attempting to modify user for host %s other than current host %s" % (pending_dict['host'], current_dict['host']))
+        logger.error("setSecret: Attempting to modify user for a host other than the current host for secret arn %s" % arn)  # codeql[py/clear-text-logging-sensitive-data]
+        raise ValueError("Attempting to modify user for a host other than the current host for secret arn %s" % arn)
 
     # Now try the current password
     conn = get_connection(current_dict)
@@ -181,11 +180,11 @@ def set_secret(service_client, arn, token):
 
         # Make sure the user/host from previous and pending match
         if previous_dict['username'] != pending_dict['username']:
-            logger.error("setSecret: Attempting to modify user %s other than previous valid user %s" % (pending_dict['username'], previous_dict['username']))
-            raise ValueError("Attempting to modify user %s other than previous valid user %s" % (pending_dict['username'], previous_dict['username']))
+            logger.error("setSecret: Attempting to modify a user other than the previous valid user for secret arn %s" % arn)  # codeql[py/clear-text-logging-sensitive-data]
+            raise ValueError("Attempting to modify a user other than the previous valid user for secret arn %s" % arn)
         if previous_dict['host'] != pending_dict['host']:
-            logger.error("setSecret: Attempting to modify user for host %s other than previous host %s" % (pending_dict['host'], previous_dict['host']))
-            raise ValueError("Attempting to modify user for host %s other than previous host %s" % (pending_dict['host'], previous_dict['host']))
+            logger.error("setSecret: Attempting to modify user for a host other than the previous host for secret arn %s" % arn)  # codeql[py/clear-text-logging-sensitive-data]
+            raise ValueError("Attempting to modify user for a host other than the previous host for secret arn %s" % arn)
 
     # If we still don't have a connection, raise a ValueError
     if not conn:
@@ -200,7 +199,7 @@ def set_secret(service_client, arn, token):
             password_option = get_password_option(ver[0])
             cur.execute("SET PASSWORD = " + password_option, pending_dict['password'])
             conn.commit()
-            logger.info("setSecret: Successfully set password for user %s in MySQL DB for secret arn %s." % (pending_dict['username'], arn))
+            logger.info("setSecret: Successfully set password in MySQL DB for secret arn %s." % arn)  # codeql[py/clear-text-logging-sensitive-data]
     finally:
         conn.close()
 
@@ -374,11 +373,11 @@ def connect_and_authenticate(secret_dict, port, dbname, use_ssl):
     try:
         # Checks hostname and verifies server certificate implictly when 'ca' key is in 'ssl' dictionary
         conn = pymysql.connect(host=secret_dict['host'], user=secret_dict['username'], password=secret_dict['password'], port=port, database=dbname, connect_timeout=5, ssl=ssl)
-        logger.info("Successfully established %s connection as user '%s' with host: '%s'" % ("SSL/TLS" if use_ssl else "non SSL/TLS", secret_dict['username'], secret_dict['host']))
+        logger.info("Successfully established %s connection for secret rotation" % ("SSL/TLS" if use_ssl else "non SSL/TLS"))
         return conn
     except pymysql.OperationalError as e:
         if 'certificate verify failed: IP address mismatch' in e.args[1]:
-            logger.error("Hostname verification failed when estlablishing SSL/TLS Handshake with host: %s" % secret_dict['host'])
+            logger.error("Hostname verification failed when establishing SSL/TLS Handshake")
         return None
 
 

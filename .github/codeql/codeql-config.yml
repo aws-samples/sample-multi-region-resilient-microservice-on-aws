@@ -1,0 +1,4 @@
+name: "CodeQL Configuration"
+paths-ignore:
+  - '**/package/python/pymysql/**'
+alert-suppression-in-source: true

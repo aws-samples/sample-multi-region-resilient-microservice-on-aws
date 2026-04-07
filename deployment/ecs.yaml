@@ -24,6 +24,13 @@ Parameters:
     Default: KmsKey
     Description: CMK Id 
 
+Mappings:
+  RegionCidrMap:
+    us-east-1:
+      VPCCidrBlock: "10.1.0.0/16"
+    us-west-2:
+      VPCCidrBlock: "10.2.0.0/16"
+
 Conditions:
   isPrimary: !Equals
     - !Ref AWS::Region
@@ -262,7 +269,15 @@ Resources:
           IpProtocol: tcp
           FromPort: 80
           ToPort:  80
-          Description: 'Allow HTTP ingress from VPC CIDR'
+          Description: 'Allow HTTP ingress from local VPC CIDR'
+        - CidrIp: !If
+            - isPrimary
+            - !FindInMap [RegionCidrMap, !Ref StandbyRegion, VPCCidrBlock]
+            - !FindInMap [RegionCidrMap, !Ref PrimaryRegion, VPCCidrBlock]
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          Description: 'Allow HTTP ingress from remote VPC CIDR for cross-region canaries'
       SecurityGroupEgress: 
         - 
           CidrIp: "0.0.0.0/0"
