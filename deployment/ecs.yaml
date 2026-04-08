@@ -364,7 +364,7 @@ Resources:
     Properties:
       Name: !Sub 'CWAgentConf${Env}'
       Type: String
-      Value: !Sub "{\"traces\": {\"traces_collected\": {\"application_signals\": {}}},\"logs\": {\"metrics_collected\": {\"application_signals\": {}}}}"
+      Value: !Sub "{\"traces\": {\"traces_collected\": {\"xray\": {}, \"application_signals\": {}}},\"logs\": {\"metrics_collected\": {\"application_signals\": {}}}}"
       Description: "CW Agent Config"
 
   MqSecret:
@@ -791,7 +791,7 @@ Resources:
               Value: " -javaagent:/otel-auto-instrumentation/javaagent.jar"
           Secrets:
             -
-              Name: "SPRING_RABBITMQ_USER"
+              Name: "SPRING_RABBITMQ_USERNAME"
               ValueFrom: !Sub "${MqSecret}:username::"
             -
               Name: "SPRING_RABBITMQ_ADDRESSES"

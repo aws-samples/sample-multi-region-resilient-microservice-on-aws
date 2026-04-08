@@ -54,7 +54,10 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+          Value: !If
+            - IsPrimaryRegion
+            - !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+            - !Sub 'catalog-dbcluster-02-${AWS::Region}${Env}'
       TreatMissingData: notBreaching
 
   AuroraConnectionsAlarm:
@@ -70,7 +73,10 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+          Value: !If
+            - IsPrimaryRegion
+            - !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+            - !Sub 'catalog-dbcluster-02-${AWS::Region}${Env}'
       TreatMissingData: notBreaching
 
   AuroraReplicaLagAlarm:
@@ -86,7 +92,10 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+          Value: !If
+            - IsPrimaryRegion
+            - !Sub 'catalog-dbcluster-01-${AWS::Region}${Env}'
+            - !Sub 'catalog-dbcluster-02-${AWS::Region}${Env}'
       TreatMissingData: notBreaching
 
   AuroraDatabaseComposite:
