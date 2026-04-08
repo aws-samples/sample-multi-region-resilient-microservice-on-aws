@@ -20,6 +20,7 @@ package com.amazon.sample.orders.entities;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Data;
+import lombok.ToString;
 
 import jakarta.persistence.*;
 import java.io.Serializable;
@@ -56,6 +57,6 @@ public class OrderItemEntity {
     @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
     @MapsId("orderId")
-
+    @ToString.Exclude
     private OrderEntity order;
 }

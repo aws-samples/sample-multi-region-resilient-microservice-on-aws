@@ -436,7 +436,7 @@ monitoring: restore-reconciliation arc-dns-status
 
 arc-dns-status: region-switch boto3-layer
 	@echo "Deploy ARC DNS status Lambda to both regions"
-	$(eval _PLAN_ARN:=$(shell aws arc-region-switch list-plans --query 'plans[0].arn' --output text))
+	$(eval _PLAN_ARN:=$(shell aws arc-region-switch list-plans --region $(PRIMARY_REGION) --query "plans[?starts_with(name, 'retail-store-ar')].arn | [0]" --output text))
 	$(eval _HZ_ID:=$(shell aws cloudformation describe-stack-resource --stack-name gr$(ENV) --logical-resource-id HostedZone --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _RECORD:=$(shell aws secretsmanager get-secret-value --secret-id DNSRecordSecret$(ENV) --region $(PRIMARY_REGION) --query 'SecretString' --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./arc-dns-status.yaml \
@@ -454,7 +454,7 @@ boto3-layer:
 			TMPDIR=$$(mktemp -d); \
 			mkdir -p $$TMPDIR/python; \
 			pip3 install boto3 -t $$TMPDIR/python --quiet; \
-			cd $$TMPDIR && zip -r $$TMPDIR/boto3-latest.zip python -q; \
+			(cd $$TMPDIR && zip -r $$TMPDIR/boto3-latest.zip python -q); \
 			aws lambda publish-layer-version --layer-name boto3-latest \
 				--zip-file fileb://$$TMPDIR/boto3-latest.zip \
 				--compatible-runtimes python3.12 --region $$region --no-cli-pager; \
@@ -473,6 +473,41 @@ secrets-rotation: primary_region_catalog-db
 	@aws cloudformation package --template-file ./database/secrets-rotation/src/secrets-rotation.yaml --region ${PRIMARY_REGION} --s3-bucket $(result) --output-template-file ./database/secrets-rotation/src/out.yaml
 	@aws cloudformation deploy --template-file ./database/secrets-rotation/src/out.yaml --stack-name secrets-rotation${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} CatalogDBCredentialsSecretId=mr-app/catalog-global-db-cluster-UserCredentials${ENV}
 
+
+load-generator: primary_ecs standby_ecs
+	@echo "Deploy load generator in ${PRIMARY_REGION}"
+	@aws cloudformation deploy --template ./load-generator.yaml --region ${PRIMARY_REGION} \
+	--stack-name load-generator${ENV} --capabilities CAPABILITY_IAM \
+	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV}
+	@if [ "$(PRIMARY_ONLY)" = "false" ]; then \
+		echo "Deploy load generator in ${STANDBY_REGION}"; \
+		aws cloudformation deploy --template ./load-generator.yaml --region ${STANDBY_REGION} \
+		--stack-name load-generator${ENV} --capabilities CAPABILITY_IAM \
+		--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV}; \
+	fi
+
+load-generator-start:
+	@echo "Enabling load generator in ${PRIMARY_REGION}"
+	@aws events enable-rule --name load-generator-schedule${ENV} --region ${PRIMARY_REGION}
+	@if [ "$(PRIMARY_ONLY)" = "false" ]; then \
+		echo "Enabling load generator in ${STANDBY_REGION}"; \
+		aws events enable-rule --name load-generator-schedule${ENV} --region ${STANDBY_REGION}; \
+	fi
+
+load-generator-stop:
+	@echo "Disabling load generator in ${PRIMARY_REGION}"
+	@aws events disable-rule --name load-generator-schedule${ENV} --region ${PRIMARY_REGION}
+	@if [ "$(PRIMARY_ONLY)" = "false" ]; then \
+		echo "Disabling load generator in ${STANDBY_REGION}"; \
+		aws events disable-rule --name load-generator-schedule${ENV} --region ${STANDBY_REGION}; \
+	fi
+
+destroy-load-generator:
+	@echo "Deleting load generator stacks"
+	@aws cloudformation delete-stack --stack-name load-generator${ENV} --region ${PRIMARY_REGION}
+	@aws cloudformation delete-stack --stack-name load-generator${ENV} --region ${STANDBY_REGION}
+	@aws cloudformation wait stack-delete-complete --stack-name load-generator${ENV} --region ${PRIMARY_REGION} 2>/dev/null || true
+	@aws cloudformation wait stack-delete-complete --stack-name load-generator${ENV} --region ${STANDBY_REGION} 2>/dev/null || true
 
 chaos-engineering: primary_infrastructure standby_infrastructure
 	@echo "Creating chaos experiments in ${PRIMARY_REGION}"
@@ -570,7 +605,7 @@ destroy-global_routing: destroy-canaries-standby destroy-canaries-primary destro
 	@aws cloudformation delete-stack --stack-name gr${ENV} --region ${PRIMARY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name gr${ENV} --region ${PRIMARY_REGION}
 
-destroy-infra: destroy-ecr-standby destroy-ecr-primary destroy-databases-standby destroy-databases-primary destroy-client-primary destroy-client-standby destroy-codebuild destroy-monitoring destroy-arc-dns-status destroy-chaos-engineering destroy-global_routing
+destroy-infra: destroy-ecr-standby destroy-ecr-primary destroy-databases-standby destroy-databases-primary destroy-client-primary destroy-client-standby destroy-codebuild destroy-monitoring destroy-arc-dns-status destroy-chaos-engineering destroy-load-generator destroy-global_routing
 	@echo "Deleting networking resources in both regions..."
 	@aws cloudformation delete-stack --stack-name baseInfra${ENV} --region ${STANDBY_REGION}
 	@aws cloudformation delete-stack --stack-name baseInfra${ENV} --region ${PRIMARY_REGION}

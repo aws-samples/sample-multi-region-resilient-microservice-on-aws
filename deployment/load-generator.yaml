@@ -1,0 +1,235 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Lambda-based load generator with random burst traffic patterns"
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: Environment suffix for multi-deployment support
+  MinBurst:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 100
+    Description: Minimum number of concurrent requests per invocation
+  MaxBurst:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    MaxValue: 200
+    Description: Maximum number of concurrent requests per invocation
+  SpikePercent:
+    Type: Number
+    Default: 30
+    MinValue: 0
+    MaxValue: 100
+    Description: Percentage of invocations that produce spike-level traffic (vs calm)
+  Enabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Whether the load generator schedule is enabled on deploy
+  KmsKey:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: retail-store-ar
+    Description: CMK Id
+
+Conditions:
+  ScheduleEnabled: !Equals [!Ref Enabled, "true"]
+
+Resources:
+  LoadGeneratorRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "cloudwatch:PutMetricData does not support resource-level permissions."
+      cfn_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: "cloudwatch:PutMetricData does not support resource-level permissions. Scoped by cloudwatch:namespace condition."
+          - id: AwsSolutions-IAM4
+            reason: "AWSLambdaVPCAccessExecutionRole is the standard AWS managed policy for VPC-attached Lambda functions."
+      guard:
+        SuppressedRules:
+          - IAM_NO_INLINE_POLICY_CHECK: "Single-purpose inline policy scoped to PutMetricData with namespace condition. Managed policy not appropriate for custom namespace restriction."
+          - IAM_POLICYDOCUMENT_NO_WILDCARD_RESOURCE: "cloudwatch:PutMetricData does not support resource-level permissions. Scoped by cloudwatch:namespace condition key."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: load-generator-metrics
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Sub "LoadGenerator${Env}"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
+
+  LoadGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_116
+            comment: "Invoked by EventBridge schedule. Failures are transient load-test noise, not events requiring DLQ reprocessing."
+          - id: CKV_AWS_173
+            comment: "Environment variables contain only ALB hostname and numeric tuning parameters. No secrets."
+    Properties:
+      FunctionName: !Sub load-generator${Env}
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt LoadGeneratorRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      ReservedConcurrentExecutions: 2
+      KmsKeyArn: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KmsKey}'
+      VpcConfig:
+        SecurityGroupIds:
+          - !Sub '{{resolve:ssm:canarySgId${Env}}}'
+        SubnetIds:
+          - !Sub '{{resolve:ssm:Subnet1${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet2${Env}}}'
+          - !Sub '{{resolve:ssm:Subnet3${Env}}}'
+      Environment:
+        Variables:
+          ALB_HOST: !Sub '{{resolve:secretsmanager:Alb-${AWS::Region}${Env}:SecretString:DnsName}}'
+          MIN_BURST: !Ref MinBurst
+          MAX_BURST: !Ref MaxBurst
+          SPIKE_PERCENT: !Ref SpikePercent
+          CW_NAMESPACE: !Sub "LoadGenerator${Env}"
+      Code:
+        ZipFile: |
+          import concurrent.futures
+          import http.client
+          import os
+          import random
+          import time
+
+          import boto3
+
+          ALB_HOST = os.environ["ALB_HOST"]
+          MIN_BURST = int(os.environ["MIN_BURST"])
+          MAX_BURST = int(os.environ["MAX_BURST"])
+          SPIKE_PERCENT = int(os.environ["SPIKE_PERCENT"])
+          CW_NAMESPACE = os.environ["CW_NAMESPACE"]
+
+          # Weighted endpoint pool: (method, path, weight)
+          # Only GET endpoints — the UI is a server-rendered web app that requires
+          # CSRF tokens and session cookies for POST requests.
+          # Product IDs from static seed data in catalog/db/migrations/000001_initial.up.sql
+          ENDPOINTS = [
+              ("GET",  "/home",    30),
+              ("GET",  "/catalog", 25),
+              ("GET",  "/catalog/6d62d909-f957-430e-8689-b5129c0bb75e", 5),
+              ("GET",  "/catalog/a0a4f044-b040-410d-8ead-4de0446aec7e", 5),
+              ("GET",  "/catalog/808a2de1-1aaa-4c25-a9b9-6612e8f29a38", 5),
+              ("GET",  "/catalog/510a0d7e-8e83-4193-b483-e27e09ddc34d", 5),
+              ("GET",  "/cart",    20),
+              ("GET",  "/orders",  5),
+          ]
+
+          POPULATION = []
+          for method, path, weight in ENDPOINTS:
+              POPULATION.extend([(method, path)] * weight)
+
+          cw = boto3.client("cloudwatch")
+
+
+          def pick_burst_size():
+              is_spike = random.randint(1, 100) <= SPIKE_PERCENT
+              if is_spike:
+                  calm_ceiling = max(MIN_BURST, MAX_BURST // 5)
+                  return random.randint(calm_ceiling, MAX_BURST)
+              return random.randint(MIN_BURST, max(MIN_BURST, MAX_BURST // 5))
+
+
+          def fire_request(method, path):
+              start = time.monotonic()
+              try:
+                  conn = http.client.HTTPConnection(ALB_HOST, timeout=10)
+                  conn.request(method, path)
+                  resp = conn.getresponse()
+                  resp.read()
+                  elapsed_ms = (time.monotonic() - start) * 1000
+                  return resp.status, elapsed_ms
+              except Exception:
+                  elapsed_ms = (time.monotonic() - start) * 1000
+                  return 0, elapsed_ms
+              finally:
+                  conn.close()
+
+
+          def handler(event, context):
+              burst_size = pick_burst_size()
+              targets = [random.choice(POPULATION) for _ in range(burst_size)]
+
+              results = []
+              with concurrent.futures.ThreadPoolExecutor(max_workers=min(burst_size, 50)) as pool:
+                  futures = [pool.submit(fire_request, m, p) for m, p in targets]
+                  for f in concurrent.futures.as_completed(futures):
+                      results.append(f.result())
+
+              statuses = [s for s, _ in results]
+              latencies = [l for _, l in results]
+              errors = sum(1 for s in statuses if s < 200 or s >= 400)
+              avg_latency = sum(latencies) / len(latencies) if latencies else 0
+
+              cw.put_metric_data(
+                  Namespace=CW_NAMESPACE,
+                  MetricData=[
+                      {"MetricName": "RequestCount", "Value": len(results), "Unit": "Count"},
+                      {"MetricName": "BurstSize", "Value": burst_size, "Unit": "Count"},
+                      {"MetricName": "ErrorCount", "Value": errors, "Unit": "Count"},
+                      {"MetricName": "AvgLatencyMs", "Value": avg_latency, "Unit": "Milliseconds"},
+                  ],
+              )
+
+              return {
+                  "burst_size": burst_size,
+                  "requests": len(results),
+                  "errors": errors,
+                  "avg_latency_ms": round(avg_latency, 1),
+              }
+
+  LoadGeneratorScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub load-generator-schedule${Env}
+      Description: "Triggers load generator Lambda every minute"
+      ScheduleExpression: "rate(1 minute)"
+      State: !If [ScheduleEnabled, ENABLED, DISABLED]
+      Targets:
+        - Arn: !GetAtt LoadGeneratorFunction.Arn
+          Id: LoadGeneratorTarget
+
+  LoadGeneratorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LoadGeneratorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LoadGeneratorScheduleRule.Arn
+
+Outputs:
+  LoadGeneratorFunctionArn:
+    Value: !GetAtt LoadGeneratorFunction.Arn
+  ScheduleRuleName:
+    Value: !Ref LoadGeneratorScheduleRule
