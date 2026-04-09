@@ -84,8 +84,7 @@ def _lenenc_int(i):
         return b"\xfe" + struct.pack("<Q", i)
     else:
         raise ValueError(
-            "Encoding %x is larger than %x - no representation in LengthEncodedInteger"
-            % (i, (1 << 64))
+            f"Encoding {i:x} is larger than {1 << 64:x} - no representation in LengthEncodedInteger"
         )
 
 
@@ -135,6 +134,7 @@ class Connection:
     :param ssl_disabled: A boolean value that disables usage of TLS.
     :param ssl_key: Path to the file that contains a PEM-formatted private key for
         the client certificate.
+    :param ssl_key_password: The password for the client certificate private key.
     :param ssl_verify_cert: Set to true to check the server certificate's validity.
     :param ssl_verify_identity: Set to true to check the server's identity.
     :param read_default_group: Group to read from in the configuration file.
@@ -201,6 +201,7 @@ class Connection:
         ssl_cert=None,
         ssl_disabled=None,
         ssl_key=None,
+        ssl_key_password=None,
         ssl_verify_cert=None,
         ssl_verify_identity=None,
         compress=None,  # not supported
@@ -262,7 +263,7 @@ class Connection:
             if not ssl:
                 ssl = {}
             if isinstance(ssl, dict):
-                for key in ["ca", "capath", "cert", "key", "cipher"]:
+                for key in ["ca", "capath", "cert", "key", "password", "cipher"]:
                     value = _config("ssl-" + key, ssl.get(key))
                     if value:
                         ssl[key] = value
@@ -281,6 +282,8 @@ class Connection:
                     ssl["cert"] = ssl_cert
                 if ssl_key is not None:
                     ssl["key"] = ssl_key
+                if ssl_key_password is not None:
+                    ssl["password"] = ssl_key_password
             if ssl:
                 if not SSL_ENABLED:
                     raise NotImplementedError("ssl module not found")
@@ -389,7 +392,9 @@ class Connection:
             else:
                 ctx.verify_mode = ssl.CERT_NONE if hasnoca else ssl.CERT_REQUIRED
         if "cert" in sslp:
-            ctx.load_cert_chain(sslp["cert"], keyfile=sslp.get("key"))
+            ctx.load_cert_chain(
+                sslp["cert"], keyfile=sslp.get("key"), password=sslp.get("password")
+            )
         if "cipher" in sslp:
             ctx.set_ciphers(sslp["cipher"])
         ctx.options |= ssl.OP_NO_SSLv2
@@ -760,8 +765,6 @@ class Connection:
                 dump_packet(recv_data)
             buff += recv_data
             # https://dev.mysql.com/doc/internals/en/sending-more-than-16mbyte.html
-            if bytes_to_read == 0xFFFFFF:
-                continue
             if bytes_to_read < MAX_PACKET_LEN:
                 break
 
@@ -993,9 +996,8 @@ class Connection:
                 if plugin_name != b"dialog":
                     raise err.OperationalError(
                         CR.CR_AUTH_PLUGIN_CANNOT_LOAD,
-                        "Authentication plugin '%s'"
-                        " not loaded: - %r missing authenticate method"
-                        % (plugin_name, type(handler)),
+                        f"Authentication plugin '{plugin_name}'"
+                        f" not loaded: - {type(handler)!r} missing authenticate method",
                     )
         if plugin_name == b"caching_sha2_password":
             return _auth.caching_sha2_password_auth(self, auth_packet)
@@ -1031,16 +1033,14 @@ class Connection:
                     except AttributeError:
                         raise err.OperationalError(
                             CR.CR_AUTH_PLUGIN_CANNOT_LOAD,
-                            "Authentication plugin '%s'"
-                            " not loaded: - %r missing prompt method"
-                            % (plugin_name, handler),
+                            f"Authentication plugin '{plugin_name}'"
+                            f" not loaded: - {handler!r} missing prompt method",
                         )
                     except TypeError:
                         raise err.OperationalError(
                             CR.CR_AUTH_PLUGIN_ERR,
-                            "Authentication plugin '%s'"
-                            " %r didn't respond with string. Returned '%r' to prompt %r"
-                            % (plugin_name, handler, resp, prompt),
+                            f"Authentication plugin '{plugin_name}'"
+                            f" {handler!r} didn't respond with string. Returned '{resp!r}' to prompt {prompt!r}",
                         )
                 else:
                     raise err.OperationalError(
@@ -1073,9 +1073,8 @@ class Connection:
             except TypeError:
                 raise err.OperationalError(
                     CR.CR_AUTH_PLUGIN_CANNOT_LOAD,
-                    "Authentication plugin '%s'"
-                    " not loaded: - %r cannot be constructed with connection object"
-                    % (plugin_name, plugin_class),
+                    f"Authentication plugin '{plugin_name}'"
+                    f" not loaded: - {plugin_class!r} cannot be constructed with connection object",
                 )
         else:
             handler = None
