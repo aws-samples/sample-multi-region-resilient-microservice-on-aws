@@ -21,6 +21,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
+
 import sys
 
 from .constants import FIELD_TYPE
@@ -48,8 +49,8 @@ from .times import (
 
 # PyMySQL version.
 # Used by setuptools and connection_attrs
-VERSION = (1, 1, 0, "final", 1)
-VERSION_STRING = "1.1.0"
+VERSION = (1, 1, 1, "final", 1)
+VERSION_STRING = "1.1.1"
 
 ### for mysqlclient compatibility
 ### Django checks mysqlclient version.
