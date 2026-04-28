@@ -4,7 +4,6 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
     generate-ddl: true
-    show-sql: true
     hibernate:
       ddl-auto: update
 
@@ -16,4 +15,4 @@ spring:
 
 logging:
   level:
-    root: debug
+    root: info
