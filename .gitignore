@@ -19,3 +19,7 @@ deployment/.build-done/
 .claude/
 .kiro/
 scan-report.json
+cdk.out/
+.env
+.env.*
+cdk.context.json
