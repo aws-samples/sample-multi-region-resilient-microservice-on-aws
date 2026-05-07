@@ -1,0 +1,107 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+name: E2E Deploy and Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'source/**'
+      - 'deployment/**'
+      - '.github/workflows/e2e.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'source/**'
+      - 'deployment/**'
+      - '.github/workflows/e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  ENV: -${{ github.sha }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  e2e:
+    name: Build, Deploy, Test, Teardown
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.E2E_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-duration-seconds: 5400
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq zip
+          pip3 install boto3 --quiet
+
+      - name: Build images
+        working-directory: deployment
+        run: make build-images ENV=${{ env.ENV }} PRIMARY_ONLY=true
+
+      - name: Deploy (primary region only)
+        working-directory: deployment
+        run: make deploy-primary ENV=${{ env.ENV }} PRIMARY_ONLY=true
+
+      - name: Smoke test
+        working-directory: deployment
+        run: |
+          echo "Waiting for ECS services to stabilize..."
+          aws ecs wait services-stable \
+            --cluster apps-EcsCluster${{ env.ENV }} \
+            --services checkout${{ env.ENV }} ui${{ env.ENV }} catalog${{ env.ENV }} carts${{ env.ENV }} orders${{ env.ENV }} \
+            --region ${{ env.AWS_REGION }} || true
+
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name apps${{ env.ENV }} --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" --output text)
+
+          echo "Testing ALB endpoint: $ALB_DNS"
+          for i in $(seq 1 30); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB_DNS" || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Application responding (HTTP 200)"
+              exit 0
+            fi
+            echo "  Attempt $i: HTTP $HTTP_CODE — retrying in 10s..."
+            sleep 10
+          done
+          echo "❌ Application did not respond after 5 minutes"
+          exit 1
+
+      - name: Teardown
+        if: always()
+        working-directory: deployment
+        run: |
+          echo "Cleaning up e2e environment..."
+          make destroy-apps-primary ENV=${{ env.ENV }} PRIMARY_ONLY=true || true
+          make destroy-databases-primary ENV=${{ env.ENV }} PRIMARY_ONLY=true || true
+          make destroy-codebuild ENV=${{ env.ENV }} || true
+
+          # Delete VPC stacks
+          aws cloudformation delete-stack --stack-name baseInfra${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+          aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+          aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+          aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+
+          # Delete ECR repos
+          for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node; do
+            aws ecr delete-repository --force --repository-name ${repo}${{ env.ENV }} --region ${{ env.AWS_REGION }} --no-cli-pager 2>/dev/null || true
+          done
+
+          echo "✅ Teardown complete"
