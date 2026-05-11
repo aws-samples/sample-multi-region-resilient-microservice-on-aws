@@ -123,7 +123,7 @@ prValidation.addJobs({
       {
         name: 'Install trivy',
         run: [
-          'TRIVY_VERSION=0.58.2',
+          'TRIVY_VERSION=0.69.3',
           'curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \\',
           '  | sudo tar -xzC /usr/local/bin trivy',
           'trivy --version',
