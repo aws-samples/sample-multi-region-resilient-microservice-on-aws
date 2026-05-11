@@ -29,6 +29,7 @@ jobs:
       contents: read
     env:
       AWS_REGION: us-east-1
+      STANDBY_REGION: us-west-2
       ENV: -${{ github.sha }}
     steps:
       - name: Checkout
@@ -38,61 +39,78 @@ jobs:
         with:
           role-to-assume: ${{ secrets.E2E_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: 5400
+          role-duration-seconds: 7200
       - name: Install dependencies
         run: |-
           sudo apt-get update -qq && sudo apt-get install -y -qq jq zip
           pip3 install boto3 --quiet
-      - name: Build images
-        run: make build-images ENV=${{ env.ENV }} PRIMARY_ONLY=true
+      - name: Build images (both regions)
+        run: make build-images ENV=${{ env.ENV }}
         working-directory: deployment
-      - name: Deploy (primary region only)
-        run: make deploy-primary ENV=${{ env.ENV }} PRIMARY_ONLY=true
+      - name: Deploy (full multi-region)
+        run: make deploy ENV=${{ env.ENV }}
         working-directory: deployment
       - name: Smoke test
         run: |-
-          echo "Waiting for ECS services to stabilize..."
+          echo "Waiting for ECS services to stabilize in primary region..."
           aws ecs wait services-stable \
             --cluster apps-EcsCluster${{ env.ENV }} \
             --services checkout${{ env.ENV }} ui${{ env.ENV }} catalog${{ env.ENV }} carts${{ env.ENV }} orders${{ env.ENV }} \
             --region ${{ env.AWS_REGION }} || true
 
-          ALB_DNS=$(aws cloudformation describe-stacks \
-            --stack-name apps${{ env.ENV }} --region ${{ env.AWS_REGION }} \
-            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" --output text)
+          echo "Waiting for ECS services to stabilize in standby region..."
+          aws ecs wait services-stable \
+            --cluster apps-EcsCluster${{ env.ENV }} \
+            --services checkout${{ env.ENV }} ui${{ env.ENV }} catalog${{ env.ENV }} carts${{ env.ENV }} orders${{ env.ENV }} \
+            --region ${{ env.STANDBY_REGION }} || true
 
-          echo "Testing ALB endpoint: $ALB_DNS"
-          for i in $(seq 1 30); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB_DNS" || echo "000")
-            if [ "$HTTP_CODE" = "200" ]; then
-              echo "Application responding (HTTP 200)"
-              exit 0
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            ALB_DNS=$(aws cloudformation describe-stacks \
+              --stack-name apps${{ env.ENV }} --region "$region" \
+              --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" --output text)
+
+            echo "Testing ALB endpoint in $region: $ALB_DNS"
+            passed=false
+            for i in $(seq 1 30); do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB_DNS" || echo "000")
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "  $region responding (HTTP 200)"
+                passed=true
+                break
+              fi
+              echo "  Attempt $i ($region): HTTP $HTTP_CODE - retrying in 10s..."
+              sleep 10
+            done
+            if [ "$passed" != "true" ]; then
+              echo "$region did not respond after 5 minutes"
+              exit 1
             fi
-            echo "  Attempt $i: HTTP $HTTP_CODE - retrying in 10s..."
-            sleep 10
           done
-          echo "Application did not respond after 5 minutes"
-          exit 1
         working-directory: deployment
       - name: Teardown
         if: always()
         run: |-
           echo "Cleaning up e2e environment..."
-          make destroy-apps-primary ENV=${{ env.ENV }} PRIMARY_ONLY=true || true
-          make destroy-databases-primary ENV=${{ env.ENV }} PRIMARY_ONLY=true || true
-          make destroy-codebuild ENV=${{ env.ENV }} || true
+          make destroy-all ENV=${{ env.ENV }} || true
 
-          # Delete VPC stacks
-          aws cloudformation delete-stack --stack-name baseInfra${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
-          aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+          # Belt-and-suspenders: ensure VPC stacks are gone in both regions.
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            aws cloudformation delete-stack --stack-name baseInfra${{ env.ENV }} --region "$region" || true
+            aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region "$region" || true
+          done
+          # baseVpc: standby first (peering connection lives on standby side).
+          aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.STANDBY_REGION }} || true
+          aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.STANDBY_REGION }} || true
           aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
           aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
 
-          # Delete ECR repos
-          for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node; do
-            aws ecr delete-repository --force --repository-name ${repo}${{ env.ENV }} --region ${{ env.AWS_REGION }} --no-cli-pager 2>/dev/null || true
+          # Delete ECR repos in both regions.
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node; do
+              aws ecr delete-repository --force --repository-name ${repo}${{ env.ENV }} --region "$region" --no-cli-pager 2>/dev/null || true
+            done
           done
 
           echo "Teardown complete"
         working-directory: deployment
-    timeout-minutes: 90
+    timeout-minutes: 180
