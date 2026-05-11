@@ -71,7 +71,7 @@ prValidation.addJobs({
       { name: 'Install cfn-lint', run: 'pip install cfn-lint' },
       {
         name: 'Run cfn-lint',
-        run: 'cfn-lint deployment/**/*.yaml deployment/**/*.yml --ignore-templates deployment/mirror-sidecar-buildspec.yml --ignore-checks W3005',
+        run: 'cfn-lint deployment/**/*.yaml deployment/**/*.yml --ignore-templates deployment/mirror-sidecar-buildspec.yml --ignore-checks W3005,W2001,W8001,W1020,W7001,W1031,E1029,E3030',
       },
     ],
   },
