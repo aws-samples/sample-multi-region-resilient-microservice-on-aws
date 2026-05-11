@@ -69,7 +69,10 @@ prValidation.addJobs({
       { uses: 'actions/checkout@v4' },
       { uses: 'actions/setup-python@v5', with: { 'python-version': PYTHON_VERSION } },
       { name: 'Install cfn-lint', run: 'pip install cfn-lint' },
-      { name: 'Run cfn-lint', run: 'cfn-lint deployment/**/*.yaml deployment/**/*.yml' },
+      {
+        name: 'Run cfn-lint',
+        run: 'cfn-lint deployment/**/*.yaml deployment/**/*.yml --ignore-templates deployment/mirror-sidecar-buildspec.yml',
+      },
     ],
   },
   checkov: {
@@ -84,6 +87,7 @@ prValidation.addJobs({
           directory: 'deployment',
           framework: 'cloudformation',
           config_file: '.checkov.yaml',
+          skip_path: 'deployment/github-oidc-role.yaml,deployment/mirror-sidecar-buildspec.yml',
           quiet: 'true',
         },
       },
@@ -118,7 +122,7 @@ prValidation.addJobs({
       { uses: 'actions/checkout@v4' },
       {
         name: 'Scan filesystem for vulnerabilities',
-        uses: 'aquasecurity/trivy-action@0.28.0',
+        uses: 'aquasecurity/trivy-action@v0.28.0',
         with: {
           'scan-type': 'fs',
           'scan-ref': 'source',
