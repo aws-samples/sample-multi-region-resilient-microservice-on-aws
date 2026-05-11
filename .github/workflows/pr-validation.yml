@@ -68,11 +68,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+      - name: Install trivy
+        run: |-
+          TRIVY_VERSION=0.58.2
+          curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            | sudo tar -xzC /usr/local/bin trivy
+          trivy --version
       - name: Scan filesystem for vulnerabilities
-        uses: aquasecurity/trivy-action@v0.26.0
-        with:
-          scan-type: fs
-          scan-ref: source
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          ignore-unfixed: "true"
+        run: trivy fs source --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed --no-progress
