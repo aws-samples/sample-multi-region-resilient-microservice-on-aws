@@ -12,16 +12,18 @@ Parameters:
     Default: sample-multi-region-resilient-microservice-on-aws
 
 Conditions:
-  OIDCProviderExists: !Not
-    - !Equals
-      - !Sub '{{resolve:ssm:/github/oidc-provider-exists:1}}'
-      - ''
+  CreateOIDCProvider: !Equals
+    - !Sub '{{resolve:ssm:/github/oidc-provider-exists:1}}'
+    - 'create'
 
 Resources:
-  # Only create if not already present (shared across repos in this account)
+  # Only create if not already present (shared across repos in this account).
+  # SSM parameter /github/oidc-provider-exists controls creation:
+  #   - value 'create' -> stack creates the OIDC provider
+  #   - any other value (e.g., the existing ARN) -> stack skips creation
   GitHubOIDCProvider:
     Type: AWS::IAM::OIDCProvider
-    Condition: OIDCProviderExists
+    Condition: CreateOIDCProvider
     Properties:
       Url: https://token.actions.githubusercontent.com
       ClientIdList:
@@ -44,7 +46,9 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:pull_request'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
       Policies:
         - PolicyName: e2e-deploy-and-cleanup
           PolicyDocument:
