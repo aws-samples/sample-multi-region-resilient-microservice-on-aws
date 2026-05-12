@@ -102,6 +102,25 @@ Resources:
                 aws:RequestedRegion:
                   - us-east-1
                   - us-west-2
+          # DSQL multi-Region cluster setup (PutWitnessRegion, PutMultiRegionProperties,
+          # AddPeerCluster) is evaluated against the witness Region too, which is us-east-2
+          # and therefore outside the us-east-1/us-west-2 allowlist above. Grant these
+          # specific actions without the RequestedRegion condition; resource scoping keeps
+          # the blast radius to DSQL clusters in this account.
+          - Sid: DSQLMultiRegionSetup
+            Effect: Allow
+            Action:
+              - dsql:CreateCluster
+              - dsql:PutMultiRegionProperties
+              - dsql:PutWitnessRegion
+              - dsql:AddPeerCluster
+              - dsql:UpdateCluster
+              - dsql:GetCluster
+              - dsql:DeleteCluster
+              - dsql:TagResource
+              - dsql:UntagResource
+              - dsql:ListTagsForResource
+            Resource: !Sub 'arn:aws:dsql:*:${AWS::AccountId}:cluster/*'
 
   # Global services: IAM, Route 53, ARC Region Switch, S3, STS.
   # IAM and S3 don't support aws:RequestedRegion conditions; the trust
