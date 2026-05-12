@@ -155,10 +155,16 @@ e2e.addJob('e2e', {
   env: {
     AWS_REGION: 'us-east-1',
     STANDBY_REGION: 'us-west-2',
-    ENV: '-${{ github.sha }}',
+    // ENV is set from a short (7-char) git sha in the first step below. The
+    // full sha pushes Aurora cluster identifiers past the 63-char limit now
+    // enforced by CloudFormation's pre-provisioning property validation.
   },
   steps: [
     { name: 'Checkout', uses: 'actions/checkout@v4' },
+    {
+      name: 'Set ENV to short sha',
+      run: 'echo "ENV=-${GITHUB_SHA:0:7}" >> $GITHUB_ENV',
+    },
     {
       name: 'Configure AWS credentials',
       uses: 'aws-actions/configure-aws-credentials@v4',
