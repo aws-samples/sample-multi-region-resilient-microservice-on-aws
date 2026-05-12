@@ -121,6 +121,20 @@ Resources:
               - dsql:UntagResource
               - dsql:ListTagsForResource
             Resource: !Sub 'arn:aws:dsql:*:${AWS::AccountId}:cluster/*'
+          # DynamoDB Global Table MRSC (Multi-Region Strong Consistency) uses a witness
+          # Region (us-east-2) for quorum. CreateGlobalTableWitness and related actions
+          # are evaluated against the witness Region context, outside the us-east-1/us-west-2
+          # allowlist. Scope stays to this account's DDB tables in any Region.
+          - Sid: DynamoDBGlobalTableWitness
+            Effect: Allow
+            Action:
+              - dynamodb:CreateGlobalTableWitness
+              - dynamodb:DeleteGlobalTableWitness
+              - dynamodb:DescribeGlobalTableWitness
+              - dynamodb:UpdateGlobalTableWitness
+              - dynamodb:DescribeTable
+              - dynamodb:DescribeGlobalTable
+            Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/*'
 
   # Global services: IAM, Route 53, ARC Region Switch, S3, STS.
   # IAM and S3 don't support aws:RequestedRegion conditions; the trust
