@@ -40,7 +40,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.E2E_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-          role-duration-seconds: 7200
+          role-duration-seconds: 28800
       - name: Install dependencies
         run: |-
           sudo apt-get update -qq && sudo apt-get install -y -qq jq zip

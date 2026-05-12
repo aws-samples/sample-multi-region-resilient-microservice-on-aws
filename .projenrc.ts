@@ -171,7 +171,7 @@ e2e.addJob('e2e', {
       with: {
         'role-to-assume': '${{ secrets.E2E_ROLE_ARN }}',
         'aws-region': '${{ env.AWS_REGION }}',
-        'role-duration-seconds': 7200,
+        'role-duration-seconds': 28800,
       },
     },
     {

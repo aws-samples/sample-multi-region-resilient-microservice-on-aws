@@ -35,7 +35,11 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: github-actions-microservice-e2e
-      MaxSessionDuration: 7200
+      # 8h to cover the full e2e: build ~15m + deploy ~90m + smoke test ~10m
+      # + teardown ~60m = ~3h minimum, with headroom for slow stack ops. The
+      # previous 2h (7200) caused the token to expire mid-teardown, leaving
+      # orphaned stacks because every CloudFormation call got ExpiredToken.
+      MaxSessionDuration: 28800
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
