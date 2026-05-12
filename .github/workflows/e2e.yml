@@ -74,7 +74,7 @@ jobs:
                 --query "{Status:Status,StatusReason:StatusReason,Hooks:Hooks}" --output json || true
               # Pre-provisioning validation failures (EarlyValidation hook) surface here, not in describe-stack-events.
               echo "--- describe-events (pre-provisioning validation details) ---"
-              aws cloudformation describe-events --change-set-id "$CS" --region "$region" --no-cli-pager --output json 2>&1 | head -100 || true
+              aws cloudformation describe-events --change-set-name "$CS" --region "$region" --no-cli-pager --filters FailedEvents=true --output json 2>&1 | head -100 || true
             fi
           done
           echo "::endgroup::"
