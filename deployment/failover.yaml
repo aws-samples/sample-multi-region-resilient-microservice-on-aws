@@ -122,7 +122,12 @@ Resources:
   RegionSwitchPlan:
     Type: AWS::ARCRegionSwitch::Plan
     Properties:
-      Name: !Sub 'retail-store-ar-region-switch${Env}'
+      # ARC RegionSwitch Plan Name has a 32-char max; the previous
+      # 'retail-store-ar-region-switch${Env}' was 29 chars + ENV and
+      # overflowed as soon as ENV was more than 3 chars. Shortened to
+      # leave ~24 chars of ENV headroom (we use a 7-char sha so current
+      # usage is 10 + 8 = 18 chars).
+      Name: !Sub 'mr-rs-plan${Env}'
       ExecutionRole: !GetAtt RegionSwitchExecutionRole.Arn
       RecoveryApproach: activeActive
       PrimaryRegion: !Ref PrimaryRegion
