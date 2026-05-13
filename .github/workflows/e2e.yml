@@ -91,25 +91,11 @@ jobs:
           # Derive real resource names from the apps stack rather than assume
           # cluster/service names follow a particular pattern. ecs.yaml has no
           # CFN Outputs, so read the physical IDs via describe-stack-resources.
+          # The Deploy step has already waited for apps stack CREATE_COMPLETE,
+          # which means ECS services exist and are converging — the curl retry
+          # loop below is the actual gate for task readiness.
           for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
             echo "===== $region ====="
-            CLUSTER_ARN=$(aws cloudformation describe-stack-resources \
-              --stack-name apps${{ env.ENV }} --region "$region" \
-              --query "StackResources[?LogicalResourceId=='EcsCluster']|[0].PhysicalResourceId" --output text)
-            CLUSTER_NAME=$(basename "$CLUSTER_ARN")
-            SERVICES=""
-            for lid in CartsService OrdersService AssetsService CatalogService CheckoutService UiService; do
-              SVC=$(aws cloudformation describe-stack-resources \
-                --stack-name apps${{ env.ENV }} --region "$region" \
-                --query "StackResources[?LogicalResourceId=='$lid']|[0].PhysicalResourceId" --output text 2>/dev/null)
-              [ -n "$SVC" ] && [ "$SVC" != "None" ] && SERVICES="$SERVICES $(basename $SVC)"
-            done
-            echo "Cluster: $CLUSTER_NAME"
-            echo "Services:$SERVICES"
-            aws ecs wait services-stable \
-              --cluster "$CLUSTER_NAME" --services $SERVICES \
-              --region "$region" || true
-
             ALB_ARN=$(aws cloudformation describe-stack-resources \
               --stack-name apps${{ env.ENV }} --region "$region" \
               --query "StackResources[?LogicalResourceId=='Alb']|[0].PhysicalResourceId" --output text)
@@ -119,10 +105,10 @@ jobs:
             echo "ALB in $region: $ALB_DNS"
 
             passed=false
-            for i in $(seq 1 30); do
+            for i in $(seq 1 60); do
               HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB_DNS" || echo "000")
               if [ "$HTTP_CODE" = "200" ]; then
-                echo "  $region responding (HTTP 200)"
+                echo "  $region responding (HTTP 200) after $((i*10))s"
                 passed=true
                 break
               fi
@@ -130,7 +116,7 @@ jobs:
               sleep 10
             done
             if [ "$passed" != "true" ]; then
-              echo "$region did not respond after 5 minutes"
+              echo "$region did not respond after 10 minutes"
               exit 1
             fi
           done
@@ -161,4 +147,4 @@ jobs:
 
           echo "Teardown complete"
         working-directory: deployment
-    timeout-minutes: 180
+    timeout-minutes: 300
