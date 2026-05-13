@@ -27,4 +27,8 @@ jobs:
             feat
             fix
             chore
+            docs
+            refactor
+            test
+            ci
           requireScope: false

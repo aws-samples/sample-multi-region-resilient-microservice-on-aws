@@ -1,16 +1,16 @@
-import { github, javascript } from 'projen';
+import { github } from 'projen';
 import { GitHubProject } from 'projen/lib/github';
 
+// GitHubProject is intentionally chosen over NodeProject — this repo isn't a
+// node package, it just happens to use projen + ts-node to manage workflows.
+// package.json is hand-maintained ('default' script runs ts-node directly).
 const project = new GitHubProject({
   name: 'sample-multi-region-resilient-microservice-on-aws',
-  defaultReleaseBranch: 'main',
-  projenrcTs: true,
-  projenrcJs: false,
-  devDeps: ['projen', 'ts-node', 'typescript'],
-  packageManager: javascript.NodePackageManager.NPM,
-  pullRequestLintOptions: {
-    semanticTitleOptions: {
-      types: ['feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'ci'],
+  githubOptions: {
+    pullRequestLintOptions: {
+      semanticTitleOptions: {
+        types: ['feat', 'fix', 'chore', 'docs', 'refactor', 'test', 'ci'],
+      },
     },
   },
 });
@@ -137,13 +137,21 @@ prValidation.addJobs({
   },
 });
 
-const e2e = project.github!.addWorkflow('e2e');
+// `concurrency` on GithubWorkflow is read-only after construction; pass it
+// via the constructor options instead. addWorkflow() in this projen version
+// doesn't take options, so instantiate GithubWorkflow directly.
+const e2e = new github.GithubWorkflow(project.github!, 'e2e', {
+  limitConcurrency: true,
+  concurrencyOptions: {
+    group: 'e2e-${{ github.ref }}',
+    cancelInProgress: true,
+  },
+});
 e2e.on({
   push: { branches: ['main'], paths: E2E_PATHS },
   pullRequest: { branches: ['main'], paths: E2E_PATHS },
   workflowDispatch: {},
 });
-e2e.concurrency = { group: 'e2e-${{ github.ref }}', cancelInProgress: true };
 e2e.addJob('e2e', {
   name: 'Build, Deploy, Test, Teardown',
   runsOn: ['ubuntu-latest'],
