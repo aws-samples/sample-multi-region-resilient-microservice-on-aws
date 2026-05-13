@@ -181,8 +181,8 @@ drops monthly cost by roughly $1,000.
 | Cost Type | Amount (USD) |
 |-----------|-------------|
 | Upfront Cost | $0.00 |
-| Monthly Cost | ~$3,310 |
-| Total 12 Months Cost* | ~$39,720 |
+| Monthly Cost | ~$2,850 |
+| Total 12 Months Cost* | ~$34,200 |
 
 \* Includes upfront cost. Most line items are flat 24/7 — actual cost will
 vary with the canary schedule, log retention, and workload volume.
@@ -193,7 +193,7 @@ vary with the canary schedule, log retention, and workload volume.
 
 | Service | Monthly Cost | Configuration |
 |---------|--------------|----------------|
-| ECS Fargate | $324 | 6 services × 2 tasks: 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 0.5 GB), Linux/x86 24/7 |
+| ECS Fargate Spot | $97 | 6 services × 2 tasks (FARGATE_SPOT, ~70% off on-demand): 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 0.5 GB), Linux/x86 24/7 |
 | Application Load Balancer | $20 | 1 internal ALB ($16 base + ~$4 LCU) |
 | VPC Interface Endpoints | $329 | 15 endpoints × 3 AZs × $0.01/AZ-hr (S3 + DynamoDB are gateway endpoints, free) |
 | Aurora MySQL Serverless v2 | $175 | 2 instances × 1 ACU minimum × $0.12/ACU-hr (idle) |
@@ -207,7 +207,7 @@ vary with the canary schedule, log retention, and workload volume.
 | Secrets Manager | $20 | ~50 secrets ($0.40 each) |
 | KMS | $1 | 1 multi-Region CMK + light request volume |
 | CloudWatch Logs | ~$30 | ECS task + app logs (varies with traffic) |
-| **Per-Region subtotal** | **~$1,613** | |
+| **Per-Region subtotal** | **~$1,386** | |
 
 ### Shared / Global Costs (charged once, not per Region)
 
@@ -223,10 +223,10 @@ vary with the canary schedule, log retention, and workload volume.
 
 | | Monthly Cost |
 |---|---|
-| US East (N. Virginia) | ~$1,613 |
-| US West (Oregon) | ~$1,613 |
+| US East (N. Virginia) | ~$1,386 |
+| US West (Oregon) | ~$1,386 |
 | Shared / global | ~$78 |
-| **Total** | **~$3,304** |
+| **Total** | **~$2,850** |
 
 ### Cost-reduction levers
 
