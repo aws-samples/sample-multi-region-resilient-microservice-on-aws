@@ -88,24 +88,36 @@ jobs:
           echo "::endgroup::"
       - name: Smoke test
         run: |-
-          echo "Waiting for ECS services to stabilize in primary region..."
-          aws ecs wait services-stable \
-            --cluster apps-EcsCluster${{ env.ENV }} \
-            --services checkout${{ env.ENV }} ui${{ env.ENV }} catalog${{ env.ENV }} carts${{ env.ENV }} orders${{ env.ENV }} \
-            --region ${{ env.AWS_REGION }} || true
-
-          echo "Waiting for ECS services to stabilize in standby region..."
-          aws ecs wait services-stable \
-            --cluster apps-EcsCluster${{ env.ENV }} \
-            --services checkout${{ env.ENV }} ui${{ env.ENV }} catalog${{ env.ENV }} carts${{ env.ENV }} orders${{ env.ENV }} \
-            --region ${{ env.STANDBY_REGION }} || true
-
+          # Derive real resource names from the apps stack rather than assume
+          # cluster/service names follow a particular pattern. ecs.yaml has no
+          # CFN Outputs, so read the physical IDs via describe-stack-resources.
           for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
-            ALB_DNS=$(aws cloudformation describe-stacks \
+            echo "===== $region ====="
+            CLUSTER_ARN=$(aws cloudformation describe-stack-resources \
               --stack-name apps${{ env.ENV }} --region "$region" \
-              --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" --output text)
+              --query "StackResources[?LogicalResourceId=='EcsCluster']|[0].PhysicalResourceId" --output text)
+            CLUSTER_NAME=$(basename "$CLUSTER_ARN")
+            SERVICES=""
+            for lid in CartsService OrdersService AssetsService CatalogService CheckoutService UiService; do
+              SVC=$(aws cloudformation describe-stack-resources \
+                --stack-name apps${{ env.ENV }} --region "$region" \
+                --query "StackResources[?LogicalResourceId=='$lid']|[0].PhysicalResourceId" --output text 2>/dev/null)
+              [ -n "$SVC" ] && [ "$SVC" != "None" ] && SERVICES="$SERVICES $(basename $SVC)"
+            done
+            echo "Cluster: $CLUSTER_NAME"
+            echo "Services:$SERVICES"
+            aws ecs wait services-stable \
+              --cluster "$CLUSTER_NAME" --services $SERVICES \
+              --region "$region" || true
 
-            echo "Testing ALB endpoint in $region: $ALB_DNS"
+            ALB_ARN=$(aws cloudformation describe-stack-resources \
+              --stack-name apps${{ env.ENV }} --region "$region" \
+              --query "StackResources[?LogicalResourceId=='Alb']|[0].PhysicalResourceId" --output text)
+            ALB_DNS=$(aws elbv2 describe-load-balancers \
+              --load-balancer-arns "$ALB_ARN" --region "$region" \
+              --query "LoadBalancers[0].DNSName" --output text)
+            echo "ALB in $region: $ALB_DNS"
+
             passed=false
             for i in $(seq 1 30); do
               HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$ALB_DNS" || echo "000")
