@@ -165,48 +165,83 @@ Delete all the cloudformation stacks and associated resources from both the Regi
 
 ## Cost
 
-The following table provides a sample cost breakdown for trying out this guidance package with the default parameters in the US East (N. Virginia) Region and US West (Oregon) Region. 
+The following table provides a sample monthly cost breakdown for running the
+default deployment 24/7 in the US East (N. Virginia) and US West (Oregon)
+Regions. Numbers are derived from the templates in `deployment/` (resource
+counts, instance sizes, schedules) and current public AWS list pricing for
+those Regions; usage-driven items (data transfer, log volume, DSQL
+Processing Units) are estimated for an idle / light-load workload and will
+scale with traffic.
+
+The default canary schedule (`rate(1 minute)` × 12 canaries × 2 Regions) is
+the single largest contributor. Reducing canaries to a 5-minute schedule
+drops monthly cost by roughly $1,000.
 
 ## Summary
 | Cost Type | Amount (USD) |
 |-----------|-------------|
 | Upfront Cost | $0.00 |
-| Monthly Cost | $868.77 |
-| Total 12 Months Cost* | $10,425.24 |
+| Monthly Cost | ~$2,850 |
+| Total 12 Months Cost* | ~$34,200 |
 
-\* Includes upfront cost
+\* Includes upfront cost. Most line items are flat 24/7 — actual cost will
+vary with the canary schedule, log retention, and workload volume.
 
 ## Detailed Estimate
 
-### US East (N. Virginia) Region
+### Per-Region Costs (each of US East and US West)
 
-| Service | Monthly Cost | 12 Month Total | Configuration |
-|---------|-------------|----------------|---------------|
-| AWS Fargate | $216.24 | $2,594.88 | Linux, x86, 1 day duration, 6 tasks/day, 2GB memory, 20GB storage |
-| Application Load Balancer | $16.44 | $197.28 | 1 ALB |
-| Aurora MySQL | $179.98 | $2,159.76 | Aurora Standard, 2 instances, 1GB storage each |
-| DynamoDB | $0.28 | $3.36 | Standard table, 1KB item size, 1GB storage |
-| DynamoDB Streams | $0.0006 | $0.01 | 100 GetRecord API requests/day |
-| AWS FIS | $2.00 | $24.00 | 20 action-minutes/experiment, 1 target account |
-| Parameter Store | $0.00 | $0.00 | 50 standard parameters |
-| Secrets Manager | $20.00 | $240.00 | 50 secrets, 30-day duration |
-| KMS | $1.0003 | $12.00 | 1 CMK, 100 symmetric requests |
-| AWS CodeBuild | $1.00 | $12.00 | ~6 builds x ~5 min, BUILD_GENERAL1_MEDIUM ($0.005/min) |
+| Service | Monthly Cost | Configuration |
+|---------|--------------|----------------|
+| ECS Fargate Spot | $97 | 6 services × 2 tasks (FARGATE_SPOT, ~70% off on-demand): 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 0.5 GB), Linux/x86 24/7 |
+| Application Load Balancer | $20 | 1 internal ALB ($16 base + ~$4 LCU) |
+| VPC Interface Endpoints | $329 | 15 endpoints × 3 AZs × $0.01/AZ-hr (S3 + DynamoDB are gateway endpoints, free) |
+| Aurora MySQL Serverless v2 | $175 | 2 instances × 1 ACU minimum × $0.12/ACU-hr (idle) |
+| Amazon MQ (RabbitMQ) | $65 | mq.m7g.medium single-instance broker |
+| ElastiCache for Redis | $12 | cache.t3.micro single-node replication group |
+| CloudWatch Synthetics | $620 | 12 canaries × 1-minute schedule × $0.0012/run (DOMINANT cost) |
+| Windows EC2 client | $15 | t3.small for in-VPC browser testing |
+| DynamoDB Global Table (MRSC) | $0.30 | small dataset, replicated to other Region |
+| DynamoDB Streams | $0.001 | low GetRecord volume |
+| AWS FIS | $2 | chaos experiments, 20 action-minutes/run |
+| Secrets Manager | $20 | ~50 secrets ($0.40 each) |
+| KMS | $1 | 1 multi-Region CMK + light request volume |
+| CloudWatch Logs | ~$30 | ECS task + app logs (varies with traffic) |
+| **Per-Region subtotal** | **~$1,386** | |
 
-### US West (Oregon) Region
+### Shared / Global Costs (charged once, not per Region)
 
-| Service | Monthly Cost | 12 Month Total | Configuration |
-|---------|-------------|----------------|---------------|
-| AWS Fargate | $216.24 | $2,594.88 | Linux, x86, 1 day duration, 6 tasks/day, 2GB memory, 20GB storage |
-| Application Load Balancer | $17.89 | $214.68 | 1 ALB |
-| Aurora MySQL | $175.42 | $2,105.04 | Aurora Standard, 2 instances, 1GB storage each |
-| DynamoDB | $0.28 | $3.36 | Standard table, 1KB item size, 1GB storage |
-| DynamoDB Streams | $0.0006 | $0.01 | 100 GetRecord API requests/day |
-| AWS FIS | $2.00 | $24.00 | 20 action-minutes/experiment, 1 target account |
-| Parameter Store | $0.00 | $0.00 | 50 standard parameters |
-| Secrets Manager | $20.00 | $240.00 | 50 secrets, 30-day duration |
-| KMS | $1.0003 | $12.00 | 1 CMK, 100 symmetric requests |
-| Application Recovery Controller | $70.00 | $840.00 | 1 Plan |
+| Service | Monthly Cost | Configuration |
+|---------|--------------|----------------|
+| Aurora DSQL | ~$5 | multi-Region active-active cluster, idle storage + low DPU |
+| ARC Region Switch | $70 | 1 plan |
+| Route 53 | $2 | 1 hosted zone + 2 ARC-managed health checks |
+| AWS CodeBuild | $1 | sidecar mirror builds, ~6 × 5 min |
+| **Global subtotal** | **~$78** | |
+
+### Total
+
+| | Monthly Cost |
+|---|---|
+| US East (N. Virginia) | ~$1,386 |
+| US West (Oregon) | ~$1,386 |
+| Shared / global | ~$78 |
+| **Total** | **~$2,850** |
+
+### Cost-reduction levers
+
+If the goal is to evaluate the architecture rather than continuously exercise
+it, the following changes drop ~$1,300/month without affecting the
+multi-Region pattern itself:
+
+* Increase canary schedule from `rate(1 minute)` to `rate(5 minutes)` in
+  `deployment/canaries.yaml` → saves ~$1,000/month.
+* Trim VPC interface endpoints to a single AZ (or rely on NAT for the
+  services that don't need private connectivity) → saves up to ~$220/month.
+* Shut down the Windows EC2 clients when not in use → saves ~$30/month.
+* Run `make destroy-all` between evaluation sessions and redeploy on
+  demand — the templates create cleanly and most stateful resources are
+  small at idle.
 
 ## Acknowledgement
 *AWS Pricing Calculator provides only an estimate of your AWS fees and doesn't include any taxes that might apply. Your actual fees depend on a variety of factors, including your actual usage of AWS services.*

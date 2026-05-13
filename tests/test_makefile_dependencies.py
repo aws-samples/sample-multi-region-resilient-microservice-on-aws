@@ -57,6 +57,31 @@ def parse_makefile_targets(makefile_path):
     return targets
 
 
+def parse_recipe(makefile_path, target):
+    """Return the list of recipe (tab-indented) lines for *target*.
+
+    Used to inspect ordering invariants enforced inside a single recipe
+    rather than across the prerequisite graph.
+    """
+    content = makefile_path.read_text()
+    lines = content.split("\n")
+    target_re = re.compile(rf"^{re.escape(target)}\s*:")
+    recipe = []
+    in_recipe = False
+    for line in lines:
+        if target_re.match(line):
+            in_recipe = True
+            continue
+        if in_recipe:
+            if line.startswith("\t"):
+                recipe.append(line.lstrip("\t"))
+            elif line.strip() == "":
+                continue
+            else:
+                break
+    return recipe
+
+
 # ---------------------------------------------------------------------------
 # Graph helpers
 # ---------------------------------------------------------------------------
@@ -288,12 +313,70 @@ class TestDestroyOrdering:
     def test_region_switch_before_global_routing(self, makefile_targets):
         assert is_before(makefile_targets, "destroy-region-switch", "destroy-global_routing")
 
-    def test_infra_before_vpc(self, makefile_targets):
-        assert is_before(makefile_targets, "destroy-infra", "destroy-peer")
+    # -- Within-recipe ordering for destroy-infra --
+    #
+    # destroy-infra inlines the deletion of baseInfra and baseVpc stacks
+    # rather than splitting them into separate Make targets, so the
+    # graph-based `is_before` helper can't see the ordering. These
+    # assertions parse the recipe text directly and verify the standby
+    # region is torn down before the primary, since baseVpc holds the
+    # cross-region peering connection (regionalVpc.yaml:70) and the
+    # standby side must initiate the delete.
 
-    def test_standby_vpc_before_primary_vpc(self, makefile_targets):
+    def _recipe_index(self, recipe, pattern):
+        for i, line in enumerate(recipe):
+            if re.search(pattern, line):
+                return i
+        return -1
+
+    def test_destroy_infra_baseinfra_standby_before_primary(self):
+        recipe = parse_recipe(MAKEFILE_PATH, "destroy-infra")
+        standby = self._recipe_index(
+            recipe, r"delete-stack.*baseInfra.*\$\{STANDBY_REGION\}"
+        )
+        primary = self._recipe_index(
+            recipe, r"delete-stack.*baseInfra.*\$\{PRIMARY_REGION\}"
+        )
+        assert standby >= 0, "destroy-infra recipe missing baseInfra standby delete"
+        assert primary >= 0, "destroy-infra recipe missing baseInfra primary delete"
+        assert standby < primary, (
+            "baseInfra standby region must be deleted before primary "
+            f"(standby at line {standby}, primary at line {primary})"
+        )
+
+    def test_destroy_infra_basevpc_standby_before_primary(self):
         """Peering must be removed from standby side first."""
-        assert is_before(makefile_targets, "destroy-peer_standby", "destroy-peer_primary")
+        recipe = parse_recipe(MAKEFILE_PATH, "destroy-infra")
+        standby = self._recipe_index(
+            recipe, r"delete-stack.*baseVpc.*\$\{STANDBY_REGION\}"
+        )
+        primary = self._recipe_index(
+            recipe, r"delete-stack.*baseVpc.*\$\{PRIMARY_REGION\}"
+        )
+        assert standby >= 0, "destroy-infra recipe missing baseVpc standby delete"
+        assert primary >= 0, "destroy-infra recipe missing baseVpc primary delete"
+        assert standby < primary, (
+            "baseVpc standby region must be deleted before primary so the "
+            "VPC peering connection is removed from the standby side first "
+            f"(standby at line {standby}, primary at line {primary})"
+        )
+
+    def test_destroy_infra_baseinfra_before_basevpc(self):
+        """baseInfra (subnets, route tables) depends on baseVpc; tear down in order."""
+        recipe = parse_recipe(MAKEFILE_PATH, "destroy-infra")
+        last_baseinfra = -1
+        first_basevpc = len(recipe)
+        for i, line in enumerate(recipe):
+            if re.search(r"delete-stack.*baseInfra", line):
+                last_baseinfra = max(last_baseinfra, i)
+            if re.search(r"delete-stack.*baseVpc", line):
+                first_basevpc = min(first_basevpc, i)
+        assert last_baseinfra >= 0, "destroy-infra recipe missing baseInfra deletes"
+        assert first_basevpc < len(recipe), "destroy-infra recipe missing baseVpc deletes"
+        assert last_baseinfra < first_basevpc, (
+            "All baseInfra deletes must precede any baseVpc delete "
+            f"(last baseInfra at line {last_baseinfra}, first baseVpc at line {first_basevpc})"
+        )
 
     # -- Completeness: every destroy-* target is reachable from destroy-all --
 

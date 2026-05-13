@@ -1,0 +1,12 @@
+{
+  "name": "sample-multi-region-resilient-microservice-on-aws",
+  "private": true,
+  "scripts": {
+    "default": "ts-node --project tsconfig.dev.json .projenrc.ts"
+  },
+  "devDependencies": {
+    "projen": "^0.91.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  }
+}

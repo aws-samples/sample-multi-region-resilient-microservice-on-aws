@@ -136,7 +136,7 @@ Resources:
                       - !Ref TargetRegion
                       - !Ref AWS::AccountId
                       - "subgrp"
-                      - "catalog-recon-dbcluster-subnet-group"
+                      - "catalog-recon-dbcluster-subnet-group*"
                 Condition:
                   StringEquals:
                     aws:ResourceAccount: !Sub ${AWS::AccountId}
