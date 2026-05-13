@@ -41,7 +41,7 @@ Resources:
         - !Sub '{{resolve:ssm:Subnet2${Env}}}'
         - !Sub '{{resolve:ssm:Subnet3${Env}}}'
       DBSubnetGroupDescription: "catalog-subnet-group"
-      DBSubnetGroupName: 'catalog-recon-dbcluster-subnet-group'
+      DBSubnetGroupName: !Sub 'catalog-recon-dbcluster-subnet-group${Env}'
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
