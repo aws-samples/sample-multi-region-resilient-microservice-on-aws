@@ -47,9 +47,143 @@ new github.Stale(project.github!, {
   issues: { daysBeforeStale: 60, daysBeforeClose: 30 },
 });
 
-project.github!.addDependabot({
+// Dependabot configuration.
+//
+// projen 0.91.x's `addDependabot()` is hard-coded to emit a single `updates`
+// entry: package-ecosystem=npm, directory=/, versioning-strategy=lockfile-only.
+// To cover all the dependency surfaces in this repo (npm, maven, gomod, docker,
+// github-actions), we mutate `dep.config.updates` after construction. The
+// returned Dependabot instance exposes `config` as a public mutable object, and
+// the underlying YamlFile holds it by reference, so pushed entries are
+// serialised on synth.
+//
+// Group strategy: `all-minor-and-patch` collapses non-major bumps per ecosystem
+// into a single PR. Combined with the auto-merge workflow below this drives PR
+// noise from "one per dependency" down to "one per ecosystem per week", and
+// patch updates merge on green CI without human intervention.
+const dep = project.github!.addDependabot({
   scheduleInterval: github.DependabotScheduleInterval.WEEKLY,
   ignoreProjen: false,
+});
+
+const WEEKLY_SCHEDULE = { interval: 'weekly' };
+const NON_MAJOR_GROUP = {
+  'all-minor-and-patch': {
+    'update-types': ['minor', 'patch'],
+  },
+};
+
+// Apply the grouping to the projen-generated root npm entry as well.
+dep.config.updates[0].groups = NON_MAJOR_GROUP;
+dep.config.updates[0]['open-pull-requests-limit'] = 5;
+
+const MAVEN_DIRS = ['/source/cart', '/source/orders', '/source/ui'];
+const DOCKER_DIRS = [
+  '/source/assets',
+  '/source/cart',
+  '/source/catalog',
+  '/source/checkout',
+  '/source/orders',
+  '/source/ui',
+];
+
+// versioning-strategy is npm/pip/composer-only — omit it on other ecosystems
+// or Dependabot rejects the config.
+dep.config.updates.push(
+  // Nested npm — checkout (NestJS) service.
+  {
+    'package-ecosystem': 'npm',
+    directory: '/source/checkout',
+    schedule: WEEKLY_SCHEDULE,
+    'versioning-strategy': 'lockfile-only',
+    'open-pull-requests-limit': 5,
+    groups: NON_MAJOR_GROUP,
+  },
+  // Maven — cart, orders, ui (Spring Boot services).
+  ...MAVEN_DIRS.map((directory) => ({
+    'package-ecosystem': 'maven',
+    directory,
+    schedule: WEEKLY_SCHEDULE,
+    'open-pull-requests-limit': 5,
+    groups: NON_MAJOR_GROUP,
+  })),
+  // Go modules — catalog service.
+  {
+    'package-ecosystem': 'gomod',
+    directory: '/source/catalog',
+    schedule: WEEKLY_SCHEDULE,
+    'open-pull-requests-limit': 5,
+    groups: NON_MAJOR_GROUP,
+  },
+  // Docker base images for every service Dockerfile.
+  ...DOCKER_DIRS.map((directory) => ({
+    'package-ecosystem': 'docker',
+    directory,
+    schedule: WEEKLY_SCHEDULE,
+    'open-pull-requests-limit': 5,
+    groups: NON_MAJOR_GROUP,
+  })),
+  // GitHub Actions versions used by workflows.
+  {
+    'package-ecosystem': 'github-actions',
+    directory: '/',
+    schedule: WEEKLY_SCHEDULE,
+    'open-pull-requests-limit': 5,
+    groups: NON_MAJOR_GROUP,
+  },
+);
+
+// Auto-merge workflow for Dependabot PRs.
+//
+// Gates merge on `version-update:semver-patch` only — patch bumps are the
+// safest band; minor/major still require human review. Uses GitHub's native
+// auto-merge so the merge waits for required status checks (configured via
+// repo branch protection) to pass.
+//
+// Prerequisites the repo owner must enable separately:
+//   1. Repo settings → General → "Allow auto-merge"
+//   2. Branch protection on `main` requiring the pr-validation jobs to pass
+//   3. Settings → Actions → Workflow permissions: "Allow GitHub Actions to
+//      create and approve pull requests"
+const autoMerge = project.github!.addWorkflow('dependabot-auto-merge');
+autoMerge.on({
+  pullRequest: {},
+});
+autoMerge.addJob('auto-merge', {
+  runsOn: ['ubuntu-latest'],
+  permissions: {
+    contents: github.workflows.JobPermission.WRITE,
+    pullRequests: github.workflows.JobPermission.WRITE,
+  },
+  if: "github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'",
+  steps: [
+    {
+      name: 'Fetch Dependabot metadata',
+      id: 'metadata',
+      uses: 'dependabot/fetch-metadata@v2',
+      with: {
+        'github-token': '${{ secrets.GITHUB_TOKEN }}',
+      },
+    },
+    {
+      name: 'Approve patch updates',
+      if: "steps.metadata.outputs.update-type == 'version-update:semver-patch'",
+      run: 'gh pr review --approve "$PR_URL"',
+      env: {
+        PR_URL: '${{ github.event.pull_request.html_url }}',
+        GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+      },
+    },
+    {
+      name: 'Enable auto-merge for patch updates',
+      if: "steps.metadata.outputs.update-type == 'version-update:semver-patch'",
+      run: 'gh pr merge --auto --squash "$PR_URL"',
+      env: {
+        PR_URL: '${{ github.event.pull_request.html_url }}',
+        GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+      },
+    },
+  ],
 });
 
 const PYTHON_VERSION = '3.12';
