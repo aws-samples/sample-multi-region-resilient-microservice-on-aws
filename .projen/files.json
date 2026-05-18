@@ -2,6 +2,7 @@
   "files": [
     ".gitattributes",
     ".github/dependabot.yml",
+    ".github/workflows/dependabot-auto-merge.yml",
     ".github/workflows/e2e.yml",
     ".github/workflows/pr-validation.yml",
     ".github/workflows/pull-request-lint.yml",
