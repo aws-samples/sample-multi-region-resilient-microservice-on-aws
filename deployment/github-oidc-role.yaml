@@ -1,5 +1,32 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: MIT-0
+#
+# ─── PURPOSE ────────────────────────────────────────────────────────────────────
+# Creates an IAM role that GitHub Actions assumes via OIDC to run the e2e
+# workflow (deploy, smoke-test, teardown) without long-lived credentials.
+#
+# ─── PREREQUISITES ──────────────────────────────────────────────────────────────
+# 1. An SSM parameter /github/oidc-provider-exists must exist in the target
+#    account. Set it to 'create' if no OIDC provider exists yet, or to the
+#    existing provider ARN to skip creation (shared across repos).
+#
+# ─── DEPLOY ─────────────────────────────────────────────────────────────────────
+#   aws cloudformation deploy \
+#     --stack-name github-oidc-microservice-e2e \
+#     --template-file deployment/github-oidc-role.yaml \
+#     --capabilities CAPABILITY_NAMED_IAM \
+#     --region us-east-1
+#
+# ─── AFTER DEPLOY ───────────────────────────────────────────────────────────────
+# Copy the RoleArn output and set it as the E2E_ROLE_ARN secret on the GitHub
+# repo: Settings → Secrets and variables → Actions → New repository secret.
+#
+# ─── NOTES ──────────────────────────────────────────────────────────────────────
+# • MaxSessionDuration is 8h to cover full e2e cycle (deploy ~90m + test +
+#   teardown ~60m) with headroom for slow CloudFormation operations.
+# • Trust policy restricts to pull_request and refs/heads/main only.
+# • Regional permissions are scoped to us-east-1 and us-west-2.
+# ────────────────────────────────────────────────────────────────────────────────
 AWSTemplateFormatVersion: '2010-09-09'
 Description: GitHub Actions OIDC role for e2e workflow
 
