@@ -83,7 +83,7 @@ require (
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/signalfx/splunk-otel-go/instrumentation/database/sql/splunksql v1.30.0 // indirect
 	github.com/signalfx/splunk-otel-go/instrumentation/internal v1.30.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
