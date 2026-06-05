@@ -7,3 +7,130 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /source/checkout
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: maven
+    directory: /source/cart
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: maven
+    directory: /source/orders
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: maven
+    directory: /source/ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: gomod
+    directory: /source/catalog
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /source/assets
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /source/cart
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /source/catalog
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /source/checkout
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /source/orders
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /source/ui
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      all-minor-and-patch:
+        update-types:
+          - minor
+          - patch

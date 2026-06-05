@@ -31,5 +31,6 @@ cdk.out/
 cdk.context.json
 !/.github/workflows/stale.yml
 !/.github/dependabot.yml
+!/.github/workflows/dependabot-auto-merge.yml
 !/.github/workflows/pr-validation.yml
 !/.github/workflows/e2e.yml
