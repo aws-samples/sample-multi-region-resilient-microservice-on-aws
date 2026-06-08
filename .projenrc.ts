@@ -146,8 +146,11 @@ dep.config.updates.push(
 //   3. Settings → Actions → Workflow permissions: "Allow GitHub Actions to
 //      create and approve pull requests"
 const autoMerge = project.github!.addWorkflow('dependabot-auto-merge');
+// pull_request_target gives the workflow a write-capable GITHUB_TOKEN even on Dependabot PRs
+// (pull_request downgrades Dependabot runs to a read-only token, so approve/auto-merge 403).
+// The patch-only metadata gate + dependabot[bot] actor guard below keep this safe.
 autoMerge.on({
-  pullRequest: {},
+  pullRequestTarget: {},
 });
 autoMerge.addJob('auto-merge', {
   runsOn: ['ubuntu-latest'],
