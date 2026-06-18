@@ -217,29 +217,7 @@ global_routing: standby_ecs primary_ecs
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./globalRouting.yaml \
 	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV}
 
-wait-for-canary-alarms: canaries_primary canaries_standby
-	@echo "Waiting for region-switch composite alarms to leave INSUFFICIENT_DATA (up to 10 min)..."
-	@ALARM_NAME="ngrh-region-switch-trigger$(ENV)"; \
-	TIMEOUT=600; ELAPSED=0; INTERVAL=30; \
-	while [ $$ELAPSED -lt $$TIMEOUT ]; do \
-		STATE_P=$$(aws cloudwatch describe-alarms --alarm-names "$$ALARM_NAME" \
-			--region $(PRIMARY_REGION) --query "CompositeAlarms[0].StateValue" --output text 2>/dev/null); \
-		STATE_S=$$(aws cloudwatch describe-alarms --alarm-names "$$ALARM_NAME" \
-			--region $(STANDBY_REGION) --query "CompositeAlarms[0].StateValue" --output text 2>/dev/null); \
-		if [ "$$STATE_P" != "INSUFFICIENT_DATA" ] && [ "$$STATE_S" != "INSUFFICIENT_DATA" ] && \
-		   [ -n "$$STATE_P" ] && [ "$$STATE_P" != "None" ] && \
-		   [ -n "$$STATE_S" ] && [ "$$STATE_S" != "None" ]; then \
-			echo "  Alarms ready: primary=$$STATE_P standby=$$STATE_S"; \
-			break; \
-		fi; \
-		echo "  Waiting... primary=$$STATE_P standby=$$STATE_S ($$ELAPSED/$$TIMEOUT s)"; \
-		sleep $$INTERVAL; ELAPSED=$$((ELAPSED + INTERVAL)); \
-	done; \
-	if [ $$ELAPSED -ge $$TIMEOUT ]; then \
-		echo "WARNING: Timed out waiting for alarms -- proceeding anyway"; \
-	fi
-
-region-switch-plan: global_routing wait-for-canary-alarms
+region-switch-plan: global_routing
 	@echo "Deploy the ARC Region Switch Plan"
 	$(eval PRIMARY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(PRIMARY_REGION)$(ENV) \
@@ -247,17 +225,21 @@ region-switch-plan: global_routing wait-for-canary-alarms
 	$(eval STANDBY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(STANDBY_REGION)$(ENV) \
 		--region $(PRIMARY_REGION) --query "SecretString" --output text))
-	$(eval _PRIMARY_TRIGGER:=$(shell aws cloudformation describe-stacks \
-		--stack-name monitoring$(ENV) --region $(PRIMARY_REGION) \
-		--query "Stacks[0].Outputs[?OutputKey=='RegionSwitchTriggerAlarmArn'].OutputValue" --output text 2>/dev/null))
-	$(eval _STANDBY_TRIGGER:=$(shell aws cloudformation describe-stacks \
-		--stack-name monitoring$(ENV) --region $(STANDBY_REGION) \
-		--query "Stacks[0].Outputs[?OutputKey=='RegionSwitchTriggerAlarmArn'].OutputValue" --output text 2>/dev/null))
+	$(eval _PRIMARY_CATALOG_DB:=$(shell aws secretsmanager get-secret-value \
+		--secret-id mr-app/catalog-$(PRIMARY_REGION)-global-db-cluster$(ENV) \
+		--region $(PRIMARY_REGION) --query "SecretString" --output text))
+	$(eval _STANDBY_CATALOG_DB:=$(shell aws secretsmanager get-secret-value \
+		--secret-id mr-app/catalog-$(STANDBY_REGION)-global-db-cluster$(ENV) \
+		--region $(PRIMARY_REGION) --query "SecretString" --output text))
+	$(eval _HOSTED_ZONE_ID:=$(shell aws secretsmanager get-secret-value \
+		--secret-id HostedZoneIdSecret$(ENV) \
+		--region $(PRIMARY_REGION) --query "SecretString" --output text | sed 's|.*/||'  ))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./failover.yaml \
 	--stack-name region-switch${ENV} --capabilities CAPABILITY_NAMED_IAM \
 	--parameter-overrides Env=${ENV} DomainName=demo${ENV}.io \
 	PrimaryClusterArn=$(PRIMARY_CLUSTER_ARN) StandbyClusterArn=$(STANDBY_CLUSTER_ARN) \
-	PrimaryTriggerAlarmArn=$(_PRIMARY_TRIGGER) StandbyTriggerAlarmArn=$(_STANDBY_TRIGGER)
+	PrimaryCatalogDbArn=$(_PRIMARY_CATALOG_DB) StandbyCatalogDbArn=$(_STANDBY_CATALOG_DB) \
+	HostedZoneId=$(_HOSTED_ZONE_ID)
 
 region-switch: region-switch-plan
 	@echo "Wiring plan health checks to Route53 records"

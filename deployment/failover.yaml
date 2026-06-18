@@ -26,14 +26,15 @@ Parameters:
   StandbyClusterArn:
     Type: String
     Description: ARN of the ECS cluster in the standby region
-  PrimaryTriggerAlarmArn:
+  PrimaryCatalogDbArn:
     Type: String
-    Description: Composite alarm ARN from primary region monitoring stack (triggers deactivation of standby)
-    Default: ""
-  StandbyTriggerAlarmArn:
+    Description: ARN of the Aurora catalog DB cluster in the primary region
+  StandbyCatalogDbArn:
     Type: String
-    Description: Composite alarm ARN from standby region monitoring stack (triggers deactivation of primary)
-    Default: ""
+    Description: ARN of the Aurora catalog DB cluster in the standby region
+  HostedZoneId:
+    Type: String
+    Description: Route 53 hosted zone ID for DNS failover
 
 Resources:
   RegionSwitchExecutionRole:
@@ -110,8 +111,8 @@ Resources:
                   - "rds:SwitchoverGlobalCluster"
                 Resource:
                   - !Sub 'arn:aws:rds::${AWS::AccountId}:global-cluster:catalog-global-db-cluster${Env}'
-                  - !Sub '{{resolve:secretsmanager:mr-app/catalog-${PrimaryRegion}-global-db-cluster${Env}}}'
-                  - !Sub '{{resolve:secretsmanager:mr-app/catalog-${StandbyRegion}-global-db-cluster${Env}}}'
+                  - !Ref PrimaryCatalogDbArn
+                  - !Ref StandbyCatalogDbArn
               - Effect: Allow
                 Action:
                   - "route53:ChangeResourceRecordSets"
@@ -120,7 +121,7 @@ Resources:
                 Resource:
                   - !Sub
                     - 'arn:aws:route53:::hostedzone/${HostedZoneId}'
-                    - HostedZoneId: !Sub '{{resolve:secretsmanager:HostedZoneIdSecret${Env}}}'
+                    - HostedZoneId: !Ref HostedZoneId
               - Effect: Allow
                 Action:
                   - "route53:GetHealthCheck"
@@ -142,26 +143,6 @@ Resources:
       Regions:
         - !Ref PrimaryRegion
         - !Ref StandbyRegion
-      Triggers:
-        - TargetRegion: !Ref StandbyRegion
-          Action: deactivate
-          MinDelayMinutesBetweenExecutions: 30
-          Conditions:
-            - AssociatedAlarmName: primary-trigger
-              Condition: red
-        - TargetRegion: !Ref PrimaryRegion
-          Action: deactivate
-          MinDelayMinutesBetweenExecutions: 30
-          Conditions:
-            - AssociatedAlarmName: standby-trigger
-              Condition: red
-      AssociatedAlarms:
-        primary-trigger:
-          AlarmType: trigger
-          ResourceIdentifier: !Ref PrimaryTriggerAlarmArn
-        standby-trigger:
-          AlarmType: trigger
-          ResourceIdentifier: !Ref StandbyTriggerAlarmArn
       Workflows:
         - WorkflowTargetAction: deactivate
           WorkflowDescription: "Scale up remaining region, failover catalog database, shift DNS away"
@@ -285,8 +266,8 @@ Resources:
                 GlobalAuroraConfig:
                   GlobalClusterIdentifier: !Sub 'catalog-global-db-cluster${Env}'
                   DatabaseClusterArns:
-                    - !Sub '{{resolve:secretsmanager:mr-app/catalog-${PrimaryRegion}-global-db-cluster${Env}}}'
-                    - !Sub '{{resolve:secretsmanager:mr-app/catalog-${StandbyRegion}-global-db-cluster${Env}}}'
+                    - !Ref PrimaryCatalogDbArn
+                    - !Ref StandbyCatalogDbArn
                   Behavior: switchoverOnly
                   Ungraceful:
                     Ungraceful: failover
@@ -295,7 +276,7 @@ Resources:
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:
                 Route53HealthCheckConfig:
-                  HostedZoneId: !Sub '{{resolve:secretsmanager:HostedZoneIdSecret${Env}}}'
+                  HostedZoneId: !Ref HostedZoneId
                   RecordName: !Sub 'store.${DomainName}'
                   RecordSets:
                     - RecordSetIdentifier: PrimaryRegion
@@ -310,7 +291,7 @@ Resources:
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:
                 Route53HealthCheckConfig:
-                  HostedZoneId: !Sub '{{resolve:secretsmanager:HostedZoneIdSecret${Env}}}'
+                  HostedZoneId: !Ref HostedZoneId
                   RecordName: !Sub 'store.${DomainName}'
                   RecordSets:
                     - RecordSetIdentifier: PrimaryRegion

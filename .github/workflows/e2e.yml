@@ -148,6 +148,13 @@ jobs:
             done
           done
 
+          # Force-delete secrets to avoid recovery-window conflicts on re-runs.
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            for secret in HostedZoneIdSecret DNSRecordSecret mr-app/ecs-cluster-arn-${region} mr-app/catalog-${region}-global-db-cluster Alb-${region}; do
+              aws secretsmanager delete-secret --secret-id "${secret}${{ env.ENV }}" --force-delete-without-recovery --region "$region" --no-cli-pager 2>/dev/null || true
+            done
+          done
+
           echo "Teardown complete"
         working-directory: deployment
     timeout-minutes: 300
