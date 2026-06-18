@@ -217,7 +217,7 @@ global_routing: standby_ecs primary_ecs
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./globalRouting.yaml \
 	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV}
 
-wait-for-canary-alarms: monitoring
+wait-for-canary-alarms: canaries_primary canaries_standby
 	@echo "Waiting for region-switch composite alarms to leave INSUFFICIENT_DATA (up to 10 min)..."
 	@ALARM_NAME="ngrh-region-switch-trigger$(ENV)"; \
 	TIMEOUT=600; ELAPSED=0; INTERVAL=30; \
@@ -239,7 +239,7 @@ wait-for-canary-alarms: monitoring
 		echo "WARNING: Timed out waiting for alarms -- proceeding anyway"; \
 	fi
 
-region-switch-plan: monitoring wait-for-canary-alarms
+region-switch-plan: global_routing wait-for-canary-alarms
 	@echo "Deploy the ARC Region Switch Plan"
 	$(eval PRIMARY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(PRIMARY_REGION)$(ENV) \
