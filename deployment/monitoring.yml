@@ -757,3 +757,106 @@ Resources:
             }
           ]
         }
+
+  # -------------------------------------------------------------------------
+  # Region Switch Auto-Trigger: composite alarm per region.
+  # Each region's alarm watches its rmt-rgnl-* canaries (probing the OTHER
+  # region) AND confirms the LOCAL region is healthy (lcl-rgnl-home passing).
+  # When all remote canaries fail AND local is healthy for 5 min sustained,
+  # the alarm triggers deactivation of the impaired remote region.
+  # -------------------------------------------------------------------------
+  RmtHomeFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ngrh-rmt-home-failed${Env}"
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub "rmt-rgnl-home${Env}"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  RmtCartFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ngrh-rmt-cart-failed${Env}"
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub "rmt-rgnl-cart${Env}"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  RmtCatalogFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ngrh-rmt-catalog-failed${Env}"
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub "rmt-rgnl-catalog${Env}"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  RmtOrdersFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ngrh-rmt-orders-failed${Env}"
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub "rmt-rgnl-orders${Env}"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  LclHomeHealthyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "ngrh-lcl-home-healthy${Env}"
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub "lcl-rgnl-home${Env}"
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 90
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  RegionSwitchTriggerAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "ngrh-region-switch-trigger${Env}"
+      AlarmRule: !Sub >-
+        ALARM(${RmtHomeFailedAlarm})
+        AND ALARM(${RmtCartFailedAlarm})
+        AND ALARM(${RmtCatalogFailedAlarm})
+        AND ALARM(${RmtOrdersFailedAlarm})
+        AND OK(${LclHomeHealthyAlarm})
+
+Outputs:
+  RegionSwitchTriggerAlarmArn:
+    Value: !GetAtt RegionSwitchTriggerAlarm.Arn
+    Description: Composite alarm ARN for ARC Region Switch trigger

@@ -175,9 +175,23 @@ Resources:
         LogFilePrefix: access-logs/
       LifecycleConfiguration:
         Rules:
+          # Canary artifacts are ephemeral. Versioning is enabled on this
+          # bucket, so expiring only current versions leaves noncurrent
+          # versions (and their delete markers) behind forever. Expire both,
+          # and abort dangling multipart uploads, so storage stays bounded.
           - Id: DeleteAfter24Hours
             Status: Enabled
             ExpirationInDays: 1
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          # Once a delete marker has no noncurrent versions behind it, remove
+          # it too (kept in a separate rule: ExpiredObjectDeleteMarker cannot
+          # coexist with ExpirationInDays in the same rule).
+          - Id: CleanupExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
   canaryBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:

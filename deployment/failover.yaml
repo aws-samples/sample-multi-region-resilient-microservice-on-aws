@@ -26,6 +26,14 @@ Parameters:
   StandbyClusterArn:
     Type: String
     Description: ARN of the ECS cluster in the standby region
+  PrimaryTriggerAlarmArn:
+    Type: String
+    Description: Composite alarm ARN from primary region monitoring stack (triggers deactivation of standby)
+    Default: ""
+  StandbyTriggerAlarmArn:
+    Type: String
+    Description: Composite alarm ARN from standby region monitoring stack (triggers deactivation of primary)
+    Default: ""
 
 Resources:
   RegionSwitchExecutionRole:
@@ -134,6 +142,26 @@ Resources:
       Regions:
         - !Ref PrimaryRegion
         - !Ref StandbyRegion
+      Triggers:
+        - TargetRegion: !Ref StandbyRegion
+          Action: deactivate
+          MinDelayMinutesBetweenExecutions: 30
+          Conditions:
+            - AssociatedAlarmName: primary-trigger
+              Condition: red
+        - TargetRegion: !Ref PrimaryRegion
+          Action: deactivate
+          MinDelayMinutesBetweenExecutions: 30
+          Conditions:
+            - AssociatedAlarmName: standby-trigger
+              Condition: red
+      AssociatedAlarms:
+        primary-trigger:
+          AlarmType: trigger
+          ResourceIdentifier: !Ref PrimaryTriggerAlarmArn
+        standby-trigger:
+          AlarmType: trigger
+          ResourceIdentifier: !Ref StandbyTriggerAlarmArn
       Workflows:
         - WorkflowTargetAction: deactivate
           WorkflowDescription: "Scale up remaining region, failover catalog database, shift DNS away"

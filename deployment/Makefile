@@ -25,8 +25,8 @@ endif
 ####
 
 deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_infrastructure standby_ecs global_routing \
-	canaries_primary canaries_standby region-switch client-primary client-standby restore-reconciliation monitoring \
-	secrets-rotation chaos-engineering
+	canaries_primary canaries_standby client-primary client-standby restore-reconciliation monitoring \
+	region-switch secrets-rotation chaos-engineering ngrh
 
 deploy-primary: test-creds create-peer primary_infrastructure primary_ecs client-primary
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
@@ -217,7 +217,29 @@ global_routing: standby_ecs primary_ecs
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./globalRouting.yaml \
 	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV}
 
-region-switch-plan: global_routing
+wait-for-canary-alarms: monitoring
+	@echo "Waiting for region-switch composite alarms to leave INSUFFICIENT_DATA (up to 10 min)..."
+	@ALARM_NAME="ngrh-region-switch-trigger$(ENV)"; \
+	TIMEOUT=600; ELAPSED=0; INTERVAL=30; \
+	while [ $$ELAPSED -lt $$TIMEOUT ]; do \
+		STATE_P=$$(aws cloudwatch describe-alarms --alarm-names "$$ALARM_NAME" \
+			--region $(PRIMARY_REGION) --query "CompositeAlarms[0].StateValue" --output text 2>/dev/null); \
+		STATE_S=$$(aws cloudwatch describe-alarms --alarm-names "$$ALARM_NAME" \
+			--region $(STANDBY_REGION) --query "CompositeAlarms[0].StateValue" --output text 2>/dev/null); \
+		if [ "$$STATE_P" != "INSUFFICIENT_DATA" ] && [ "$$STATE_S" != "INSUFFICIENT_DATA" ] && \
+		   [ -n "$$STATE_P" ] && [ "$$STATE_P" != "None" ] && \
+		   [ -n "$$STATE_S" ] && [ "$$STATE_S" != "None" ]; then \
+			echo "  Alarms ready: primary=$$STATE_P standby=$$STATE_S"; \
+			break; \
+		fi; \
+		echo "  Waiting... primary=$$STATE_P standby=$$STATE_S ($$ELAPSED/$$TIMEOUT s)"; \
+		sleep $$INTERVAL; ELAPSED=$$((ELAPSED + INTERVAL)); \
+	done; \
+	if [ $$ELAPSED -ge $$TIMEOUT ]; then \
+		echo "WARNING: Timed out waiting for alarms -- proceeding anyway"; \
+	fi
+
+region-switch-plan: monitoring wait-for-canary-alarms
 	@echo "Deploy the ARC Region Switch Plan"
 	$(eval PRIMARY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(PRIMARY_REGION)$(ENV) \
@@ -225,10 +247,17 @@ region-switch-plan: global_routing
 	$(eval STANDBY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(STANDBY_REGION)$(ENV) \
 		--region $(PRIMARY_REGION) --query "SecretString" --output text))
+	$(eval _PRIMARY_TRIGGER:=$(shell aws cloudformation describe-stacks \
+		--stack-name monitoring$(ENV) --region $(PRIMARY_REGION) \
+		--query "Stacks[0].Outputs[?OutputKey=='RegionSwitchTriggerAlarmArn'].OutputValue" --output text 2>/dev/null))
+	$(eval _STANDBY_TRIGGER:=$(shell aws cloudformation describe-stacks \
+		--stack-name monitoring$(ENV) --region $(STANDBY_REGION) \
+		--query "Stacks[0].Outputs[?OutputKey=='RegionSwitchTriggerAlarmArn'].OutputValue" --output text 2>/dev/null))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./failover.yaml \
 	--stack-name region-switch${ENV} --capabilities CAPABILITY_NAMED_IAM \
 	--parameter-overrides Env=${ENV} DomainName=demo${ENV}.io \
-	PrimaryClusterArn=$(PRIMARY_CLUSTER_ARN) StandbyClusterArn=$(STANDBY_CLUSTER_ARN)
+	PrimaryClusterArn=$(PRIMARY_CLUSTER_ARN) StandbyClusterArn=$(STANDBY_CLUSTER_ARN) \
+	PrimaryTriggerAlarmArn=$(_PRIMARY_TRIGGER) StandbyTriggerAlarmArn=$(_STANDBY_TRIGGER)
 
 region-switch: region-switch-plan
 	@echo "Wiring plan health checks to Route53 records"
@@ -419,7 +448,7 @@ restore-reconciliation: primary_infrastructure standby_infrastructure standby_re
 	@echo "Step 2:Deploying Lambda and SSM Runbook"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
 	@aws cloudformation package --template-file ./database/crdr-reconciliation/src/restore-reconcile-catalog-ssm.yaml --region ${STANDBY_REGION} --s3-bucket $(result) --output-template-file ./database/crdr-reconciliation/src/out.yaml
-	@aws cloudformation deploy --template-file ./database/crdr-reconciliation/src/out.yaml --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV}
+	@aws cloudformation deploy --template-file ./database/crdr-reconciliation/src/out.yaml --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV}
 
 monitoring: restore-reconciliation arc-dns-status
 	@echo "Deploy the Monitoring Dashboard"
@@ -535,7 +564,7 @@ test-creds:
 # destroy-databases-primary depends on destroy-databases-standby.
 # DSQL parallel deletion is handled in destroy-dsql-both-regions via & and wait.
 
-destroy-all: destroy-infra
+destroy-all: destroy-ngrh destroy-infra
 	@echo "Removed all cloudformation stacks!!!"
 
 destroy-chaos-engineering:
@@ -757,3 +786,63 @@ destroy-client-standby:
 	@echo "Deleting client in ${STANDBY_REGION}"
 	@aws cloudformation delete-stack --stack-name client${ENV} --region ${STANDBY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name client${ENV} --region ${STANDBY_REGION}
+
+####
+# Next-Gen Resilience Hub (NGRH / ResilienceHubV2) model
+# Builds policies + system + user journeys + services with CloudFormation-stack
+# input sources spanning both regions. Stack ARNs are resolved dynamically so
+# this works in any account/Env. Run AFTER `make deploy` (needs the app stacks).
+####
+
+ngrh:
+	@echo "Resolving app stack ARNs in $(PRIMARY_REGION) and $(STANDBY_REGION)..."
+	$(eval _APPS_P := $(shell aws cloudformation describe-stacks --stack-name apps$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _APPS_S := $(shell aws cloudformation describe-stacks --stack-name apps$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _CAT_P := $(shell aws cloudformation describe-stacks --stack-name catalog-db-stack$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _CAT_S := $(shell aws cloudformation describe-stacks --stack-name catalog-db-stack$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _CARTS_P := $(shell aws cloudformation describe-stacks --stack-name carts-db-stack$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _ORD_P := $(shell aws cloudformation describe-stacks --stack-name orders-dsql-stack$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _ORD_S := $(shell aws cloudformation describe-stacks --stack-name orders-dsql-stack$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _GR := $(shell aws cloudformation describe-stacks --stack-name gr$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _CAN_P := $(shell aws cloudformation describe-stacks --stack-name canaries$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _CAN_S := $(shell aws cloudformation describe-stacks --stack-name canaries$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _MON_P := $(shell aws cloudformation describe-stacks --stack-name monitoring$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _MON_S := $(shell aws cloudformation describe-stacks --stack-name monitoring$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
+	$(eval _RS := $(shell aws cloudformation describe-stacks --stack-name region-switch$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	@aws cloudformation deploy --template ./ngrh.yaml --region $(PRIMARY_REGION) \
+	--stack-name ngrh$(ENV) --capabilities CAPABILITY_NAMED_IAM \
+	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION) \
+	AppsArnPrimary=$(_APPS_P) AppsArnStandby=$(_APPS_S) \
+	CatalogDbArnPrimary=$(_CAT_P) CatalogDbArnStandby=$(_CAT_S) \
+	CartsDbArnPrimary=$(_CARTS_P) \
+	OrdersDsqlArnPrimary=$(_ORD_P) OrdersDsqlArnStandby=$(_ORD_S) \
+	GrArn=$(_GR) CanariesArnPrimary=$(_CAN_P) CanariesArnStandby=$(_CAN_S) \
+	MonitoringArnPrimary=$(_MON_P) MonitoringArnStandby=$(_MON_S) \
+	RegionSwitchArn=$(_RS)
+	@echo "NGRH model deployed (stack ngrh$(ENV)). Run 'make ngrh-assess' to run failure-mode assessments."
+
+ngrh-assess:
+	$(eval _SVCS := $(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='ServiceArns'].OutputValue" --output text))
+	@echo "Gating: waiting for dependency discovery to populate (discovered resources > 0) on all services before assessing..."
+	@for svc in $$(echo $(_SVCS) | tr ',' ' '); do \
+		tries=0; \
+		while true; do \
+			n=$$(aws resiliencehubv2 list-resources --service-arn $$svc --region $(PRIMARY_REGION) --query "length(serviceResources)" --output text 2>/dev/null | awk '{s+=$$1} END{print s+0}'); \
+			[ -z "$$n" ] && n=0; \
+			if [ "$$n" -gt 0 ] 2>/dev/null; then echo "  ready: $$svc ($$n resources discovered)"; break; fi; \
+			tries=$$((tries+1)); \
+			if [ $$tries -ge 80 ]; then echo "  TIMEOUT (~20m) waiting for discovery on $$svc (resources=$$n); proceeding anyway"; break; fi; \
+			echo "  $$svc discovered resources=$$n; waiting ($$tries/80)..."; sleep 15; \
+		done; \
+	done
+	@for svc in $$(echo $(_SVCS) | tr ',' ' '); do \
+		echo "Starting failure-mode assessment: $$svc"; \
+		aws resiliencehubv2 start-failure-mode-assessment --service-arn $$svc --region $(PRIMARY_REGION) --no-cli-pager || true; \
+	done
+	@echo "Assessments started. View findings per service with:"
+	@echo "  aws resiliencehubv2 list-failure-mode-findings --service-arn <arn> --region $(PRIMARY_REGION)"
+
+destroy-ngrh:
+	@aws cloudformation delete-stack --stack-name ngrh$(ENV) --region $(PRIMARY_REGION)
+	@aws cloudformation wait stack-delete-complete --stack-name ngrh$(ENV) --region $(PRIMARY_REGION)
+	@echo "NGRH stack ngrh$(ENV) destroyed."

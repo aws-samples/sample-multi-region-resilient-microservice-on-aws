@@ -24,7 +24,8 @@
 # ─── NOTES ──────────────────────────────────────────────────────────────────────
 # • MaxSessionDuration is 8h to cover full e2e cycle (deploy ~90m + test +
 #   teardown ~60m) with headroom for slow CloudFormation operations.
-# • Trust policy restricts to pull_request and refs/heads/main only.
+# • Trust policy restricts to pull_request and any branch ref (refs/heads/*),
+#   so workflow_dispatch from feature branches can assume the role for e2e.
 # • Regional permissions are scoped to us-east-1 and us-west-2.
 # ────────────────────────────────────────────────────────────────────────────────
 AWSTemplateFormatVersion: '2010-09-09'
@@ -80,7 +81,7 @@ Resources:
               StringLike:
                 token.actions.githubusercontent.com:sub:
                   - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:pull_request'
-                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main'
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/*'
       ManagedPolicyArns:
         - !Ref RegionalServicesPolicy
         - !Ref GlobalServicesPolicy
