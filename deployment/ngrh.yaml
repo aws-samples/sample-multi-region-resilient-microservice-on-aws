@@ -1,0 +1,512 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Next-Gen Resilience Hub (ResilienceHubV2) model for the multi-region resilient
+  microservice. Defines two resiliency policies (Tier-1 / Tier-2), one System,
+  four User Journeys, and six Services with CloudFormation-stack input sources
+  spanning both regions. The Browse/Catalog RPO compensating control is captured
+  as a Service Assertion. Assessment execution is imperative (see `make ngrh-assess`).
+
+# ---------------------------------------------------------------------------
+# Parameters. Stack ARNs are resolved at deploy time by the `ngrh` Makefile
+# target (describe-stacks per region) so this template is portable across any
+# account/Env without hardcoded resource names.
+# ---------------------------------------------------------------------------
+Parameters:
+  Env:
+    Type: String
+    Default: ""
+    Description: Environment suffix (e.g. -ngrh). Must match the app deploy ENV.
+  PrimaryRegion:
+    Type: String
+    Default: us-east-1
+  StandbyRegion:
+    Type: String
+    Default: us-west-2
+  AppsArnPrimary:
+    Type: String
+    Description: StackId ARN of the apps (ECS) stack in the primary region
+  AppsArnStandby:
+    Type: String
+    Description: StackId ARN of the apps (ECS) stack in the standby region
+  CatalogDbArnPrimary:
+    Type: String
+  CatalogDbArnStandby:
+    Type: String
+  CartsDbArnPrimary:
+    Type: String
+    Description: >-
+      StackId ARN of the carts DynamoDB stack (primary region only — the
+      Global Table is defined once in primary and replicates to standby).
+  OrdersDsqlArnPrimary:
+    Type: String
+  OrdersDsqlArnStandby:
+    Type: String
+  GrArn:
+    Type: String
+    Description: StackId ARN of the global-routing (Route 53 / ARC) stack — primary region only (Route 53 is global)
+  CanariesArnPrimary:
+    Type: String
+  CanariesArnStandby:
+    Type: String
+  MonitoringArnPrimary:
+    Type: String
+  MonitoringArnStandby:
+    Type: String
+  RegionSwitchArn:
+    Type: String
+    Description: StackId ARN of the ARC Region Switch plan stack (failover/failback orchestration)
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Invoker role NGRH assumes to discover resources / run assessments.
+  # Trust resiliencehub.amazonaws.com, attach the managed execution policy.
+  # -------------------------------------------------------------------------
+  InvokerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ngrh-invoker${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: resiliencehub.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSResilienceHubAsssessmentExecutionPolicy
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        # NGRH reads CFN stack templates to discover resources from the
+        # cfnStackArn input sources (both regions). The managed policy above
+        # does not grant cloudformation:GetTemplate, so add it explicitly.
+        - PolicyName: ngrh-cfn-discovery
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:ListStackResources
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - arc-region-switch:GetPlan
+                  - arc-region-switch:ListPlans
+                Resource: "*"
+
+  # -------------------------------------------------------------------------
+  # Resiliency policies. One RTO/RPO bar per tier, applied across AZ + Region.
+  # DR approach ACTIVE_ACTIVE (both regions serve; data strongly consistent).
+  # NOTE: AvailabilitySlo.Target units to confirm at test time (expected %).
+  # -------------------------------------------------------------------------
+  TierOnePolicy:
+    Type: AWS::ResilienceHubV2::Policy
+    Properties:
+      Name: !Sub "ngrh-tier1${Env}"
+      Description: "Tier-1 (revenue funnel): RTO 10m / RPO 0 -- zero data loss"
+      AvailabilitySlo:
+        Target: 99.99
+      MultiAz: {}
+      MultiRegion:
+        RtoInMinutes: 10
+        RpoInMinutes: 0
+        DisasterRecoveryApproach: ACTIVE_ACTIVE
+
+  TierTwoPolicy:
+    Type: AWS::ResilienceHubV2::Policy
+    Properties:
+      Name: !Sub "ngrh-tier2${Env}"
+      Description: "Tier-2 (RPO-relaxed): RTO 10m / RPO 5m -- async or transient data (catalog, checkout)"
+      AvailabilitySlo:
+        Target: 99.9
+      MultiAz: {}
+      MultiRegion:
+        RtoInMinutes: 10
+        RpoInMinutes: 5
+        DisasterRecoveryApproach: ACTIVE_ACTIVE
+
+  # -------------------------------------------------------------------------
+  # System (the application container).
+  # -------------------------------------------------------------------------
+  System:
+    Type: AWS::ResilienceHubV2::System
+    Properties:
+      Name: !Sub "resilient-microservice${Env}"
+      Description: "Multi-region active/active e-commerce microservice"
+
+  # -------------------------------------------------------------------------
+  # User Journeys.
+  # -------------------------------------------------------------------------
+  BrowseJourney:
+    Type: AWS::ResilienceHubV2::UserJourney
+    Properties:
+      SystemIdentifier: !GetAtt System.SystemArn
+      Name: "BrowseCatalog"
+      Description: "Home page, product listing, product detail"
+
+  CheckoutJourney:
+    Type: AWS::ResilienceHubV2::UserJourney
+    Properties:
+      SystemIdentifier: !GetAtt System.SystemArn
+      Name: "CheckoutAndPlaceOrder"
+      Description: "Shipping -> delivery -> payment -> confirm -> order"
+
+  CartJourney:
+    Type: AWS::ResilienceHubV2::UserJourney
+    Properties:
+      SystemIdentifier: !GetAtt System.SystemArn
+      Name: "ManageCart"
+      Description: "Add/remove items, view cart"
+
+  ViewOrdersJourney:
+    Type: AWS::ResilienceHubV2::UserJourney
+    Properties:
+      SystemIdentifier: !GetAtt System.SystemArn
+      Name: "ViewOrders"
+      Description: "Order history"
+
+  # -------------------------------------------------------------------------
+  # Services. Each spans both regions (Regions + dual-region input sources)
+  # and links to the journeys it participates in via AssociatedSystems.UserJourneyIds.
+  # PolicyArn = strictest tier among the service's journeys.
+  # -------------------------------------------------------------------------
+  UiService:
+    Type: AWS::ResilienceHubV2::Service
+    Properties:
+      Name: !Sub "ui${Env}"
+      Regions: [!Ref PrimaryRegion, !Ref StandbyRegion]
+      PolicyArn: !GetAtt TierOnePolicy.PolicyArn
+      DependencyDiscovery: ENABLED
+      PermissionModel:
+        InvokerRoleName: !Ref InvokerRole
+      AssociatedSystems:
+        - SystemArn: !GetAtt System.SystemArn
+          UserJourneyIds:
+            - !GetAtt BrowseJourney.UserJourneyId
+            - !GetAtt CheckoutJourney.UserJourneyId
+            - !GetAtt CartJourney.UserJourneyId
+            - !GetAtt ViewOrdersJourney.UserJourneyId
+      InputSources:
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
+        # Global routing (Route 53 + ARC health checks) — the cross-region
+        # failover mechanism fronting the public entry point.
+        - ResourceConfiguration: { CfnStackArn: !Ref GrArn }
+        # CloudWatch Synthetics canaries probing the UI/ALB endpoint (both regions).
+        - ResourceConfiguration: { CfnStackArn: !Ref CanariesArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref CanariesArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+      # Assertions guide the assessment LLM to avoid false findings.
+      # Without these, the LLM generates findings based on all discovered
+      # resources regardless of whether this service actually uses them
+      # (all services share the apps CFN stack as an input source).
+      Assertions:
+        # Why: without this, the assessment claims "no automated failover
+        # mechanism" despite the ARC Region Switch plan being discovered.
+        - Text: >-
+            Regional failover is automated via ARC Region Switch plan
+            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+            Route 53 DNS via data-plane health checks.
+        # Why: without this, the assessment generates findings about
+        # missing ARC zonal shift, zonal autoshift, and ALB ATW -- which
+        # are unnecessary when regional failover handles AZ impairments.
+        - Text: >-
+            This architecture uses regional failover as the response to
+            significant AZ impairments rather than AZ-level isolation
+            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+            Region Switch plan pre-scales the surviving region to 200%
+            and shifts DNS within the RTO, making AZ-scoped mitigations
+            unnecessary for this design.
+        # Why: all services discover ElastiCache/MQ from the shared apps
+        # stack. Without this, the assessment generates Redis HA findings
+        # for services that don't use Redis.
+        - Text: >-
+            This service does not use ElastiCache Redis. The Redis
+            replication groups discovered from the shared apps stack
+            belong to the checkout service only.
+        # Why: same as Redis -- shared stack causes false MQ findings.
+        - Text: >-
+            This service does not use Amazon MQ RabbitMQ. The MQ brokers
+            discovered from the shared apps stack belong to the orders
+            service only.
+        - Text: >-
+            This service does not use Aurora Global Database. The Aurora
+            clusters discovered from other input sources belong to the
+            catalog service only.
+
+  CatalogService:
+    DependsOn: UiService
+    Type: AWS::ResilienceHubV2::Service
+    Properties:
+      Name: !Sub "catalog${Env}"
+      Regions: [!Ref PrimaryRegion, !Ref StandbyRegion]
+      PolicyArn: !GetAtt TierTwoPolicy.PolicyArn
+      DependencyDiscovery: ENABLED
+      PermissionModel:
+        InvokerRoleName: !Ref InvokerRole
+      AssociatedSystems:
+        - SystemArn: !GetAtt System.SystemArn
+          UserJourneyIds:
+            - !GetAtt BrowseJourney.UserJourneyId
+      InputSources:
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+      Assertions:
+        # Browse RPO compensating control (decision 3): catalog is read-only
+        # in-region, written by a re-runnable external ingest -> no
+        # unrecoverable data loss despite Aurora Global async replication.
+        - Text: >-
+            Catalog is read-only in-region; data is written by an external
+            ingest process from an external system of record. On regional
+            failover, any unreplicated catalog updates are recovered by
+            re-running ingest, so there is no unrecoverable data loss. Aurora
+            Global async replication is an accepted compensating control for
+            the Tier-1 RPO target.
+        - Text: >-
+            Catalog uses Aurora Global Database as its only data store.
+        - Text: >-
+            Regional failover is automated via ARC Region Switch plan
+            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+            Route 53 DNS via data-plane health checks.
+        - Text: >-
+            This architecture uses regional failover as the response to
+            significant AZ impairments rather than AZ-level isolation
+            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+            Region Switch plan pre-scales the surviving region to 200%
+            and shifts DNS within the RTO, making AZ-scoped mitigations
+            unnecessary for this design.
+        - Text: >-
+            This service does not use ElastiCache Redis. The Redis
+            replication groups discovered from the shared apps stack
+            belong to the checkout service only.
+        - Text: >-
+            This service does not use Amazon MQ RabbitMQ. The MQ brokers
+            discovered from the shared apps stack belong to the orders
+            service only.
+
+  CartService:
+    DependsOn: CatalogService
+    Type: AWS::ResilienceHubV2::Service
+    Properties:
+      Name: !Sub "cart${Env}"
+      Regions: [!Ref PrimaryRegion, !Ref StandbyRegion]
+      PolicyArn: !GetAtt TierOnePolicy.PolicyArn
+      DependencyDiscovery: ENABLED
+      PermissionModel:
+        InvokerRoleName: !Ref InvokerRole
+      AssociatedSystems:
+        - SystemArn: !GetAtt System.SystemArn
+          UserJourneyIds:
+            - !GetAtt CartJourney.UserJourneyId
+            - !GetAtt CheckoutJourney.UserJourneyId
+      InputSources:
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref CartsDbArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+      # Assertions guide the assessment LLM to avoid false findings.
+      # Without these, the LLM generates findings based on all discovered
+      # resources regardless of whether this service actually uses them
+      # (all services share the apps CFN stack as an input source).
+      Assertions:
+        # Why: without this, the assessment claims "no automated failover
+        # mechanism" despite the ARC Region Switch plan being discovered.
+        - Text: >-
+            Regional failover is automated via ARC Region Switch plan
+            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+            Route 53 DNS via data-plane health checks.
+        - Text: >-
+            This architecture uses regional failover as the response to
+            significant AZ impairments rather than AZ-level isolation
+            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+            Region Switch plan pre-scales the surviving region to 200%
+            and shifts DNS within the RTO, making AZ-scoped mitigations
+            unnecessary for this design.
+        - Text: >-
+            This service does not use ElastiCache Redis. The Redis
+            replication groups discovered from the shared apps stack
+            belong to the checkout service only.
+        - Text: >-
+            This service does not use Amazon MQ RabbitMQ. The MQ brokers
+            discovered from the shared apps stack belong to the orders
+            service only.
+        - Text: >-
+            This service does not use Aurora Global Database. The Aurora
+            clusters discovered from other input sources belong to the
+            catalog service only.
+
+  CheckoutService:
+    DependsOn: CartService
+    Type: AWS::ResilienceHubV2::Service
+    Properties:
+      Name: !Sub "checkout${Env}"
+      Regions: [!Ref PrimaryRegion, !Ref StandbyRegion]
+      PolicyArn: !GetAtt TierTwoPolicy.PolicyArn
+      DependencyDiscovery: ENABLED
+      PermissionModel:
+        InvokerRoleName: !Ref InvokerRole
+      AssociatedSystems:
+        - SystemArn: !GetAtt System.SystemArn
+          UserJourneyIds:
+            - !GetAtt CheckoutJourney.UserJourneyId
+      InputSources:
+        # ElastiCache Redis lives in the apps stack.
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+      # Assertions guide the assessment LLM to avoid false findings.
+      # Without these, the LLM generates findings based on all discovered
+      # resources regardless of whether this service actually uses them
+      # (all services share the apps CFN stack as an input source).
+      Assertions:
+        # Why: without this, the assessment claims "no automated failover
+        # mechanism" despite the ARC Region Switch plan being discovered.
+        - Text: >-
+            Regional failover is automated via ARC Region Switch plan
+            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+            Route 53 DNS via data-plane health checks.
+        - Text: >-
+            This architecture uses regional failover as the response to
+            significant AZ impairments rather than AZ-level isolation
+            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+            Region Switch plan pre-scales the surviving region to 200%
+            and shifts DNS within the RTO, making AZ-scoped mitigations
+            unnecessary for this design.
+        - Text: >-
+            This service does not use Amazon MQ RabbitMQ. The MQ brokers
+            discovered from the shared apps stack belong to the orders
+            service only.
+        - Text: >-
+            This service does not use Aurora Global Database. The Aurora
+            clusters discovered from other input sources belong to the
+            catalog service only.
+
+  OrdersService:
+    DependsOn: CheckoutService
+    Type: AWS::ResilienceHubV2::Service
+    Properties:
+      Name: !Sub "orders${Env}"
+      Regions: [!Ref PrimaryRegion, !Ref StandbyRegion]
+      PolicyArn: !GetAtt TierOnePolicy.PolicyArn
+      DependencyDiscovery: ENABLED
+      PermissionModel:
+        InvokerRoleName: !Ref InvokerRole
+      AssociatedSystems:
+        - SystemArn: !GetAtt System.SystemArn
+          UserJourneyIds:
+            - !GetAtt CheckoutJourney.UserJourneyId
+            - !GetAtt ViewOrdersJourney.UserJourneyId
+      InputSources:
+        # Aurora DSQL + Amazon MQ (RabbitMQ; MQ broker is in the apps stack).
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref OrdersDsqlArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref OrdersDsqlArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+      # Assertions guide the assessment LLM to avoid false findings.
+      # Without these, the LLM generates findings based on all discovered
+      # resources regardless of whether this service actually uses them
+      # (all services share the apps CFN stack as an input source).
+      Assertions:
+        # Why: without this, the assessment claims "no automated failover
+        # mechanism" despite the ARC Region Switch plan being discovered.
+        - Text: >-
+            Regional failover is automated via ARC Region Switch plan
+            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+            Route 53 DNS via data-plane health checks.
+        - Text: >-
+            This architecture uses regional failover as the response to
+            significant AZ impairments rather than AZ-level isolation
+            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+            Region Switch plan pre-scales the surviving region to 200%
+            and shifts DNS within the RTO, making AZ-scoped mitigations
+            unnecessary for this design.
+        - Text: >-
+            This service does not use ElastiCache Redis. The Redis
+            replication groups discovered from the shared apps stack
+            belong to the checkout service only.
+        - Text: >-
+            This service does not use Aurora Global Database. The Aurora
+            clusters discovered from other input sources belong to the
+            catalog service only.
+        - Text: >-
+            RabbitMQ is used only for post-commit event notification
+            (OrderCreatedEvent published after DSQL transaction commits).
+            The order of record is durably stored in Aurora DSQL (RPO 0)
+            before any MQ publish. Lost MQ messages affect downstream
+            notifications only, not order data integrity.
+
+  AssetsService:
+    DependsOn: OrdersService
+    Type: AWS::ResilienceHubV2::Service
+    Properties:
+      Name: !Sub "assets${Env}"
+      Regions: [!Ref PrimaryRegion, !Ref StandbyRegion]
+      PolicyArn: !GetAtt TierTwoPolicy.PolicyArn
+      DependencyDiscovery: ENABLED
+      PermissionModel:
+        InvokerRoleName: !Ref InvokerRole
+      AssociatedSystems:
+        - SystemArn: !GetAtt System.SystemArn
+          UserJourneyIds:
+            - !GetAtt BrowseJourney.UserJourneyId
+      InputSources:
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+      Assertions:
+        - Text: >-
+            Assets is a stateless nginx container serving static files
+            (images, CSS, JS). It has no data store, no session state,
+            and no further dependencies. It does not use ElastiCache
+            Redis, Amazon MQ RabbitMQ, Aurora, DynamoDB, or any other
+            data store. Findings about these resources are not applicable.
+        - Text: >-
+            Regional failover is automated via ARC Region Switch plan
+            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+            Route 53 DNS via data-plane health checks.
+        - Text: >-
+            This architecture uses regional failover as the response to
+            significant AZ impairments rather than AZ-level isolation
+            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+            Region Switch plan pre-scales the surviving region to 200%
+            and shifts DNS within the RTO, making AZ-scoped mitigations
+            unnecessary for this design.
+
+Outputs:
+  SystemArn:
+    Value: !GetAtt System.SystemArn
+  TierOnePolicyArn:
+    Value: !GetAtt TierOnePolicy.PolicyArn
+  TierTwoPolicyArn:
+    Value: !GetAtt TierTwoPolicy.PolicyArn
+  ServiceArns:
+    Description: Comma-separated service ARNs (used by `make ngrh-assess`)
+    Value: !Join
+      - ","
+      - - !GetAtt UiService.ServiceArn
+        - !GetAtt CatalogService.ServiceArn
+        - !GetAtt CartService.ServiceArn
+        - !GetAtt CheckoutService.ServiceArn
+        - !GetAtt OrdersService.ServiceArn
+        - !GetAtt AssetsService.ServiceArn

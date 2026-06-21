@@ -30,7 +30,7 @@ public class SessionIDUtil {
     public static final String HEADER_NAME = "X-Session-ID";
 
     public static String addSessionCookie(ServerWebExchange exchange) {
-        String sessionId = "3e8480f7-92fb-4043-8e30-41cf906e676f";
+        String sessionId = UUID.randomUUID().toString();
 
         ResponseCookie newCookie = ResponseCookie.from(COOKIE_NAME, sessionId).build();
 

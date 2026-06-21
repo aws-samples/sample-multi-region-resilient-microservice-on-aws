@@ -40,6 +40,7 @@ project.gitignore.exclude(
   '.env',
   '.env.*',
   'cdk.context.json',
+  'temporary',
 );
 
 new github.Stale(project.github!, {
@@ -300,15 +301,17 @@ e2e.addJob('e2e', {
   env: {
     AWS_REGION: 'us-east-1',
     STANDBY_REGION: 'us-west-2',
-    // ENV is set from a short (7-char) git sha in the first step below. The
-    // full sha pushes Aurora cluster identifiers past the 63-char limit now
+    // ENV is set from a short (7-char) git sha in the first step below.
+    // Uses PR head SHA (not GITHUB_SHA which is the merge commit for
+    // pull_request events -- merge SHAs can collide with prior runs).
+    // The full sha pushes Aurora cluster identifiers past the 63-char limit
     // enforced by CloudFormation's pre-provisioning property validation.
   },
   steps: [
     { name: 'Checkout', uses: 'actions/checkout@v4' },
     {
       name: 'Set ENV to short sha',
-      run: 'echo "ENV=-${GITHUB_SHA:0:7}" >> $GITHUB_ENV',
+      run: 'echo "ENV=-$(echo ${{ github.event.pull_request.head.sha || github.sha }} | cut -c1-7)" >> $GITHUB_ENV',
     },
     {
       name: 'Configure AWS credentials',
@@ -438,6 +441,13 @@ e2e.addJob('e2e', {
         'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
         '  for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node; do',
         '    aws ecr delete-repository --force --repository-name ${repo}${{ env.ENV }} --region "$region" --no-cli-pager 2>/dev/null || true',
+        '  done',
+        'done',
+        '',
+        '# Force-delete secrets to avoid recovery-window conflicts on re-runs.',
+        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        '  for secret in HostedZoneIdSecret DNSRecordSecret mr-app/ecs-cluster-arn-${region} mr-app/catalog-${region}-global-db-cluster Alb-${region}; do',
+        '    aws secretsmanager delete-secret --secret-id "${secret}${{ env.ENV }}" --force-delete-without-recovery --region "$region" --no-cli-pager 2>/dev/null || true',
         '  done',
         'done',
         '',

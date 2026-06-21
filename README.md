@@ -49,6 +49,62 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 5. An operator uses the SSM runbook to recover a copy of the old primary database from a snapshot and compare the data in the new primary database to the old and create a missing transaction report
 
 
+## Resilience Modeling with AWS Resilience Hub
+
+The `make ngrh` target models this application in AWS Resilience Hub (`resiliencehubv2`) so its resilience can be assessed against explicit RTO/RPO targets. The model has three layers — **user journeys**, **services**, and **resiliency policies (tiers)** — described below along with the rationale for each mapping.
+
+### User journeys → services
+
+A *user journey* is a business-meaningful path through the application. Each journey depends on the ECS services that fulfill it:
+
+| User journey | Services exercised |
+|---|---|
+| Browse Catalog | ui, catalog, assets |
+| Manage Cart | ui, cart |
+| Checkout & Place Order | ui, checkout, orders, cart |
+| View Orders | ui, orders |
+
+Notes:
+* `ui` is the only public entry point (ALB + Route 53/ARC health checks) and fans out to the backends via ECS Service Connect, so it participates in every journey.
+* `checkout` orchestrates the order: it reads the cart and calls `orders` to create the order on submit (an inter-service dependency beyond the UI-centric hub-and-spoke diagram).
+* Operational concerns (CloudWatch Synthetics canaries, the ARC Region Switch runbook) are **not** modeled as journeys — they are detection/recovery mechanisms, not user-facing paths.
+
+### Resiliency policies (tiers)
+
+Two policies express the resilience requirements. Each uses **one RTO/RPO bar applied across all disruption types** (AZ, hardware, software, Region); the per-disruption breakdown comes from the assessment, not from differentiated targets.
+
+| Tier | RTO | RPO | Applied to journeys |
+|---|---|---|---|
+| **Tier-1** (revenue funnel) | 10 min | 0 | Browse Catalog, Checkout & Place Order |
+| **Tier-2** (standard) | 15 min | 5 min | Manage Cart, View Orders |
+
+Justification:
+* **Tier-1 = the revenue funnel.** Browsing the catalog gates *all* sales (no browse → no purchase) and checkout is the revenue transaction itself, so both get the strictest targets.
+* **Tier-1 RTO is 10 minutes — the realistic Active/Active floor.** Resilience Hub treats ~10 minutes as the minimum achievable RTO for an Active/Active topology (failure detection + DNS TTL + connection drain + service stabilization). An aspirational 5-minute target is flagged as unachievable across every service, which drowns out the genuinely actionable findings; 10 minutes is the honest target and lets the real architecture gaps surface.
+* **Tier-2 = important but degraded-tolerable.** Managing the cart (mid-funnel) and viewing past orders (post-purchase/support) can tolerate a longer recovery and small data-loss window without direct revenue impact.
+* **RPO 0 for Tier-1 is honest for the write path** because Orders uses Aurora DSQL and Carts uses DynamoDB Global Tables — strongly consistent across Regions. The only data lost in a regional failover is in-flight checkout session state in ElastiCache (not a system of record; the customer simply re-enters it).
+* **Browse Catalog is a read path on Aurora Global Database (asynchronous replication),** so a strict RPO 0 is not physically achievable there. This is an accepted compensating control rather than a defect: catalog data is read-only in-Region and written by an external, re-runnable ingest from an external system of record, so any unreplicated catalog updates are recovered by re-running ingest with no unrecoverable data loss. This rationale is recorded as a Resilience Hub **assertion** on the `catalog` service.
+
+### Service tier = strictest journey it serves
+
+A service can carry only one policy, so each service inherits the **strictest tier of any journey it participates in**:
+
+| Service | In journeys | Effective tier |
+|---|---|---|
+| ui | all four (incl. two Tier-1) | Tier-1 |
+| catalog | Browse Catalog (T1) | Tier-1 |
+| assets | Browse Catalog (T1) | Tier-1 |
+| checkout | Checkout & Place Order (T1) | Tier-1 |
+| orders | Checkout (T1) + View Orders (T2) | Tier-1 |
+| cart | Checkout (T1) + Manage Cart (T2) | Tier-1 |
+
+All six services resolve to Tier-1 because every service participates in at least one revenue-funnel (Tier-1) journey. This is intentional: a service shared between a Tier-1 and a Tier-2 journey **must** meet the stricter target to satisfy the Tier-1 journey. The tier differentiation therefore lives at the **journey** layer (two Tier-1, two Tier-2), while the **service** layer is uniformly Tier-1 here. An application with services used *exclusively* by lower-tier journeys would show a mix of service tiers.
+
+### Region scope
+
+The application is modeled as a single multi-Region system with `disasterRecoveryApproach = ACTIVE_ACTIVE` for both the multi-AZ and multi-Region targets — both Regions serve traffic and the data tier is strongly consistent (Aurora DSQL, DynamoDB Global Tables). ECS capacity that ARC scales up on failover is reflected as a contributor to recovery time (RTO), not as a different DR classification.
+
+
 ## Pre-requisites
 
 * To deploy this example guidance, you need an AWS account (We suggest using a temporary or a development account to 

@@ -93,7 +93,6 @@ Resources:
   RegionalServicesPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: github-actions-microservice-e2e-regional
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -174,7 +173,6 @@ Resources:
   GlobalServicesPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      ManagedPolicyName: github-actions-microservice-e2e-global
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -233,6 +231,7 @@ Resources:
             Action:
               - arc-region-switch:*
               - arc-zonal-shift:*
+              - resiliencehub:*
             Resource: '*'
           - Sid: S3
             Effect: Allow

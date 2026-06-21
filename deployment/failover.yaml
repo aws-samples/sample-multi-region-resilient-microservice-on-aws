@@ -26,6 +26,15 @@ Parameters:
   StandbyClusterArn:
     Type: String
     Description: ARN of the ECS cluster in the standby region
+  PrimaryCatalogDbArn:
+    Type: String
+    Description: ARN of the Aurora catalog DB cluster in the primary region
+  StandbyCatalogDbArn:
+    Type: String
+    Description: ARN of the Aurora catalog DB cluster in the standby region
+  HostedZoneId:
+    Type: String
+    Description: Route 53 hosted zone ID for DNS failover
 
 Resources:
   RegionSwitchExecutionRole:
@@ -102,8 +111,8 @@ Resources:
                   - "rds:SwitchoverGlobalCluster"
                 Resource:
                   - !Sub 'arn:aws:rds::${AWS::AccountId}:global-cluster:catalog-global-db-cluster${Env}'
-                  - !Sub '{{resolve:secretsmanager:mr-app/catalog-${PrimaryRegion}-global-db-cluster${Env}}}'
-                  - !Sub '{{resolve:secretsmanager:mr-app/catalog-${StandbyRegion}-global-db-cluster${Env}}}'
+                  - !Ref PrimaryCatalogDbArn
+                  - !Ref StandbyCatalogDbArn
               - Effect: Allow
                 Action:
                   - "route53:ChangeResourceRecordSets"
@@ -112,7 +121,7 @@ Resources:
                 Resource:
                   - !Sub
                     - 'arn:aws:route53:::hostedzone/${HostedZoneId}'
-                    - HostedZoneId: !Sub '{{resolve:secretsmanager:HostedZoneIdSecret${Env}}}'
+                    - HostedZoneId: !Ref HostedZoneId
               - Effect: Allow
                 Action:
                   - "route53:GetHealthCheck"
@@ -257,8 +266,8 @@ Resources:
                 GlobalAuroraConfig:
                   GlobalClusterIdentifier: !Sub 'catalog-global-db-cluster${Env}'
                   DatabaseClusterArns:
-                    - !Sub '{{resolve:secretsmanager:mr-app/catalog-${PrimaryRegion}-global-db-cluster${Env}}}'
-                    - !Sub '{{resolve:secretsmanager:mr-app/catalog-${StandbyRegion}-global-db-cluster${Env}}}'
+                    - !Ref PrimaryCatalogDbArn
+                    - !Ref StandbyCatalogDbArn
                   Behavior: switchoverOnly
                   Ungraceful:
                     Ungraceful: failover
@@ -267,7 +276,7 @@ Resources:
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:
                 Route53HealthCheckConfig:
-                  HostedZoneId: !Sub '{{resolve:secretsmanager:HostedZoneIdSecret${Env}}}'
+                  HostedZoneId: !Ref HostedZoneId
                   RecordName: !Sub 'store.${DomainName}'
                   RecordSets:
                     - RecordSetIdentifier: PrimaryRegion
@@ -282,7 +291,7 @@ Resources:
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:
                 Route53HealthCheckConfig:
-                  HostedZoneId: !Sub '{{resolve:secretsmanager:HostedZoneIdSecret${Env}}}'
+                  HostedZoneId: !Ref HostedZoneId
                   RecordName: !Sub 'store.${DomainName}'
                   RecordSets:
                     - RecordSetIdentifier: PrimaryRegion

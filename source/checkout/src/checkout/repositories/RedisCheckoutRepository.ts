@@ -58,7 +58,10 @@ export class RedisCheckoutRepository implements ICheckoutRepository {
   async set(key : string, value : string) : Promise<string> {
     const client = await this.client()
 
-    return client.set(key, value);
+    // 1-hour TTL (3600s): checkout sessions are short-lived; prevents
+    // indefinite accumulation of stale entries in Redis. Real checkout
+    // completes in minutes; 1h is a generous upper bound.
+    return client.set(key, value, { EX: 3600 });
   }
 
   async remove(key : string) : Promise<void> {

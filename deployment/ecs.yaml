@@ -582,6 +582,8 @@ Resources:
               Value: http://localhost:4316/v1/metrics
             - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               Value: http://localhost:4316/v1/traces
+            - Name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
             - Name: OTEL_TRACES_SAMPLER
               Value: xray
             - Name: OTEL_PROPAGATORS
@@ -783,6 +785,8 @@ Resources:
               Value: http://localhost:4316/v1/metrics
             - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               Value: http://localhost:4316/v1/traces
+            - Name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
             - Name: OTEL_TRACES_SAMPLER
               Value: xray
             - Name: OTEL_PROPAGATORS
@@ -1248,6 +1252,8 @@ Resources:
               Value: http://localhost:4316/v1/metrics
             - Name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
               Value: http://localhost:4316/v1/traces
+            - Name: OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+              Value: http://localhost:4316/v1/metrics
             - Name: OTEL_TRACES_SAMPLER
               Value: xray
             - Name: OTEL_PROPAGATORS
