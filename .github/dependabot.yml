@@ -7,6 +7,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    labels:
+      - auto-approve
+      - auto-merge
     groups:
       all-minor-and-patch:
         update-types:
@@ -24,6 +27,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: maven
     directory: /source/cart
     schedule:
@@ -34,6 +40,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: maven
     directory: /source/orders
     schedule:
@@ -44,6 +53,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: maven
     directory: /source/ui
     schedule:
@@ -54,6 +66,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: gomod
     directory: /source/catalog
     schedule:
@@ -64,6 +79,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: docker
     directory: /source/assets
     schedule:
@@ -74,6 +92,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: docker
     directory: /source/cart
     schedule:
@@ -84,6 +105,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: docker
     directory: /source/catalog
     schedule:
@@ -94,6 +118,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: docker
     directory: /source/checkout
     schedule:
@@ -104,6 +131,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: docker
     directory: /source/orders
     schedule:
@@ -114,6 +144,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: docker
     directory: /source/ui
     schedule:
@@ -124,6 +157,9 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -134,3 +170,6 @@ updates:
         update-types:
           - minor
           - patch
+    labels:
+      - auto-approve
+      - auto-merge

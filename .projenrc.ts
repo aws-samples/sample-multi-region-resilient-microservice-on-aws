@@ -74,9 +74,13 @@ const NON_MAJOR_GROUP = {
   },
 };
 
+// Labels for auto-approve/auto-merge gating.
+const AUTO_LABELS = ['auto-approve', 'auto-merge'];
+
 // Apply the grouping to the projen-generated root npm entry as well.
 dep.config.updates[0].groups = NON_MAJOR_GROUP;
 dep.config.updates[0]['open-pull-requests-limit'] = 5;
+dep.config.updates[0].labels = AUTO_LABELS;
 
 const MAVEN_DIRS = ['/source/cart', '/source/orders', '/source/ui'];
 const DOCKER_DIRS = [
@@ -99,6 +103,7 @@ dep.config.updates.push(
     'versioning-strategy': 'lockfile-only',
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
+    labels: AUTO_LABELS,
   },
   // Maven — cart, orders, ui (Spring Boot services).
   ...MAVEN_DIRS.map((directory) => ({
@@ -107,6 +112,7 @@ dep.config.updates.push(
     schedule: WEEKLY_SCHEDULE,
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
+    labels: AUTO_LABELS,
   })),
   // Go modules — catalog service.
   {
@@ -115,6 +121,7 @@ dep.config.updates.push(
     schedule: WEEKLY_SCHEDULE,
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
+    labels: AUTO_LABELS,
   },
   // Docker base images for every service Dockerfile.
   ...DOCKER_DIRS.map((directory) => ({
@@ -123,6 +130,7 @@ dep.config.updates.push(
     schedule: WEEKLY_SCHEDULE,
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
+    labels: AUTO_LABELS,
   })),
   // GitHub Actions versions used by workflows.
   {
@@ -131,27 +139,41 @@ dep.config.updates.push(
     schedule: WEEKLY_SCHEDULE,
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
+    labels: AUTO_LABELS,
   },
 );
 
-// Auto-merge workflow for Dependabot PRs.
-//
-// Gates merge on `version-update:semver-patch` only — patch bumps are the
-// safest band; minor/major still require human review. Uses GitHub's native
-// auto-merge so the merge waits for required status checks (configured via
-// repo branch protection) to pass.
-//
-// Prerequisites the repo owner must enable separately:
-//   1. Repo settings → General → "Allow auto-merge"
-//   2. Branch protection on `main` requiring the pr-validation jobs to pass
-//   3. Settings → Actions → Workflow permissions: "Allow GitHub Actions to
-//      create and approve pull requests"
-const autoMerge = project.github!.addWorkflow('dependabot-auto-merge');
-// pull_request_target gives the workflow a write-capable GITHUB_TOKEN even on Dependabot PRs
-// (pull_request downgrades Dependabot runs to a read-only token, so approve/auto-merge 403).
-// The patch-only metadata gate + dependabot[bot] actor guard below keep this safe.
+// ─── Auto-approve: label-gated approval for Dependabot PRs ─────────────────────
+const autoApprove = project.github!.addWorkflow('auto-approve');
+autoApprove.on({
+  pullRequestTarget: {
+    types: ['labeled', 'opened', 'synchronize', 'reopened', 'ready_for_review'],
+  },
+});
+autoApprove.addJob('auto-approve', {
+  runsOn: ['ubuntu-latest'],
+  permissions: {
+    pullRequests: github.workflows.JobPermission.WRITE,
+  },
+  if: "github.actor == 'dependabot[bot]' && contains(github.event.pull_request.labels.*.name, 'auto-approve')",
+  steps: [
+    {
+      name: 'Approve PR',
+      run: 'gh pr review --approve "$PR_URL"',
+      env: {
+        PR_URL: '${{ github.event.pull_request.html_url }}',
+        GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+      },
+    },
+  ],
+});
+
+// ─── Auto-merge: squash-merge Dependabot PRs on open ───────────────────────────
+const autoMerge = project.github!.addWorkflow('auto-merge');
 autoMerge.on({
-  pullRequestTarget: {},
+  pullRequestTarget: {
+    types: ['opened', 'reopened', 'ready_for_review'],
+  },
 });
 autoMerge.addJob('auto-merge', {
   runsOn: ['ubuntu-latest'],
@@ -159,34 +181,28 @@ autoMerge.addJob('auto-merge', {
     contents: github.workflows.JobPermission.WRITE,
     pullRequests: github.workflows.JobPermission.WRITE,
   },
-  if: "github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'",
+  if: "github.actor == 'dependabot[bot]'",
   steps: [
     {
-      name: 'Fetch Dependabot metadata',
-      id: 'metadata',
-      uses: 'dependabot/fetch-metadata@v2',
-      with: {
-        'github-token': '${{ secrets.GITHUB_TOKEN }}',
-      },
-    },
-    {
-      name: 'Approve patch updates',
-      if: "steps.metadata.outputs.update-type == 'version-update:semver-patch'",
-      run: 'gh pr review --approve "$PR_URL"',
-      env: {
-        PR_URL: '${{ github.event.pull_request.html_url }}',
-        GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
-      },
-    },
-    {
-      name: 'Enable auto-merge for patch updates',
-      if: "steps.metadata.outputs.update-type == 'version-update:semver-patch'",
+      name: 'Enable auto-merge',
       run: 'gh pr merge --auto --squash "$PR_URL"',
       env: {
         PR_URL: '${{ github.event.pull_request.html_url }}',
         GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
       },
     },
+  ],
+});
+
+// ─── Dependency review on PRs ──────────────────────────────────────────────────
+const depReview = project.github!.addWorkflow('dependency-review');
+depReview.on({ pullRequest: {} });
+depReview.addJob('dependency-review', {
+  runsOn: ['ubuntu-latest'],
+  permissions: { contents: github.workflows.JobPermission.READ },
+  steps: [
+    { uses: 'actions/checkout@v6' },
+    { uses: 'actions/dependency-review-action@v4' },
   ],
 });
 
