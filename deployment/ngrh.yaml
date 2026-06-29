@@ -12,6 +12,16 @@ Description: >
 # account/Env without hardcoded resource names.
 # ---------------------------------------------------------------------------
 Parameters:
+  IncludeAssertions:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      When true, each Service carries its compensating-control Assertions.
+      When false, Assertions are omitted (Fn::If -> AWS::NoValue) so NGRH
+      assesses the bare topology -- used for with/without-assertions A/B
+      benchmarking. Toggling false->true also self-heals any duplicate
+      assertions accumulated by out-of-band CLI restores.
   Env:
     Type: String
     Default: ""
@@ -55,6 +65,10 @@ Parameters:
   RegionSwitchArn:
     Type: String
     Description: StackId ARN of the ARC Region Switch plan stack (failover/failback orchestration)
+
+Conditions:
+  # Gate each Service.Assertions list on the IncludeAssertions parameter.
+  WithAssertions: !Equals [!Ref IncludeAssertions, "true"]
 
 Resources:
 
@@ -207,39 +221,42 @@ Resources:
       # Without these, the LLM generates findings based on all discovered
       # resources regardless of whether this service actually uses them
       # (all services share the apps CFN stack as an input source).
-      Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
-        - Text: >-
-            Regional failover is automated via ARC Region Switch plan
-            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
-            Route 53 DNS via data-plane health checks.
-        # Why: without this, the assessment generates findings about
-        # missing ARC zonal shift, zonal autoshift, and ALB ATW -- which
-        # are unnecessary when regional failover handles AZ impairments.
-        - Text: >-
-            This architecture uses regional failover as the response to
-            significant AZ impairments rather than AZ-level isolation
-            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
-            Region Switch plan pre-scales the surviving region to 200%
-            and shifts DNS within the RTO, making AZ-scoped mitigations
-            unnecessary for this design.
-        # Why: all services discover ElastiCache/MQ from the shared apps
-        # stack. Without this, the assessment generates Redis HA findings
-        # for services that don't use Redis.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        # Why: same as Redis -- shared stack causes false MQ findings.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
+      Assertions: !If
+        - WithAssertions
+        -
+          # Why: without this, the assessment claims "no automated failover
+          # mechanism" despite the ARC Region Switch plan being discovered.
+          - Text: >-
+              Regional failover is automated via ARC Region Switch plan
+              (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+              Route 53 DNS via data-plane health checks.
+          # Why: without this, the assessment generates findings about
+          # missing ARC zonal shift, zonal autoshift, and ALB ATW -- which
+          # are unnecessary when regional failover handles AZ impairments.
+          - Text: >-
+              This architecture uses regional failover as the response to
+              significant AZ impairments rather than AZ-level isolation
+              mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+              Region Switch plan pre-scales the surviving region to 200%
+              and shifts DNS within the RTO, making AZ-scoped mitigations
+              unnecessary for this design.
+          # Why: all services discover ElastiCache/MQ from the shared apps
+          # stack. Without this, the assessment generates Redis HA findings
+          # for services that don't use Redis.
+          - Text: >-
+              This service does not use ElastiCache Redis. The Redis
+              replication groups discovered from the shared apps stack
+              belong to the checkout service only.
+          # Why: same as Redis -- shared stack causes false MQ findings.
+          - Text: >-
+              This service does not use Amazon MQ RabbitMQ. The MQ brokers
+              discovered from the shared apps stack belong to the orders
+              service only.
+          - Text: >-
+              This service does not use Aurora Global Database. The Aurora
+              clusters discovered from other input sources belong to the
+              catalog service only.
+        - !Ref "AWS::NoValue"
 
   CatalogService:
     DependsOn: UiService
@@ -263,38 +280,41 @@ Resources:
         - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
-      Assertions:
-        # Browse RPO compensating control (decision 3): catalog is read-only
-        # in-region, written by a re-runnable external ingest -> no
-        # unrecoverable data loss despite Aurora Global async replication.
-        - Text: >-
-            Catalog is read-only in-region; data is written by an external
-            ingest process from an external system of record. On regional
-            failover, any unreplicated catalog updates are recovered by
-            re-running ingest, so there is no unrecoverable data loss. Aurora
-            Global async replication is an accepted compensating control for
-            the Tier-1 RPO target.
-        - Text: >-
-            Catalog uses Aurora Global Database as its only data store.
-        - Text: >-
-            Regional failover is automated via ARC Region Switch plan
-            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
-            Route 53 DNS via data-plane health checks.
-        - Text: >-
-            This architecture uses regional failover as the response to
-            significant AZ impairments rather than AZ-level isolation
-            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
-            Region Switch plan pre-scales the surviving region to 200%
-            and shifts DNS within the RTO, making AZ-scoped mitigations
-            unnecessary for this design.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
+      Assertions: !If
+        - WithAssertions
+        -
+          # Browse RPO compensating control (decision 3): catalog is read-only
+          # in-region, written by a re-runnable external ingest -> no
+          # unrecoverable data loss despite Aurora Global async replication.
+          - Text: >-
+              Catalog is read-only in-region; data is written by an external
+              ingest process from an external system of record. On regional
+              failover, any unreplicated catalog updates are recovered by
+              re-running ingest, so there is no unrecoverable data loss. Aurora
+              Global async replication is an accepted compensating control for
+              the Tier-1 RPO target.
+          - Text: >-
+              Catalog uses Aurora Global Database as its only data store.
+          - Text: >-
+              Regional failover is automated via ARC Region Switch plan
+              (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+              Route 53 DNS via data-plane health checks.
+          - Text: >-
+              This architecture uses regional failover as the response to
+              significant AZ impairments rather than AZ-level isolation
+              mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+              Region Switch plan pre-scales the surviving region to 200%
+              and shifts DNS within the RTO, making AZ-scoped mitigations
+              unnecessary for this design.
+          - Text: >-
+              This service does not use ElastiCache Redis. The Redis
+              replication groups discovered from the shared apps stack
+              belong to the checkout service only.
+          - Text: >-
+              This service does not use Amazon MQ RabbitMQ. The MQ brokers
+              discovered from the shared apps stack belong to the orders
+              service only.
+        - !Ref "AWS::NoValue"
 
   CartService:
     DependsOn: CatalogService
@@ -322,32 +342,35 @@ Resources:
       # Without these, the LLM generates findings based on all discovered
       # resources regardless of whether this service actually uses them
       # (all services share the apps CFN stack as an input source).
-      Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
-        - Text: >-
-            Regional failover is automated via ARC Region Switch plan
-            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
-            Route 53 DNS via data-plane health checks.
-        - Text: >-
-            This architecture uses regional failover as the response to
-            significant AZ impairments rather than AZ-level isolation
-            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
-            Region Switch plan pre-scales the surviving region to 200%
-            and shifts DNS within the RTO, making AZ-scoped mitigations
-            unnecessary for this design.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
+      Assertions: !If
+        - WithAssertions
+        -
+          # Why: without this, the assessment claims "no automated failover
+          # mechanism" despite the ARC Region Switch plan being discovered.
+          - Text: >-
+              Regional failover is automated via ARC Region Switch plan
+              (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+              Route 53 DNS via data-plane health checks.
+          - Text: >-
+              This architecture uses regional failover as the response to
+              significant AZ impairments rather than AZ-level isolation
+              mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+              Region Switch plan pre-scales the surviving region to 200%
+              and shifts DNS within the RTO, making AZ-scoped mitigations
+              unnecessary for this design.
+          - Text: >-
+              This service does not use ElastiCache Redis. The Redis
+              replication groups discovered from the shared apps stack
+              belong to the checkout service only.
+          - Text: >-
+              This service does not use Amazon MQ RabbitMQ. The MQ brokers
+              discovered from the shared apps stack belong to the orders
+              service only.
+          - Text: >-
+              This service does not use Aurora Global Database. The Aurora
+              clusters discovered from other input sources belong to the
+              catalog service only.
+        - !Ref "AWS::NoValue"
 
   CheckoutService:
     DependsOn: CartService
@@ -374,28 +397,31 @@ Resources:
       # Without these, the LLM generates findings based on all discovered
       # resources regardless of whether this service actually uses them
       # (all services share the apps CFN stack as an input source).
-      Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
-        - Text: >-
-            Regional failover is automated via ARC Region Switch plan
-            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
-            Route 53 DNS via data-plane health checks.
-        - Text: >-
-            This architecture uses regional failover as the response to
-            significant AZ impairments rather than AZ-level isolation
-            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
-            Region Switch plan pre-scales the surviving region to 200%
-            and shifts DNS within the RTO, making AZ-scoped mitigations
-            unnecessary for this design.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
+      Assertions: !If
+        - WithAssertions
+        -
+          # Why: without this, the assessment claims "no automated failover
+          # mechanism" despite the ARC Region Switch plan being discovered.
+          - Text: >-
+              Regional failover is automated via ARC Region Switch plan
+              (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+              Route 53 DNS via data-plane health checks.
+          - Text: >-
+              This architecture uses regional failover as the response to
+              significant AZ impairments rather than AZ-level isolation
+              mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+              Region Switch plan pre-scales the surviving region to 200%
+              and shifts DNS within the RTO, making AZ-scoped mitigations
+              unnecessary for this design.
+          - Text: >-
+              This service does not use Amazon MQ RabbitMQ. The MQ brokers
+              discovered from the shared apps stack belong to the orders
+              service only.
+          - Text: >-
+              This service does not use Aurora Global Database. The Aurora
+              clusters discovered from other input sources belong to the
+              catalog service only.
+        - !Ref "AWS::NoValue"
 
   OrdersService:
     DependsOn: CheckoutService
@@ -425,34 +451,37 @@ Resources:
       # Without these, the LLM generates findings based on all discovered
       # resources regardless of whether this service actually uses them
       # (all services share the apps CFN stack as an input source).
-      Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
-        - Text: >-
-            Regional failover is automated via ARC Region Switch plan
-            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
-            Route 53 DNS via data-plane health checks.
-        - Text: >-
-            This architecture uses regional failover as the response to
-            significant AZ impairments rather than AZ-level isolation
-            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
-            Region Switch plan pre-scales the surviving region to 200%
-            and shifts DNS within the RTO, making AZ-scoped mitigations
-            unnecessary for this design.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
-        - Text: >-
-            RabbitMQ is used only for post-commit event notification
-            (OrderCreatedEvent published after DSQL transaction commits).
-            The order of record is durably stored in Aurora DSQL (RPO 0)
-            before any MQ publish. Lost MQ messages affect downstream
-            notifications only, not order data integrity.
+      Assertions: !If
+        - WithAssertions
+        -
+          # Why: without this, the assessment claims "no automated failover
+          # mechanism" despite the ARC Region Switch plan being discovered.
+          - Text: >-
+              Regional failover is automated via ARC Region Switch plan
+              (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+              Route 53 DNS via data-plane health checks.
+          - Text: >-
+              This architecture uses regional failover as the response to
+              significant AZ impairments rather than AZ-level isolation
+              mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+              Region Switch plan pre-scales the surviving region to 200%
+              and shifts DNS within the RTO, making AZ-scoped mitigations
+              unnecessary for this design.
+          - Text: >-
+              This service does not use ElastiCache Redis. The Redis
+              replication groups discovered from the shared apps stack
+              belong to the checkout service only.
+          - Text: >-
+              This service does not use Aurora Global Database. The Aurora
+              clusters discovered from other input sources belong to the
+              catalog service only.
+          - Text: >-
+              RabbitMQ is used only for post-commit event notification
+              (OrderCreatedEvent published after DSQL transaction commits).
+              The order of record is durably stored in Aurora DSQL (RPO 0)
+              before any MQ publish. Lost MQ messages affect downstream
+              notifications only, not order data integrity.
+        - !Ref "AWS::NoValue"
 
   AssetsService:
     DependsOn: OrdersService
@@ -474,24 +503,27 @@ Resources:
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
-      Assertions:
-        - Text: >-
-            Assets is a stateless nginx container serving static files
-            (images, CSS, JS). It has no data store, no session state,
-            and no further dependencies. It does not use ElastiCache
-            Redis, Amazon MQ RabbitMQ, Aurora, DynamoDB, or any other
-            data store. Findings about these resources are not applicable.
-        - Text: >-
-            Regional failover is automated via ARC Region Switch plan
-            (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
-            Route 53 DNS via data-plane health checks.
-        - Text: >-
-            This architecture uses regional failover as the response to
-            significant AZ impairments rather than AZ-level isolation
-            mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
-            Region Switch plan pre-scales the surviving region to 200%
-            and shifts DNS within the RTO, making AZ-scoped mitigations
-            unnecessary for this design.
+      Assertions: !If
+        - WithAssertions
+        -
+          - Text: >-
+              Assets is a stateless nginx container serving static files
+              (images, CSS, JS). It has no data store, no session state,
+              and no further dependencies. It does not use ElastiCache
+              Redis, Amazon MQ RabbitMQ, Aurora, DynamoDB, or any other
+              data store. Findings about these resources are not applicable.
+          - Text: >-
+              Regional failover is automated via ARC Region Switch plan
+              (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
+              Route 53 DNS via data-plane health checks.
+          - Text: >-
+              This architecture uses regional failover as the response to
+              significant AZ impairments rather than AZ-level isolation
+              mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC
+              Region Switch plan pre-scales the surviving region to 200%
+              and shifts DNS within the RTO, making AZ-scoped mitigations
+              unnecessary for this design.
+        - !Ref "AWS::NoValue"
 
 Outputs:
   SystemArn:
