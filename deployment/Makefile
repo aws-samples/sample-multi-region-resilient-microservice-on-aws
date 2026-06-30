@@ -825,6 +825,11 @@ ngrh-assess:
 	@echo "  aws resiliencehubv2 list-failure-mode-findings --service-arn <arn> --region $(PRIMARY_REGION)"
 
 destroy-ngrh:
+	@echo "Emptying NGRH bucket before stack delete..."
+	$(eval NGRH_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='NgrhBucketName'].OutputValue" --output text 2>/dev/null))
+	@if [ -n "$(NGRH_BUCKET)" ] && [ "$(NGRH_BUCKET)" != "None" ]; then \
+		./cleanup.sh $(NGRH_BUCKET); \
+	fi
 	@aws cloudformation delete-stack --stack-name ngrh$(ENV) --region $(PRIMARY_REGION)
 	@aws cloudformation wait stack-delete-complete --stack-name ngrh$(ENV) --region $(PRIMARY_REGION)
 	@echo "NGRH stack ngrh$(ENV) destroyed."

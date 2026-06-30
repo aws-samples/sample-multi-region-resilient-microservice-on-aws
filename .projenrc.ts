@@ -297,8 +297,8 @@ prValidation.addJobs({
 const e2e = new github.GithubWorkflow(project.github!, 'e2e', {
   limitConcurrency: true,
   concurrencyOptions: {
-    group: 'e2e-${{ github.ref }}',
-    cancelInProgress: true,
+    group: 'e2e-deploy',
+    cancelInProgress: false,
   },
 });
 e2e.on({

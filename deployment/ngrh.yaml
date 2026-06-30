@@ -59,6 +59,38 @@ Parameters:
 Resources:
 
   # -------------------------------------------------------------------------
+  # Shared NGRH bucket — reports go under /reports/, design files under
+  # /design-files/. Name is CFN-generated (random suffix) to avoid collisions.
+  # -------------------------------------------------------------------------
+  NgrhBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-reports-90d
+            Status: Enabled
+            Prefix: reports/
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+            ExpiredObjectDeleteMarker: true
+
+  # -------------------------------------------------------------------------
   # Invoker role NGRH assumes to discover resources / run assessments.
   # Trust resiliencehub.amazonaws.com, attach the managed execution policy.
   # -------------------------------------------------------------------------
@@ -74,30 +106,24 @@ Resources:
               Service: resiliencehub.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AWSResilienceHubAsssessmentExecutionPolicy
-        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AWSResilienceHubV2AssessmentExecutionPolicy
       Policies:
-        # NGRH reads CFN stack templates to discover resources from the
-        # cfnStackArn input sources (both regions). The managed policy above
-        # does not grant cloudformation:GetTemplate, so add it explicitly.
-        - PolicyName: ngrh-cfn-discovery
+        # S3 write access for NGRH report output and design file reads.
+        # All other read permissions (CFN, ARC, EC2, ECS, etc.) are covered
+        # by the V2 managed assessment execution policy above.
+        - PolicyName: ngrh-bucket-access
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
-                  - cloudformation:GetTemplate
-                  - cloudformation:GetTemplateSummary
-                  - cloudformation:DescribeStacks
-                  - cloudformation:DescribeStackResource
-                  - cloudformation:DescribeStackResources
-                  - cloudformation:ListStackResources
-                Resource: "*"
-              - Effect: Allow
-                Action:
-                  - arc-region-switch:GetPlan
-                  - arc-region-switch:ListPlans
-                Resource: "*"
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt NgrhBucket.Arn
+                  - !Sub "${NgrhBucket.Arn}/*"
 
   # -------------------------------------------------------------------------
   # Resiliency policies. One RTO/RPO bar per tier, applied across AZ + Region.
@@ -184,6 +210,11 @@ Resources:
       DependencyDiscovery: ENABLED
       PermissionModel:
         InvokerRoleName: !Ref InvokerRole
+      ReportConfiguration:
+        ReportOutput:
+          - S3:
+              BucketPath: !Sub "${NgrhBucket}/reports/"
+              BucketOwner: !Ref "AWS::AccountId"
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
@@ -251,6 +282,11 @@ Resources:
       DependencyDiscovery: ENABLED
       PermissionModel:
         InvokerRoleName: !Ref InvokerRole
+      ReportConfiguration:
+        ReportOutput:
+          - S3:
+              BucketPath: !Sub "${NgrhBucket}/reports/"
+              BucketOwner: !Ref "AWS::AccountId"
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
@@ -306,6 +342,11 @@ Resources:
       DependencyDiscovery: ENABLED
       PermissionModel:
         InvokerRoleName: !Ref InvokerRole
+      ReportConfiguration:
+        ReportOutput:
+          - S3:
+              BucketPath: !Sub "${NgrhBucket}/reports/"
+              BucketOwner: !Ref "AWS::AccountId"
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
@@ -359,6 +400,11 @@ Resources:
       DependencyDiscovery: ENABLED
       PermissionModel:
         InvokerRoleName: !Ref InvokerRole
+      ReportConfiguration:
+        ReportOutput:
+          - S3:
+              BucketPath: !Sub "${NgrhBucket}/reports/"
+              BucketOwner: !Ref "AWS::AccountId"
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
@@ -407,6 +453,11 @@ Resources:
       DependencyDiscovery: ENABLED
       PermissionModel:
         InvokerRoleName: !Ref InvokerRole
+      ReportConfiguration:
+        ReportOutput:
+          - S3:
+              BucketPath: !Sub "${NgrhBucket}/reports/"
+              BucketOwner: !Ref "AWS::AccountId"
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
@@ -464,6 +515,11 @@ Resources:
       DependencyDiscovery: ENABLED
       PermissionModel:
         InvokerRoleName: !Ref InvokerRole
+      ReportConfiguration:
+        ReportOutput:
+          - S3:
+              BucketPath: !Sub "${NgrhBucket}/reports/"
+              BucketOwner: !Ref "AWS::AccountId"
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
@@ -500,6 +556,9 @@ Outputs:
     Value: !GetAtt TierOnePolicy.PolicyArn
   TierTwoPolicyArn:
     Value: !GetAtt TierTwoPolicy.PolicyArn
+  NgrhBucketName:
+    Description: NGRH shared bucket (reports, design files). Empty before stack delete.
+    Value: !Ref NgrhBucket
   ServiceArns:
     Description: Comma-separated service ARNs (used by `make ngrh-assess`)
     Value: !Join
