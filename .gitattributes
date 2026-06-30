@@ -9,6 +9,7 @@
 /.github/workflows/e2e.yml linguist-generated
 /.github/workflows/pr-validation.yml linguist-generated
 /.github/workflows/pull-request-lint.yml linguist-generated
+/.github/workflows/retry-automerge.yml linguist-generated
 /.github/workflows/stale.yml linguist-generated
 /.gitignore linguist-generated
 /.projen/** linguist-generated

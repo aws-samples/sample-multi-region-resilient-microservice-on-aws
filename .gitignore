@@ -37,3 +37,4 @@ temporary
 !/.github/workflows/dependency-review.yml
 !/.github/workflows/pr-validation.yml
 !/.github/workflows/e2e.yml
+!/.github/workflows/retry-automerge.yml
