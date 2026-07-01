@@ -32,7 +32,7 @@ jobs:
       STANDBY_REGION: us-west-2
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: Set ENV to short sha
         run: echo "ENV=-$(echo ${{ github.event.pull_request.head.sha || github.sha }} | cut -c1-7)" >> $GITHUB_ENV
       - name: Configure AWS credentials
