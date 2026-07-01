@@ -113,6 +113,9 @@ dep.config.updates.push(
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
+    ignore: [
+      { 'dependency-name': 'org.springframework.boot:spring-boot-starter-parent', 'update-types': ['version-update:semver-major'] },
+    ],
   })),
   // Go modules — catalog service.
   {
