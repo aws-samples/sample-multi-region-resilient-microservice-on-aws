@@ -114,7 +114,7 @@ dep.config.updates.push(
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
     ignore: [
-      { 'dependency-name': 'org.springframework.boot:spring-boot-starter-parent', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'org.springframework.boot:spring-boot-starter-parent' },
     ],
   })),
   // Go modules — catalog service.

@@ -45,8 +45,6 @@ updates:
       - auto-merge
     ignore:
       - dependency-name: org.springframework.boot:spring-boot-starter-parent
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: maven
     directory: /source/orders
     schedule:
@@ -62,8 +60,6 @@ updates:
       - auto-merge
     ignore:
       - dependency-name: org.springframework.boot:spring-boot-starter-parent
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: maven
     directory: /source/ui
     schedule:
@@ -79,8 +75,6 @@ updates:
       - auto-merge
     ignore:
       - dependency-name: org.springframework.boot:spring-boot-starter-parent
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: gomod
     directory: /source/catalog
     schedule:
