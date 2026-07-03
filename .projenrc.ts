@@ -137,7 +137,7 @@ dep.config.updates.push(
     ignore: [
       { 'dependency-name': 'amazoncorretto', 'update-types': ['version-update:semver-major'] },
       { 'dependency-name': 'node', 'update-types': ['version-update:semver-major'] },
-      { 'dependency-name': 'golang', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'golang' },
     ],
   })),
   // GitHub Actions versions used by workflows.

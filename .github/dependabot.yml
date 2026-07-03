@@ -109,8 +109,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: docker
     directory: /source/cart
     schedule:
@@ -132,8 +130,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: docker
     directory: /source/catalog
     schedule:
@@ -155,8 +151,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: docker
     directory: /source/checkout
     schedule:
@@ -178,8 +172,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: docker
     directory: /source/orders
     schedule:
@@ -201,8 +193,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: docker
     directory: /source/ui
     schedule:
@@ -224,8 +214,6 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-        update-types:
-          - version-update:semver-major
   - package-ecosystem: github-actions
     directory: /
     schedule:
