@@ -134,6 +134,11 @@ dep.config.updates.push(
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
+    ignore: [
+      { 'dependency-name': 'amazoncorretto', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'node', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'golang', 'update-types': ['version-update:semver-major'] },
+    ],
   })),
   // GitHub Actions versions used by workflows.
   {
