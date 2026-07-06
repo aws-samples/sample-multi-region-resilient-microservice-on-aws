@@ -115,6 +115,8 @@ dep.config.updates.push(
     labels: AUTO_LABELS,
     ignore: [
       { 'dependency-name': 'org.springframework.boot:spring-boot-starter-parent' },
+      { 'dependency-name': 'de.codecentric:chaos-monkey-spring-boot', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'org.springdoc:springdoc-openapi-starter-webmvc-ui', 'update-types': ['version-update:semver-major'] },
     ],
   })),
   // Go modules — catalog service.
