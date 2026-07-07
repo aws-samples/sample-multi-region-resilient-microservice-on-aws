@@ -74,6 +74,8 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      LoggingConfiguration:
+        LogFilePrefix: access-logs/
       VersioningConfiguration:
         Status: Enabled
       LifecycleConfiguration:
