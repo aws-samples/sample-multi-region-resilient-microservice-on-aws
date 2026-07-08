@@ -9,11 +9,15 @@ if [ -z "$BUCKET" ]; then
   exit 1
 fi
 
-# Test if bucket exists
-bucketExists=$(aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null && echo 1 || echo 0)
-
-if [ "$bucketExists" -eq 1 ]; then
+# Test if bucket exists. Run head-bucket directly as the condition and discard its
+# output: in AWS CLI v2, a successful head-bucket prints a JSON body to stdout, so
+# capturing it into a variable and comparing with -eq breaks the integer test.
+if aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
   echo "Bucket $BUCKET exists. Emptying..."
+
+  # Per-invocation temp file so concurrent cleanups don't clobber each other.
+  BATCH_FILE=$(mktemp "${TMPDIR:-/tmp}/s3-delete-batch.XXXXXX.json")
+  trap 'rm -f "$BATCH_FILE"' EXIT
 
   # Step 1: Delete all current objects (handles special chars in keys)
   echo "  Removing current objects..."
@@ -28,8 +32,8 @@ if [ "$bucketExists" -eq 1 ]; then
       break
     fi
     echo "  Deleting $COUNT object versions..."
-    echo "{\"Objects\": $VERSIONS, \"Quiet\": true}" > /tmp/s3-delete-batch.json
-    aws s3api delete-objects --bucket "$BUCKET" --delete "file:///tmp/s3-delete-batch.json" --no-cli-pager 2>/dev/null || true
+    echo "{\"Objects\": $VERSIONS, \"Quiet\": true}" > "$BATCH_FILE"
+    aws s3api delete-objects --bucket "$BUCKET" --delete "file://$BATCH_FILE" --no-cli-pager 2>/dev/null || true
   done
 
   # Step 3: Delete delete markers in batches
@@ -41,11 +45,10 @@ if [ "$bucketExists" -eq 1 ]; then
       break
     fi
     echo "  Deleting $COUNT delete markers..."
-    echo "{\"Objects\": $MARKERS, \"Quiet\": true}" > /tmp/s3-delete-batch.json
-    aws s3api delete-objects --bucket "$BUCKET" --delete "file:///tmp/s3-delete-batch.json" --no-cli-pager 2>/dev/null || true
+    echo "{\"Objects\": $MARKERS, \"Quiet\": true}" > "$BATCH_FILE"
+    aws s3api delete-objects --bucket "$BUCKET" --delete "file://$BATCH_FILE" --no-cli-pager 2>/dev/null || true
   done
 
-  rm -f /tmp/s3-delete-batch.json
   echo "  Bucket $BUCKET emptied."
 else
   echo "Bucket $BUCKET does not exist, skipping."

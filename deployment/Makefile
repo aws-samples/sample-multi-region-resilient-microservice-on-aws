@@ -580,7 +580,7 @@ destroy-arc-dns-status:
 destroy-restore-reconciliation-ssm: destroy-monitoring
 
 	echo "Deleting Aurora database instances and clusters in ${STANDBY_REGION} region..."
-	./clean-up-aurora-cluster.sh ${STANDBY_REGION}
+	./clean-up-aurora-cluster.sh ${STANDBY_REGION} ${ENV}
 	@echo "Deleting SSM automation runbook in ${PRIMARY_REGION}"
 	@aws cloudformation delete-stack --stack-name crdr-catalog-ssm${ENV} --region ${PRIMARY_REGION}
 	@aws cloudformation delete-stack --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION}
