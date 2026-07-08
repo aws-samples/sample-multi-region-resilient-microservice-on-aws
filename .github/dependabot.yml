@@ -232,16 +232,3 @@ updates:
         update-types:
           - version-update:semver-major
       - dependency-name: golang
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      all-minor-and-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - auto-approve
-      - auto-merge
