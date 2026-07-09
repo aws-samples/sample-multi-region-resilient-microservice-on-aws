@@ -1,51 +1,59 @@
 #!/bin/bash
+# Deletes the catalog reconciliation Aurora clusters (and their member instances)
+# left behind by the cross-region snapshot-restore SSM automation.
+#
+# These resources are created by restore-reconcile-catalog-ssm.yaml with random,
+# execution-id-based identifiers (catalog-recon-dbcluster-<EXECUTION_ID> /
+# catalog-recon-dbinstance-<EXECUTION_ID>), so their names carry no ENV suffix.
+# The ONLY ENV-bearing handle they share is the subnet group,
+# catalog-recon-dbcluster-subnet-group${ENV}. We scope deletion by an EXACT match
+# on that subnet group so a run only ever removes its own reconciliation DBs and
+# never touches a concurrent e2e run's (or the default no-suffix deployment's).
+#
+# Usage: clean-up-aurora-cluster.sh <REGION> [ENV]
+#   ENV is the deployment suffix (e.g. "-a1b2c3d"); empty for the default deployment.
+set -uo pipefail
 
-REGION=$1
+REGION="${1:?Usage: clean-up-aurora-cluster.sh <REGION> [ENV]}"
+ENV="${2:-}"
 
-echo "Deleting Aurora orders-recon-dbinstance-* database instances in $REGION region..."
+SUBNET_GROUP="catalog-recon-dbcluster-subnet-group${ENV}"
 
-instances=$(aws rds describe-db-instances --region $REGION --query  "DBInstances[?starts_with(DBInstanceIdentifier, 'orders-recon-dbinstance-')].DBInstanceIdentifier"  --output text) 
+echo "Cleaning up catalog reconciliation Aurora clusters in $REGION (subnet group: $SUBNET_GROUP)..."
 
-for instance in $instances; do
-    aws rds delete-db-instance --db-instance-identifier $instance --skip-final-snapshot --region $REGION
-    echo "Deleting $instance"
-    aws rds delete-db-instance --db-instance-identifier $instance --skip-final-snapshot --region $REGION
-    echo "Deleted $instance"
-    sleep 5
-    echo "Waiting for $instance to be deleted"
-    aws rds wait db-instance-deleted --db-instance-identifier $instance --region $REGION    
-    echo "Deleted $instance"
+# Select only clusters attached to this ENV's reconciliation subnet group (exact match).
+clusters=$(aws rds describe-db-clusters --region "$REGION" \
+  --query "DBClusters[?DBSubnetGroup=='${SUBNET_GROUP}'].DBClusterIdentifier" \
+  --output text 2>/dev/null)
 
-done
-
-echo "Deleting Aurora orders-recon-dbcluster-* database clusters in $REGION region..."
-
-clusters=$(aws rds describe-db-clusters --region $REGION --query "DBClusters[?starts_with(DBClusterIdentifier, 'orders-recon-dbcluster-')].DBClusterIdentifier"  --output text)
+if [ -z "$clusters" ]; then
+  echo "No reconciliation clusters found for subnet group $SUBNET_GROUP in $REGION. Nothing to do."
+  exit 0
+fi
 
 for cluster in $clusters; do
-    aws rds delete-db-cluster --db-cluster-identifier $cluster --skip-final-snapshot --region $REGION
-    echo "Deleting $cluster"
-    aws rds delete-db-cluster --db-cluster-identifier $cluster --skip-final-snapshot --region $REGION
-    echo "Deleted $cluster"
-    sleep 5
-    echo "Waiting for $cluster to be deleted"
-    aws rds wait db-cluster-deleted --db-cluster-identifier $cluster --region $REGION
-    echo "Deleted $cluster"
+  echo "Processing reconciliation cluster $cluster..."
+
+  # Delete member instances first (a cluster can't be deleted while it has members).
+  instances=$(aws rds describe-db-clusters --db-cluster-identifier "$cluster" --region "$REGION" \
+    --query "DBClusters[0].DBClusterMembers[].DBInstanceIdentifier" --output text 2>/dev/null)
+
+  for instance in $instances; do
+    echo "  Deleting instance $instance..."
+    aws rds delete-db-instance --db-instance-identifier "$instance" \
+      --skip-final-snapshot --region "$REGION" --no-cli-pager >/dev/null 2>&1 || true
+  done
+  for instance in $instances; do
+    echo "  Waiting for instance $instance to be deleted..."
+    aws rds wait db-instance-deleted --db-instance-identifier "$instance" --region "$REGION" 2>/dev/null || true
+  done
+
+  echo "  Deleting cluster $cluster..."
+  aws rds delete-db-cluster --db-cluster-identifier "$cluster" \
+    --skip-final-snapshot --region "$REGION" --no-cli-pager >/dev/null 2>&1 || true
+  echo "  Waiting for cluster $cluster to be deleted..."
+  aws rds wait db-cluster-deleted --db-cluster-identifier "$cluster" --region "$REGION" 2>/dev/null || true
+  echo "  Deleted $cluster"
 done
 
-echo "Done! All Aurora database instances and clusters have been deleted from the $REGION region."
-
-
-    
-
-
-        
-        
-
-
-
-    
-
-
-
-
+echo "Done! All matching reconciliation Aurora clusters have been deleted from $REGION."

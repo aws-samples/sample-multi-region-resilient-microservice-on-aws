@@ -142,15 +142,9 @@ dep.config.updates.push(
       { 'dependency-name': 'golang' },
     ],
   })),
-  // GitHub Actions versions used by workflows.
-  {
-    'package-ecosystem': 'github-actions',
-    directory: '/',
-    schedule: WEEKLY_SCHEDULE,
-    'open-pull-requests-limit': 5,
-    groups: NON_MAJOR_GROUP,
-    labels: AUTO_LABELS,
-  },
+  // GitHub Actions versions are pinned in .projenrc.ts and bumped manually.
+  // Dependabot can't update the projenrc source file, so automated PRs only
+  // update generated YAML — creating drift that reverts on next projen synth.
 );
 
 // ─── Auto-approve: label-gated approval for Dependabot PRs ─────────────────────
@@ -211,8 +205,8 @@ depReview.addJob('dependency-review', {
   runsOn: ['ubuntu-latest'],
   permissions: { contents: github.workflows.JobPermission.READ },
   steps: [
-    { uses: 'actions/checkout@v6' },
-    { uses: 'actions/dependency-review-action@v4' },
+    { uses: 'actions/checkout@v7' },
+    { uses: 'actions/dependency-review-action@v5' },
   ],
 });
 
@@ -230,8 +224,8 @@ prValidation.addJobs({
     runsOn: ['ubuntu-latest'],
     permissions: { contents: github.workflows.JobPermission.READ },
     steps: [
-      { uses: 'actions/checkout@v4' },
-      { uses: 'actions/setup-python@v5', with: { 'python-version': PYTHON_VERSION } },
+      { uses: 'actions/checkout@v7' },
+      { uses: 'actions/setup-python@v6', with: { 'python-version': PYTHON_VERSION } },
       { name: 'Install cfn-lint', run: 'pip install cfn-lint' },
       {
         name: 'Run cfn-lint',
@@ -243,7 +237,7 @@ prValidation.addJobs({
     runsOn: ['ubuntu-latest'],
     permissions: { contents: github.workflows.JobPermission.READ },
     steps: [
-      { uses: 'actions/checkout@v4' },
+      { uses: 'actions/checkout@v7' },
       {
         name: 'Run checkov',
         uses: 'bridgecrewio/checkov-action@v12',
@@ -261,7 +255,7 @@ prValidation.addJobs({
     runsOn: ['ubuntu-latest'],
     permissions: { contents: github.workflows.JobPermission.READ },
     steps: [
-      { uses: 'actions/checkout@v4' },
+      { uses: 'actions/checkout@v7' },
       {
         name: 'Run cfn-nag',
         uses: 'stelligent/cfn_nag@master',
@@ -273,8 +267,8 @@ prValidation.addJobs({
     runsOn: ['ubuntu-latest'],
     permissions: { contents: github.workflows.JobPermission.READ },
     steps: [
-      { uses: 'actions/checkout@v4' },
-      { uses: 'actions/setup-python@v5', with: { 'python-version': PYTHON_VERSION } },
+      { uses: 'actions/checkout@v7' },
+      { uses: 'actions/setup-python@v6', with: { 'python-version': PYTHON_VERSION } },
       { name: 'Install test deps', run: 'pip install pytest pyyaml' },
       { name: 'Run tests', run: 'pytest tests/' },
     ],
@@ -283,7 +277,7 @@ prValidation.addJobs({
     runsOn: ['ubuntu-latest'],
     permissions: { contents: github.workflows.JobPermission.READ },
     steps: [
-      { uses: 'actions/checkout@v4' },
+      { uses: 'actions/checkout@v7' },
       {
         name: 'Install trivy',
         run: [
@@ -319,6 +313,10 @@ e2e.on({
 e2e.addJob('e2e', {
   name: 'Build, Deploy, Test, Teardown',
   runsOn: ['ubuntu-latest'],
+  // Skip for Dependabot PRs — secrets (E2E_ROLE_ARN) are not available to
+  // pull_request events triggered by dependabot[bot]. The same code is
+  // validated on push:main after merge.
+  if: "github.actor != 'dependabot[bot]'",
   timeoutMinutes: 300,
   permissions: {
     idToken: github.workflows.JobPermission.WRITE,
@@ -334,14 +332,14 @@ e2e.addJob('e2e', {
     // enforced by CloudFormation's pre-provisioning property validation.
   },
   steps: [
-    { name: 'Checkout', uses: 'actions/checkout@v4' },
+    { name: 'Checkout', uses: 'actions/checkout@v7' },
     {
       name: 'Set ENV to short sha',
       run: 'echo "ENV=-$(echo ${{ github.event.pull_request.head.sha || github.sha }} | cut -c1-7)" >> $GITHUB_ENV',
     },
     {
       name: 'Configure AWS credentials',
-      uses: 'aws-actions/configure-aws-credentials@v4',
+      uses: 'aws-actions/configure-aws-credentials@v6',
       with: {
         'role-to-assume': '${{ secrets.E2E_ROLE_ARN }}',
         'aws-region': '${{ env.AWS_REGION }}',
