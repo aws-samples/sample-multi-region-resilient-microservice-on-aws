@@ -55,6 +55,18 @@ Parameters:
   RegionSwitchArn:
     Type: String
     Description: StackId ARN of the ARC Region Switch plan stack (failover/failback orchestration)
+  VpcArnPrimary:
+    Type: String
+    Description: StackId ARN of the VPC stack (baseVpc) in the primary region
+  VpcArnStandby:
+    Type: String
+    Description: StackId ARN of the VPC stack (baseVpc) in the standby region
+  InfraArnPrimary:
+    Type: String
+    Description: StackId ARN of the base infrastructure stack (baseInfra) in the primary region — subnets, VPC endpoints
+  InfraArnStandby:
+    Type: String
+    Description: StackId ARN of the base infrastructure stack (baseInfra) in the standby region — subnets, VPC endpoints
 
 Resources:
 
@@ -227,6 +239,10 @@ Resources:
       InputSources:
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         # Global routing (Route 53 + ARC health checks) — the cross-region
@@ -296,6 +312,10 @@ Resources:
       InputSources:
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnPrimary }
@@ -357,6 +377,10 @@ Resources:
       InputSources:
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref CartsDbArnPrimary }
@@ -415,6 +439,10 @@ Resources:
         # ElastiCache Redis lives in the apps stack.
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
@@ -469,6 +497,10 @@ Resources:
         # Aurora DSQL + Amazon MQ (RabbitMQ; MQ broker is in the apps stack).
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref OrdersDsqlArnPrimary }
@@ -529,6 +561,10 @@ Resources:
       InputSources:
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref VpcArnStandby }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnPrimary }
+        - ResourceConfiguration: { CfnStackArn: !Ref InfraArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
