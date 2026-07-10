@@ -19,6 +19,9 @@ Parameters:
   Env:
     Type: String
     Description: Enter the environment suffix for the resources
+  VpcId:
+    Type: String
+    Description: VPC ID from the baseVpc stack
   MachineType:
     # global databases support either db.r4 or db.r5
     Default: db.serverless
@@ -67,7 +70,7 @@ Resources:
   AuroraMySqlComputeSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: Access to aurora mysql database
       SecurityGroupEgress: 
         - 
@@ -328,7 +331,7 @@ Resources:
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: Lambda function access to aurora mysql databases
       Tags:
         - Key: Name

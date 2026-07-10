@@ -14,6 +14,9 @@ Parameters:
   PrimaryOnly:
     Type: String
     Default: false
+  VpcId:
+    Type: String
+    Description: VPC ID from the baseVpc stack
     
 Conditions:
   notPrimaryOnly: !Not 
@@ -35,7 +38,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -116,7 +119,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -202,7 +205,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -281,7 +284,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -369,7 +372,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -451,7 +454,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -538,7 +541,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -618,7 +621,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -706,7 +709,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -875,7 +878,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |
@@ -955,7 +958,7 @@ Resources:
           - !Sub '{{resolve:ssm:Subnet1${Env}}}'
           - !Sub '{{resolve:ssm:Subnet2${Env}}}'
           - !Sub '{{resolve:ssm:Subnet3${Env}}}'
-        VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+        VpcId: !Ref VpcId
       Code:
         Handler: pageLoadBlueprint.handler
         Script: !Sub |

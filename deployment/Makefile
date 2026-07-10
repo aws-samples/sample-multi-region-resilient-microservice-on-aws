@@ -31,8 +31,9 @@ deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_in
 deploy-primary: test-creds create-peer primary_infrastructure primary_ecs client-primary
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
+	$(eval _CAN_VPC:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./canaries.yaml \
-	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} PrimaryOnly=true --capabilities CAPABILITY_IAM --s3-bucket $(result)
+	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} PrimaryOnly=true VpcId=$(_CAN_VPC) --capabilities CAPABILITY_IAM --s3-bucket $(result)
 
 deploy: deploy-all
 	@echo "*** Deployment Outputs ****"
@@ -64,8 +65,9 @@ create-peer:
 	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} PrimaryOnly=true
 
 	@if [ "$(PRIMARY_ONLY)" = "false" ];then \
+		PRIMARY_VPC=$$(aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text) && \
 		aws cloudformation deploy --template ./regionalVpc.yaml --region ${STANDBY_REGION} \
-	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV}; \
+	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} PrimaryVpcId=$$PRIMARY_VPC; \
 	fi
 
 	@echo "create-peer done"
@@ -192,30 +194,41 @@ mirror-sidecar-images: codebuild-infra
 
 primary_infrastructure: create-peer
 	@echo "Deploy Infrastructure resources in ${PRIMARY_REGION}"
+	$(eval _VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
+	$(eval _PEER_ID:=$(shell [ "$(PRIMARY_ONLY)" = "false" ] && aws cloudformation describe-stacks --stack-name baseVpc$(ENV) --region $(STANDBY_REGION) --query "Stacks[0].Outputs[?OutputKey=='PeeringConnectionId'].OutputValue" --output text))
 	@aws cloudformation deploy --template ./regionalBaseInfra.yaml --region ${PRIMARY_REGION} \
-	--stack-name baseInfra${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} PrimaryOnly=${PRIMARY_ONLY}
+	--stack-name baseInfra${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} PrimaryOnly=${PRIMARY_ONLY} \
+	VpcId=$(_VPC_P) VpcPeeringConnectionId=$(_PEER_ID)
 
 primary_ecs: build-images mirror-sidecar-images primary_region_catalog-db orders-dsql-db dsql-vpc-endpoint carts-db
 	@echo "Deploy ECS Services in ${PRIMARY_REGION}"
 	$(eval _BUCKET_PRIMARY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
+	$(eval _ECS_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./ecs.yaml --region ${PRIMARY_REGION} \
-	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV} --s3-bucket $(_BUCKET_PRIMARY)
+	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV} VpcId=$(_ECS_VPC_P) --s3-bucket $(_BUCKET_PRIMARY)
 
 standby_infrastructure: create-peer
 	@echo "Deploy Infrastructure resources in ${STANDBY_REGION}"
+	$(eval _VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
+	$(eval _PEER_ID_S:=$(shell aws cloudformation describe-stacks --stack-name baseVpc$(ENV) --region $(STANDBY_REGION) --query "Stacks[0].Outputs[?OutputKey=='PeeringConnectionId'].OutputValue" --output text))
 	@aws cloudformation deploy --template ./regionalBaseInfra.yaml --region ${STANDBY_REGION} \
-	--stack-name baseInfra${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV}
+	--stack-name baseInfra${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} \
+	VpcId=$(_VPC_S) VpcPeeringConnectionId=$(_PEER_ID_S)
 
 standby_ecs: build-images mirror-sidecar-images standby_region_catalog-db orders-dsql-db dsql-vpc-endpoint-standby
 	@echo "Deploy ECS Services in ${STANDBY_REGION}"
 	$(eval _BUCKET_STANDBY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
+	$(eval _ECS_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./ecs.yaml --region ${STANDBY_REGION} \
-	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV} --s3-bucket $(_BUCKET_STANDBY)
+	--stack-name apps${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} Tag=${TAG} KmsKey=retail-store-ar${ENV} VpcId=$(_ECS_VPC_S) --s3-bucket $(_BUCKET_STANDBY)
 
 global_routing: standby_ecs primary_ecs
 	@echo "Deploy the Global Routing layer"
+	$(eval _GR_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
+	$(eval _GR_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./globalRouting.yaml \
-	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV}
+	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV} \
+	VpcIdPrimary=$(_GR_VPC_P) VpcIdStandby=$(_GR_VPC_S)
 
 region-switch-plan: global_routing
 	@echo "Deploy the ARC Region Switch Plan"
@@ -252,34 +265,41 @@ region-switch: region-switch-plan
 	$(eval STANDBY_HC_ID:=$(shell aws arc-region-switch list-route53-health-checks \
 		--arn $(PLAN_ARN) --region $(PRIMARY_REGION) --output json \
 		| jq -r '.healthChecks[] | select(.region == "$(STANDBY_REGION)") | .healthCheckId'))
+	$(eval _RS_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
+	$(eval _RS_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./globalRouting.yaml \
 	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM \
 	--parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV} \
+	VpcIdPrimary=$(_RS_VPC_P) VpcIdStandby=$(_RS_VPC_S) \
 	PrimaryHealthCheckId=$(PRIMARY_HC_ID) StandbyHealthCheckId=$(STANDBY_HC_ID)
 
 canaries_primary: global_routing
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
+	$(eval _CAN_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./canaries.yaml \
-	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} --capabilities CAPABILITY_IAM --s3-bucket $(result)
+	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} VpcId=$(_CAN_VPC_P) --capabilities CAPABILITY_IAM --s3-bucket $(result)
 canaries_standby: global_routing
 	@echo "Deploy the Synthetic Canaries in ${STANDBY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
+	$(eval _CAN_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${STANDBY_REGION} --template ./canaries.yaml \
-	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${PRIMARY_REGION} --capabilities CAPABILITY_IAM --s3-bucket $(result)
+	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${PRIMARY_REGION} VpcId=$(_CAN_VPC_S) --capabilities CAPABILITY_IAM --s3-bucket $(result)
 
 primary_region_catalog-db: primary_infrastructure
 	@echo "Creating Catalog service Aurora MySql database in ${PRIMARY_REGION}..."
+	$(eval _CAT_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./database/aurora/aurora-global-primary-cluster.yml \
 	--region ${PRIMARY_REGION} --stack-name catalog-db-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} NamingPrefix=catalog DatabaseName=catalog KmsKey=retail-store-ar${ENV}
+	--parameter-overrides Env=${ENV} NamingPrefix=catalog DatabaseName=catalog KmsKey=retail-store-ar${ENV} VpcId=$(_CAT_VPC_P)
 
 standby_region_catalog-db: standby_infrastructure primary_region_catalog-db
 	$(eval result:=$(shell aws ssm get-parameter --name catalog-global-db-cluster-CredentialSecretArn$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text|sed s/$(PRIMARY_REGION)/$(STANDBY_REGION)/g ))
 	@echo "Creating Catalog service Aurora MySql database in ${STANDBY_REGION}..."
+	$(eval _CAT_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./database/aurora/aurora-global-standby-cluster.yml \
 	--region ${STANDBY_REGION} --stack-name catalog-db-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} NamingPrefix=catalog DBSecretArn=${result} DatabaseName=catalog KmsKey=retail-store-ar${ENV}
+	--parameter-overrides Env=${ENV} NamingPrefix=catalog DBSecretArn=${result} DatabaseName=catalog KmsKey=retail-store-ar${ENV} VpcId=$(_CAT_VPC_S)
 
 orders-dsql-db: primary_infrastructure standby_infrastructure
 	@echo "Phase 1: Creating DSQL clusters in both regions..."
@@ -319,9 +339,8 @@ dsql-vpc-endpoint: orders-dsql-db primary_infrastructure
 	$(eval SVC_NAME:=$(shell aws dsql get-vpc-endpoint-service-name \
 		--identifier $(CLUSTER_ID) --region $(PRIMARY_REGION) \
 		--query "serviceName" --output text))
-	$(eval VPC_ID:=$(shell aws secretsmanager get-secret-value \
-		--secret-id VpcId-$(PRIMARY_REGION)$(ENV) \
-		--region $(PRIMARY_REGION) --query "SecretString" --output text))
+	$(eval VPC_ID:=$(shell aws ssm get-parameter --name VpcId$(ENV) \
+		--region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	$(eval SUBNET1:=$(shell aws ssm get-parameter --name Subnet1$(ENV) \
 		--region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	$(eval SUBNET2:=$(shell aws ssm get-parameter --name Subnet2$(ENV) \
@@ -360,9 +379,8 @@ dsql-vpc-endpoint-standby: orders-dsql-db standby_infrastructure
 	$(eval SVC_NAME:=$(shell aws dsql get-vpc-endpoint-service-name \
 		--identifier $(CLUSTER_ID) --region $(STANDBY_REGION) \
 		--query "serviceName" --output text))
-	$(eval VPC_ID:=$(shell aws secretsmanager get-secret-value \
-		--secret-id VpcId-$(STANDBY_REGION)$(ENV) \
-		--region $(STANDBY_REGION) --query "SecretString" --output text))
+	$(eval VPC_ID:=$(shell aws ssm get-parameter --name VpcId$(ENV) \
+		--region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	$(eval SUBNET1:=$(shell aws ssm get-parameter --name Subnet1$(ENV) \
 		--region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	$(eval SUBNET2:=$(shell aws ssm get-parameter --name Subnet2$(ENV) \
@@ -407,14 +425,14 @@ carts-db: primary_infrastructure
 client-primary: primary_infrastructure
 	@echo "Deploy the Windows Client in the Primary Region"
 	$(eval subnet:=$(shell aws ssm get-parameter --name Subnet1$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
-	$(eval vpc:=$(shell aws secretsmanager get-secret-value --secret-id VpcId-$(PRIMARY_REGION)$(ENV) --region $(PRIMARY_REGION) --query "SecretString" --output text))
+	$(eval vpc:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@echo "Creating Windows client for testing purposes in ${PRIMARY_REGION}"
 	@aws cloudformation deploy --template ./windows.yaml --parameter-overrides Env=${ENV} SubnetId=${subnet} VpcId=${vpc} KmsKey=retail-store-ar${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_IAM --stack-name client${ENV}
 
 client-standby: standby_infrastructure
 	@echo "Deploy the Windows Client in the Standby Region"
 	$(eval subnet:=$(shell aws ssm get-parameter --name Subnet1$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
-	$(eval vpc:=$(shell aws secretsmanager get-secret-value --secret-id VpcId-$(STANDBY_REGION)$(ENV) --region $(STANDBY_REGION) --query "SecretString" --output text))
+	$(eval vpc:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@echo "Creating Windows client for testing purposes in ${STANDBY_REGION}"
 	@aws cloudformation deploy --template ./windows.yaml --parameter-overrides Env=${ENV} SubnetId=${subnet} VpcId=${vpc} KmsKey=retail-store-ar${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_IAM --stack-name client${ENV}
 
@@ -429,8 +447,9 @@ restore-reconciliation: primary_infrastructure standby_infrastructure standby_re
 	./build-lambda-layer.sh
 	@echo "Step 2:Deploying Lambda and SSM Runbook"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
+	$(eval _RECON_VPC:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation package --template-file ./database/crdr-reconciliation/src/restore-reconcile-catalog-ssm.yaml --region ${STANDBY_REGION} --s3-bucket $(result) --output-template-file ./database/crdr-reconciliation/src/out.yaml
-	@aws cloudformation deploy --template-file ./database/crdr-reconciliation/src/out.yaml --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV}
+	@aws cloudformation deploy --template-file ./database/crdr-reconciliation/src/out.yaml --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} VpcId=$(_RECON_VPC)
 
 monitoring: restore-reconciliation arc-dns-status
 	@echo "Deploy the Monitoring Dashboard"
@@ -482,7 +501,8 @@ secrets-rotation: primary_region_catalog-db
 	@echo "Step 2:Deploying Lambda"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
 	@aws cloudformation package --template-file ./database/secrets-rotation/src/secrets-rotation.yaml --region ${PRIMARY_REGION} --s3-bucket $(result) --output-template-file ./database/secrets-rotation/src/out.yaml
-	@aws cloudformation deploy --template-file ./database/secrets-rotation/src/out.yaml --stack-name secrets-rotation${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} CatalogDBCredentialsSecretId=mr-app/catalog-global-db-cluster-UserCredentials${ENV}
+	$(eval _ROT_VPC:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
+	@aws cloudformation deploy --template-file ./database/secrets-rotation/src/out.yaml --stack-name secrets-rotation${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} CatalogDBCredentialsSecretId=mr-app/catalog-global-db-cluster-UserCredentials${ENV} VpcId=$(_ROT_VPC)
 
 
 load-generator: primary_ecs standby_ecs

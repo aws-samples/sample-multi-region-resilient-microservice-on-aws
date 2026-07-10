@@ -22,7 +22,10 @@ Parameters:
   KmsKey:
     Type: AWS::SSM::Parameter::Value<String>
     Default: KmsKey
-    Description: CMK Id 
+    Description: CMK Id
+  VpcId:
+    Type: String
+    Description: VPC ID from the baseVpc stack
 
 Mappings:
   RegionCidrMap:
@@ -128,7 +131,7 @@ Resources:
   sgTask:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: ECS Task
       SecurityGroupIngress:
         -
@@ -262,7 +265,7 @@ Resources:
   sgAlb:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: ECS Alb
       SecurityGroupIngress:
         - CidrIp: !Sub '{{resolve:ssm:VpcCidr${Env}}}'
@@ -297,7 +300,7 @@ Resources:
         - 
           Key: "created-by"
           Value: "retail-store-sample-app"
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       SecurityGroupIngress: 
         - 
           SourceSecurityGroupId: !Ref sgTask
@@ -338,7 +341,7 @@ Resources:
         - 
           Key: "created-by"
           Value: "retail-store-sample-app"
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       SecurityGroupIngress: 
         - 
           SourceSecurityGroupId: !Ref sgTask
@@ -461,7 +464,7 @@ Resources:
       Matcher:
         HttpCode: '200,302,303'
       TargetType: ip
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
   AlbListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Metadata:

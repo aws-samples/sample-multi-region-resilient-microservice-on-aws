@@ -27,6 +27,13 @@ Parameters:
   PrimaryOnly:
     Type: String
     Default: false
+  VpcId:
+    Type: String
+    Description: VPC ID from the baseVpc stack
+  VpcPeeringConnectionId:
+    Type: String
+    Default: ""
+    Description: VPC Peering Connection ID (required when PrimaryOnly=false)
 
 Mappings:
   RegionMap:
@@ -73,7 +80,7 @@ Resources:
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: !If [isPrimary, !FindInMap [RegionMap, !Ref StandbyRegion, "VPCCidrBlock"], !FindInMap [RegionMap, !Ref PrimaryRegion, "VPCCidrBlock"]]
-      VpcPeeringConnectionId: !Sub '{{resolve:secretsmanager:VpcPeerId${Env}}}'
+      VpcPeeringConnectionId: !Ref VpcPeeringConnectionId
 
   FlowLogRole:
     Metadata:
@@ -119,13 +126,13 @@ Resources:
     Properties:
       DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
       LogGroupName: VpcFlowLogs
-      ResourceId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      ResourceId: !Ref VpcId
       ResourceType: VPC
       TrafficType: ALL
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId1]
       CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock1]
       MapPublicIpOnLaunch: false
@@ -145,7 +152,7 @@ Resources:
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId2]
       CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock2]
       MapPublicIpOnLaunch: false
@@ -165,7 +172,7 @@ Resources:
   PrivateSubnet3:
     Type: AWS::EC2::Subnet
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       AvailabilityZoneId: !FindInMap [RegionMap, !Ref "AWS::Region", AvailabilityZoneId3]
       CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", PrivateCidrBlock3]
       MapPublicIpOnLaunch: false
@@ -185,7 +192,7 @@ Resources:
   PrivateRouteTable:
     Type:  AWS::EC2::RouteTable
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
   
 #Ecr Repos
   CheckoutRepo:
@@ -328,7 +335,7 @@ Resources:
   canarySg:
     Type: AWS::EC2::SecurityGroup
     Properties: 
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: Canary - Egress Only
       SecurityGroupEgress: 
         - 
@@ -367,7 +374,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -378,7 +385,7 @@ Resources:
   VPCEndpointSecretsManagerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -394,7 +401,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.rds'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -405,7 +412,7 @@ Resources:
   VPCEndpointRDSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -423,13 +430,13 @@ Resources:
         - !Ref PrivateRouteTable
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
       VpcEndpointType: Gateway
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
   VPCEndpointForSSM:
     Type: AWS::EC2::VPCEndpoint
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -442,7 +449,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -455,7 +462,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -466,7 +473,7 @@ Resources:
   VPCEndpointSSMSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -483,7 +490,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -494,7 +501,7 @@ Resources:
   VPCEndpointECRApiSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -511,7 +518,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -522,7 +529,7 @@ Resources:
   VPCEndpointECRDkrSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -539,7 +546,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -550,7 +557,7 @@ Resources:
   VPCEndpointLogsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -567,7 +574,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -578,7 +585,7 @@ Resources:
   VPCEndpointSTSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -595,7 +602,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.kms'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -606,7 +613,7 @@ Resources:
   VPCEndpointKMSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -623,7 +630,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.monitoring'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -634,7 +641,7 @@ Resources:
   VPCEndpointMonitoringSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -651,7 +658,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.xray'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -662,7 +669,7 @@ Resources:
   VPCEndpointXRaySecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -679,7 +686,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -692,7 +699,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecs-telemetry'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -703,7 +710,7 @@ Resources:
   VPCEndpointECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -720,7 +727,7 @@ Resources:
     Properties:
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dsql'
       VpcEndpointType: Interface
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       PrivateDnsEnabled: true
       SubnetIds:
         - !Ref PrivateSubnet1
@@ -731,7 +738,7 @@ Resources:
   VPCEndpointDSQLSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: VPC Endpoint SG
       Tags:
         - Key: Name
@@ -750,4 +757,4 @@ Resources:
         - !Ref PrivateRouteTable
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
       VpcEndpointType: Gateway
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
