@@ -61,10 +61,6 @@ CAN_S=$(resolve_stack "canaries${ENV}" "$STANDBY_REGION")
 MON_P=$(resolve_stack "monitoring${ENV}" "$PRIMARY_REGION")
 MON_S=$(resolve_stack "monitoring${ENV}" "$STANDBY_REGION")
 RS=$(resolve_stack "region-switch${ENV}" "$PRIMARY_REGION")
-VPC_P=$(resolve_stack "baseVpc${ENV}" "$PRIMARY_REGION")
-VPC_S=$(resolve_stack "baseVpc${ENV}" "$STANDBY_REGION")
-INFRA_P=$(resolve_stack "baseInfra${ENV}" "$PRIMARY_REGION")
-INFRA_S=$(resolve_stack "baseInfra${ENV}" "$STANDBY_REGION")
 
 # ---------------------------------------------------------------------------
 # S3 bucket for NGRH reports (mirror of NgrhBucket in ngrh.yaml).
@@ -306,7 +302,7 @@ add_assertion() { # service_arn text
 
 # --- ui: all four journeys, Tier-1 ---
 UI_ARN=$(ensure_service "ui${ENV}" "$TIER1_ARN" "$BROWSE_ID,$CHECKOUT_ID,$CART_ID,$VIEWORDERS_ID")
-for s in "$APPS_P" "$APPS_S" "$VPC_P" "$VPC_S" "$INFRA_P" "$INFRA_S" "$MON_P" "$MON_S" "$GR" "$CAN_P" "$CAN_S" "$RS"; do
+for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$GR" "$CAN_P" "$CAN_S" "$RS"; do
   add_input_source "$UI_ARN" "$s"
 done
 for a in "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_MQ" "$A_NO_AURORA"; do
@@ -315,7 +311,7 @@ done
 
 # --- catalog: Browse journey, Tier-2 ---
 CATALOG_ARN=$(ensure_service "catalog${ENV}" "$TIER2_ARN" "$BROWSE_ID")
-for s in "$APPS_P" "$APPS_S" "$VPC_P" "$VPC_S" "$INFRA_P" "$INFRA_S" "$MON_P" "$MON_S" "$CAT_P" "$CAT_S" "$RS"; do
+for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$CAT_P" "$CAT_S" "$RS"; do
   add_input_source "$CATALOG_ARN" "$s"
 done
 for a in "$A_CATALOG_RPO" "$A_CATALOG_AURORA" "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_MQ"; do
@@ -324,7 +320,7 @@ done
 
 # --- cart: Cart + Checkout journeys, Tier-1 ---
 CART_ARN=$(ensure_service "cart${ENV}" "$TIER1_ARN" "$CART_ID,$CHECKOUT_ID")
-for s in "$APPS_P" "$APPS_S" "$VPC_P" "$VPC_S" "$INFRA_P" "$INFRA_S" "$MON_P" "$MON_S" "$CARTS_P" "$RS"; do
+for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$CARTS_P" "$RS"; do
   add_input_source "$CART_ARN" "$s"
 done
 for a in "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_MQ" "$A_NO_AURORA"; do
@@ -333,7 +329,7 @@ done
 
 # --- checkout: Checkout journey, Tier-2 ---
 CHECKOUT_ARN=$(ensure_service "checkout${ENV}" "$TIER2_ARN" "$CHECKOUT_ID")
-for s in "$APPS_P" "$APPS_S" "$VPC_P" "$VPC_S" "$INFRA_P" "$INFRA_S" "$MON_P" "$MON_S" "$RS"; do
+for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$RS"; do
   add_input_source "$CHECKOUT_ARN" "$s"
 done
 for a in "$A_FAILOVER" "$A_AZ" "$A_NO_MQ" "$A_NO_AURORA"; do
@@ -342,7 +338,7 @@ done
 
 # --- orders: Checkout + ViewOrders journeys, Tier-1 ---
 ORDERS_ARN=$(ensure_service "orders${ENV}" "$TIER1_ARN" "$CHECKOUT_ID,$VIEWORDERS_ID")
-for s in "$APPS_P" "$APPS_S" "$VPC_P" "$VPC_S" "$INFRA_P" "$INFRA_S" "$MON_P" "$MON_S" "$ORD_P" "$ORD_S" "$RS"; do
+for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$ORD_P" "$ORD_S" "$RS"; do
   add_input_source "$ORDERS_ARN" "$s"
 done
 for a in "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_AURORA" "$A_ORDERS_MQ"; do
@@ -351,7 +347,7 @@ done
 
 # --- assets: Browse journey, Tier-2 ---
 ASSETS_ARN=$(ensure_service "assets${ENV}" "$TIER2_ARN" "$BROWSE_ID")
-for s in "$APPS_P" "$APPS_S" "$VPC_P" "$VPC_S" "$INFRA_P" "$INFRA_S" "$MON_P" "$MON_S" "$RS"; do
+for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$RS"; do
   add_input_source "$ASSETS_ARN" "$s"
 done
 for a in "$A_ASSETS_STATELESS" "$A_FAILOVER" "$A_AZ"; do
