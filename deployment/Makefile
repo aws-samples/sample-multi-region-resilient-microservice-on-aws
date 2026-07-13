@@ -25,10 +25,10 @@ endif
 ####
 
 deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_infrastructure standby_ecs global_routing \
-	canaries_primary canaries_standby client-primary client-standby restore-reconciliation monitoring \
+	canaries_primary canaries_standby restore-reconciliation monitoring \
 	region-switch secrets-rotation chaos-engineering ngrh
 
-deploy-primary: test-creds create-peer primary_infrastructure primary_ecs client-primary
+deploy-primary: test-creds create-peer primary_infrastructure primary_ecs
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
 	$(eval _CAN_VPC:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
@@ -42,13 +42,8 @@ deploy: deploy-all
 	@echo "https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=${PRIMARY_REGION}#synthetics:canary/list"
 	@echo "https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=${STANDBY_REGION}#synthetics:canary/list"
 	@echo ""
-	@echo "Clients for in-VPC Browser:"
-	@echo "https://${PRIMARY_REGION}.console.aws.amazon.com/systems-manager/fleet-manager/managed-nodes?region=${PRIMARY_REGION}"
-	@echo "https://${STANDBY_REGION}.console.aws.amazon.com/systems-manager/fleet-manager/managed-nodes?region=${STANDBY_REGION}"
-	@echo ""
-	@echo "Administrator user passwords:"
-	@echo "https://${PRIMARY_REGION}.console.aws.amazon.com/secretsmanager/secret?name=mr-app-windowspassword-${PRIMARY_REGION}${ENV}&region=${PRIMARY_REGION}"
-	@echo "https://${STANDBY_REGION}.console.aws.amazon.com/secretsmanager/secret?name=mr-app-windowspassword-${STANDBY_REGION}${ENV}&region=${STANDBY_REGION}"
+	@echo "Windows clients for in-VPC browser testing are NOT deployed by default."
+	@echo "Run 'make client ENV=$(ENV)' to deploy them (diagnostics only)."
 	@echo ""
 	@echo "Region Switch Plan:"
 	@echo "Use 'aws arc-region-switch start-plan-execution' to initiate failover"
@@ -421,6 +416,18 @@ carts-db: primary_infrastructure
 	@aws cloudformation deploy --template ./database/dynamodb/global-table.yml \
 	--region ${PRIMARY_REGION} --stack-name carts-db-stack${ENV} --capabilities CAPABILITY_IAM \
 	--parameter-overrides Env=${ENV} NamingPrefix=carts KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2
+
+# Optional Windows EC2 clients for in-VPC browser testing (diagnostics only).
+# NOT part of deploy-all -- run 'make client ENV=...' to deploy both regions.
+client: client-primary client-standby
+	@echo ""
+	@echo "Clients for in-VPC Browser:"
+	@echo "https://${PRIMARY_REGION}.console.aws.amazon.com/systems-manager/fleet-manager/managed-nodes?region=${PRIMARY_REGION}"
+	@echo "https://${STANDBY_REGION}.console.aws.amazon.com/systems-manager/fleet-manager/managed-nodes?region=${STANDBY_REGION}"
+	@echo ""
+	@echo "Administrator user passwords:"
+	@echo "https://${PRIMARY_REGION}.console.aws.amazon.com/secretsmanager/secret?name=mr-app-windowspassword-${PRIMARY_REGION}${ENV}&region=${PRIMARY_REGION}"
+	@echo "https://${STANDBY_REGION}.console.aws.amazon.com/secretsmanager/secret?name=mr-app-windowspassword-${STANDBY_REGION}${ENV}&region=${STANDBY_REGION}"
 
 client-primary: primary_infrastructure
 	@echo "Deploy the Windows Client in the Primary Region"
