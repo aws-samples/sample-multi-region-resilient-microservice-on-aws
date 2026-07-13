@@ -42,8 +42,6 @@ export class HttpOrdersService implements IOrdersService {
           totalCost: item.totalCost,
         };
       }),
-    }).then((value) => {
-      return value.body;
     });
   }
 }

@@ -17,7 +17,7 @@
  */
 
 import { Checkout } from '../models/Checkout';
-import { ExistingOrder, Order, OrdersApi } from '../../clients/orders/api';
+import { ExistingOrder } from '../../clients/orders/api';
 import { IOrdersService } from './IOrdersService';
 
 export class MockOrdersService implements IOrdersService {
