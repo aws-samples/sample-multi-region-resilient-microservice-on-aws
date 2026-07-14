@@ -31,3 +31,18 @@ phases:
           fi
         done
       - echo "Sidecar image mirroring completed successfully"
+      - |
+        # FIS sidecar: bake dnf deps into the SSM agent image at build time --
+        # tasks run in private subnets with no internet route, so neither
+        # public.ecr.aws pulls nor runtime dnf installs are possible there.
+        REPO=amazon-ssm-agent${ENV_SUFFIX}
+        echo "FROM public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest" > Dockerfile.ssm-agent
+        echo "RUN dnf upgrade -y && dnf install -y jq procps awscli && dnf clean all" >> Dockerfile.ssm-agent
+        docker build -t $REPO:latest -f Dockerfile.ssm-agent .
+        docker tag $REPO:latest $AWS_ACCOUNT_ID.dkr.ecr.$PRIMARY_REGION.amazonaws.com/$REPO:latest
+        docker push $AWS_ACCOUNT_ID.dkr.ecr.$PRIMARY_REGION.amazonaws.com/$REPO:latest
+        if [ "$PRIMARY_ONLY" != "true" ]; then
+          docker tag $REPO:latest $AWS_ACCOUNT_ID.dkr.ecr.$STANDBY_REGION.amazonaws.com/$REPO:latest
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$STANDBY_REGION.amazonaws.com/$REPO:latest
+        fi
+      - echo "FIS SSM agent sidecar image build completed successfully"

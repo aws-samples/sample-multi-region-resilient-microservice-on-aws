@@ -58,6 +58,7 @@ Resources:
                   - !Sub 'arn:aws:ecr:${PrimaryRegion}:${AWS::AccountId}:repository/cloudwatch-agent${Env}'
                   - !Sub 'arn:aws:ecr:${PrimaryRegion}:${AWS::AccountId}:repository/adot-autoinstrumentation-java${Env}'
                   - !Sub 'arn:aws:ecr:${PrimaryRegion}:${AWS::AccountId}:repository/adot-autoinstrumentation-node${Env}'
+                  - !Sub 'arn:aws:ecr:${PrimaryRegion}:${AWS::AccountId}:repository/amazon-ssm-agent${Env}'
                   - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/catalog${Env}'
                   - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/checkout${Env}'
                   - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/ui${Env}'
@@ -67,6 +68,7 @@ Resources:
                   - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/cloudwatch-agent${Env}'
                   - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/adot-autoinstrumentation-java${Env}'
                   - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/adot-autoinstrumentation-node${Env}'
+                  - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/amazon-ssm-agent${Env}'
         - PolicyName: CodeBuildS3Access
           PolicyDocument:
             Version: '2012-10-17'

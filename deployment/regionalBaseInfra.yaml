@@ -330,6 +330,21 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+  SSMAgentRepo:
+    Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "Build system reuses git commit SHA as image tag. Immutable tags would prevent redeployment of same commit."
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'amazon-ssm-agent${Env}'
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
 
 # Canary Security Group - In this stack since it take Lambda 20 mins to delete the ENIs it manages
   canarySg:
