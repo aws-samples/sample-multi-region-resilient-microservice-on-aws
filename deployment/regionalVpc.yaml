@@ -20,6 +20,18 @@ Parameters:
     Type: String
     Description: Enter the Standby Region
     Default: "us-west-2"
+  PrimaryOnly:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Set to true to skip standby-only resources (VPC peering)
+  PrimaryVpcId:
+    Type: String
+    Default: ""
+    Description: >-
+      VPC ID of the primary region VPC. Required when deploying in the standby
+      region so the peering connection can reference it without a cross-region
+      secret lookup. Leave empty for the primary region deploy.
 
 Mappings:
   RegionMap:
@@ -41,47 +53,31 @@ Mappings:
       "AvailabilityZoneId3": usw2-az3
 
 Conditions:
-  isPrimary: !Equals
-    - !Ref AWS::Region
-    - us-east-1
-  isStandby: !Equals
-    - !Ref AWS::Region
-    - us-west-2
+  isStandby: !And
+    - !Equals [!Ref AWS::Region, us-west-2]
+    - !Equals [!Ref PrimaryOnly, "false"]
 
 Resources:
   #VPC
   Vpc:
     Type: AWS::EC2::VPC
-    Properties: 
+    Properties:
       CidrBlock: !FindInMap [RegionMap, !Ref "AWS::Region", "VPCCidrBlock"]
       EnableDnsSupport: true
       EnableDnsHostnames: true
-  VpcIdSecret:
-    Type: AWS::SecretsManager::Secret
+  VpcIdParam:
+    Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub VpcId-${AWS::Region}${Env}
-      Description: "VPC Id"
-      KmsKeyId: !Ref KmsKey
-      SecretString: !Ref Vpc
-      ReplicaRegions:
-        - Region: !If [isPrimary, us-west-2, us-east-1]
+      Type: String
+      Name: !Sub VpcId${Env}
+      Value: !Ref Vpc
   Peer:
     Condition: isStandby
     Type: AWS::EC2::VPCPeeringConnection
-    Properties: 
-      PeerRegion: !Ref PrimaryRegion
-      PeerVpcId: !Sub '{{resolve:secretsmanager:VpcId-${PrimaryRegion}${Env}}}'
-      VpcId: !Ref Vpc
-  VpcPeerIdSecret:
-    Condition: isStandby
-    Type: AWS::SecretsManager::Secret
     Properties:
-      Name: !Sub VpcPeerId${Env}
-      Description: "VPC Id"
-      KmsKeyId: !Ref KmsKey
-      SecretString: !Ref Peer
-      ReplicaRegions:
-        - Region: !Ref PrimaryRegion
+      PeerRegion: !Ref PrimaryRegion
+      PeerVpcId: !Ref PrimaryVpcId
+      VpcId: !Ref Vpc
 
   #Canaries pres-reqs
   canaryPolicy:
@@ -219,7 +215,7 @@ Resources:
       Path: "/service-role/"
       AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
       MaxSessionDuration: 3600
-      ManagedPolicyArns: 
+      ManagedPolicyArns:
         - !Ref canaryPolicy
       Description: "CloudWatch Synthetics lambda execution role for running canaries"
   canaryRoleArn:
@@ -258,7 +254,7 @@ Resources:
         {
           "Version" : "2012-10-17",
           "Id" : "key-default-1",
-          "Statement" : [ 
+          "Statement" : [
             {
             "Sid" : "Enable IAM User Permissions",
             "Effect" : "Allow",
@@ -310,12 +306,21 @@ Resources:
               }
             }
           } ]
-        }   
+        }
       KeySpec: "SYMMETRIC_DEFAULT"
       MultiRegion: false
   KmsKeyParam:
     Type: AWS::SSM::Parameter
-    Properties: 
+    Properties:
       Type: String
       Name: !Sub retail-store-ar${Env}
       Value: !Ref KmsKey
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Description: VPC ID for this region
+  PeeringConnectionId:
+    Condition: isStandby
+    Value: !Ref Peer
+    Description: VPC Peering Connection ID (standby region only)

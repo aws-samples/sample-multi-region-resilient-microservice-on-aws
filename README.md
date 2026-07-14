@@ -175,16 +175,21 @@ Canaries:
 * https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#synthetics:canary/list
 * https://us-west-2.console.aws.amazon.com/cloudwatch/home?region=us-west-2#synthetics:canary/list
 
-Clients for in-VPC Browser:
-* https://us-east-1.console.aws.amazon.com/systems-manager/fleet-manager/managed-nodes?region=us-east-1
-* https://us-west-2.console.aws.amazon.com/systems-manager/fleet-manager/managed-nodes?region=us-west-2
-
-Administrator user passwords:
-* https://us-east-1.console.aws.amazon.com/secretsmanager/secret?name=mr-app-windowspassword-us-east-1&region=us-east-1
-* https://us-west-2.console.aws.amazon.com/secretsmanager/secret?name=mr-app-windowspassword-us-west-2&region=us-west-2
-
 Region Switch Plan:
 * Use `aws arc-region-switch start-plan-execution` to initiate failover
+
+**Optional Windows clients (diagnostics only)**
+
+Windows EC2 clients for in-VPC browser testing are **not** deployed by default.
+If you need them for diagnostics, deploy them in both regions with:
+
+```bash
+make client ENV=<env>
+```
+
+This prints the Fleet Manager console links and the Administrator password
+secret locations for each client. `make destroy-all` still cleans them up if
+they were deployed.
 
 ## Observability
 
@@ -256,7 +261,7 @@ vary with the canary schedule, log retention, and workload volume.
 | Amazon MQ (RabbitMQ) | $65 | mq.m7g.medium single-instance broker |
 | ElastiCache for Redis | $12 | cache.t3.micro single-node replication group |
 | CloudWatch Synthetics | $620 | 12 canaries × 1-minute schedule × $0.0012/run (DOMINANT cost) |
-| Windows EC2 client | $15 | t3.small for in-VPC browser testing |
+| Windows EC2 client | $15 | optional (`make client`), t3.small for in-VPC browser testing — not deployed by default |
 | DynamoDB Global Table (MRSC) | $0.30 | small dataset, replicated to other Region |
 | DynamoDB Streams | $0.001 | low GetRecord volume |
 | AWS FIS | $2 | chaos experiments, 20 action-minutes/run |
@@ -294,7 +299,8 @@ multi-Region pattern itself:
   `deployment/canaries.yaml` → saves ~$1,000/month.
 * Trim VPC interface endpoints to a single AZ (or rely on NAT for the
   services that don't need private connectivity) → saves up to ~$220/month.
-* Shut down the Windows EC2 clients when not in use → saves ~$30/month.
+* Windows EC2 clients are opt-in (`make client`) — skip them entirely, or
+  shut them down when not in use → saves ~$30/month.
 * Run `make destroy-all` between evaluation sessions and redeploy on
   demand — the templates create cleanly and most stateful resources are
   small at idle.

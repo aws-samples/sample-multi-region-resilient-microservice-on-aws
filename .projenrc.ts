@@ -175,8 +175,13 @@ autoApprove.addJob('auto-approve', {
 // ─── Auto-merge: squash-merge Dependabot PRs on open ───────────────────────────
 const autoMerge = project.github!.addWorkflow('auto-merge');
 autoMerge.on({
+  // 'synchronize' re-arms auto-merge on every push to the Dependabot branch,
+  // so a single flaky `gh pr merge --auto` call at open time no longer strands
+  // a PR. Do NOT rely solely on retry-automerge (check_suite:completed) — its
+  // conclusion=='success' gate is skipped whenever a neutral/skipped check
+  // (e.g. CodeQL "skipping") is present in the suite.
   pullRequestTarget: {
-    types: ['opened', 'reopened', 'ready_for_review'],
+    types: ['opened', 'reopened', 'ready_for_review', 'synchronize'],
   },
 });
 autoMerge.addJob('auto-merge', {
@@ -495,7 +500,12 @@ retryAutoMergeWf.addJob('retry-auto-merge', {
     contents: github.workflows.JobPermission.WRITE,
     pullRequests: github.workflows.JobPermission.WRITE,
   },
-  if: "github.event.check_suite.app.slug == 'github-actions' && github.event.check_suite.conclusion == 'success'",
+  // Only gate on the source app, NOT on conclusion == 'success'. A neutral/
+  // skipped check (e.g. CodeQL "skipping") makes the suite conclusion
+  // 'neutral', which previously skipped this job on every run. Enabling
+  // auto-merge is safe regardless: GitHub still only completes the merge once
+  // required checks pass + branch protection is satisfied.
+  if: "github.event.check_suite.app.slug == 'github-actions'",
   steps: [
     {
       name: 'Re-enable auto-merge on Dependabot PRs',

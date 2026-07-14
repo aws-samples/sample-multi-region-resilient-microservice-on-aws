@@ -31,6 +31,12 @@ Parameters:
     Type: String
     Default: ''
     Description: Optional Route53 health check ID for the standby region record
+  VpcIdPrimary:
+    Type: String
+    Description: VPC ID in the primary region
+  VpcIdStandby:
+    Type: String
+    Description: VPC ID in the standby region
 
 Conditions:
   HasPrimaryHealthCheck: !Not [!Equals [!Ref PrimaryHealthCheckId, '']]
@@ -42,9 +48,9 @@ Resources:
     Properties:
       Name: !Sub ${DomainName}
       VPCs:
-        - VPCId: !Sub '{{resolve:secretsmanager:VpcId-${PrimaryRegion}${Env}}}'
+        - VPCId: !Ref VpcIdPrimary
           VPCRegion: !Ref PrimaryRegion
-        - VPCId: !Sub '{{resolve:secretsmanager:VpcId-${StandbyRegion}${Env}}}'
+        - VPCId: !Ref VpcIdStandby
           VPCRegion: !Ref StandbyRegion
 
   PrimaryRegionRecord:

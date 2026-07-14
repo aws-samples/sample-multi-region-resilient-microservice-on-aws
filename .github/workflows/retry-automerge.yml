@@ -11,7 +11,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    if: github.event.check_suite.app.slug == 'github-actions' && github.event.check_suite.conclusion == 'success'
+    if: github.event.check_suite.app.slug == 'github-actions'
     steps:
       - name: Re-enable auto-merge on Dependabot PRs
         env:

@@ -31,8 +31,11 @@ Parameters:
   GlobalClusterIdentifier:
     Default: global-db-cluster
     Type: String
+  VpcId:
+    Type: String
+    Description: VPC ID from the baseVpc stack
 
-Resources: 
+Resources:
   SubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -45,7 +48,7 @@ Resources:
   LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      VpcId: !Sub '{{resolve:secretsmanager:VpcId-${AWS::Region}${Env}}}'
+      VpcId: !Ref VpcId
       GroupDescription: Lambda function access to aurora mysql and reconciliation database
       Tags:
         - Key: Name
