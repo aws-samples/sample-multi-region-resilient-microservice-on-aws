@@ -58,7 +58,10 @@ Resources:
     Properties:
       HostedZoneId: !Ref HostedZone
       Name: !Sub store.${DomainName}
-      Region: !Ref PrimaryRegion
+      # Weighted 50/50 across regions. With the ARC-managed health checks
+      # attached, Route 53 automatically shifts to 100/0 when a region's
+      # routing control is disabled (its health check reports unhealthy).
+      Weight: 50
       Type: A
       SetIdentifier: PrimaryRegion
       HealthCheckId: !If [HasPrimaryHealthCheck, !Ref PrimaryHealthCheckId, !Ref 'AWS::NoValue']
@@ -72,7 +75,7 @@ Resources:
     Properties:
       HostedZoneId: !Ref HostedZone
       Name: !Sub store.${DomainName}
-      Region: !Ref StandbyRegion
+      Weight: 50
       Type: A
       SetIdentifier: StandbyRegion
       HealthCheckId: !If [HasStandbyHealthCheck, !Ref StandbyHealthCheckId, !Ref 'AWS::NoValue']

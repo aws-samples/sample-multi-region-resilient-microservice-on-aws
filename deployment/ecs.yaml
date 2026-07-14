@@ -39,6 +39,64 @@ Conditions:
     - !Ref AWS::Region
     - us-east-1
 Resources:
+  # --- FIS fault-injection support (aws:ecs:task-* actions on Fargate) ---
+  # Role attached to tasks registered as SSM managed instances by the
+  # amazon-ssm-agent sidecar. Per FIS docs it needs SSM core plus the ability
+  # to clean up its own activation/registration on task stop.
+  FisSsmManagedInstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "SSM activations/managed-instance IDs are generated at task runtime and cannot be scoped in advance."
+          - id: W12
+            reason: "SSM activations/managed-instance IDs are generated at task runtime and cannot be scoped in advance."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ssm.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: fis-activation-cleanup
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Resource: "*"
+                Action:
+                  - "ssm:DeleteActivation"
+                  - "ssm:DeregisterManagedInstance"
+
+  # Shared task-role additions required by the FIS SSM sidecar: create the
+  # activation at task start and pass the managed-instance role to SSM.
+  FisTaskSsmManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W13
+            reason: "ssm:CreateActivation/AddTagsToResource do not support resource-level scoping."
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Resource: "*"
+            Action:
+              - "ssm:CreateActivation"
+              - "ssm:AddTagsToResource"
+          - Effect: "Allow"
+            Resource: !GetAtt FisSsmManagedInstanceRole.Arn
+            Action:
+              - "iam:PassRole"
+
   #Backends
   OrdersMqBroker:
     Type: "AWS::AmazonMQ::Broker"
@@ -509,6 +567,7 @@ Resources:
             Action: "sts:AssumeRole"
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref FisTaskSsmManagedPolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
       Policies:
         - PolicyName: ecs 
@@ -545,17 +604,40 @@ Resources:
     Properties:
       Volumes: 
         - Name:  opentelemetry-auto-instrumentation
-      ExecutionRoleArn: !Ref CartsTaskExecutionRole
-      TaskRoleArn: !Ref CartsTaskExecutionRole
+      ExecutionRoleArn: !GetAtt CartsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt CartsTaskExecutionRole.Arn
       NetworkMode: awsvpc 
+      # Required for FIS ECS task actions (kill-process + network faults)
+      PidMode: task
+      # Enables the ECS fault-injection endpoints used by FIS network
+      # actions on Fargate (useEcsFaultInjectionEndpoints=true)
+      EnableFaultInjection: true
       Cpu: 256
-      Memory: 512
+      # 1024 (was 512): headroom for the FIS SSM sidecar (dnf upgrade at start)
+      Memory: 1024
       RequiresCompatibilities:
         - FARGATE
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
+        # FIS fault-injection sidecar (AWS-documented pattern): registers the
+        # task as an SSM managed instance so AWS FIS aws:ecs:task-* actions
+        # (cpu-stress, io-stress, kill-process, network faults) can target it.
+        # Essential=false: app containers keep serving if the sidecar stops.
+        # https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html
+        - Name: amazon-ssm-agent
+          Image: public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
+          Cpu: 0
+          Essential: false
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e; dnf upgrade -y; dnf install jq procps awscli -y; term_handler() { echo "Deleting SSM activation $ACTIVATION_ID"; if ! aws ssm delete-activation --activation-id $ACTIVATION_ID --region $ECS_TASK_REGION; then echo "SSM activation $ACTIVATION_ID failed to be deleted" 1>&2; fi; MANAGED_INSTANCE_ID=$(jq -e -r .ManagedInstanceID /var/lib/amazon/ssm/registration); echo "Deregistering SSM Managed Instance $MANAGED_INSTANCE_ID"; if ! aws ssm deregister-managed-instance --instance-id $MANAGED_INSTANCE_ID --region $ECS_TASK_REGION; then echo "SSM Managed Instance $MANAGED_INSTANCE_ID failed to be deregistered" 1>&2; fi; kill -SIGTERM $SSM_AGENT_PID; }; trap term_handler SIGTERM SIGINT; if [[ -z $MANAGED_INSTANCE_ROLE_NAME ]]; then echo "Environment variable MANAGED_INSTANCE_ROLE_NAME not set, exiting" 1>&2; exit 1; fi; if ! ps ax | grep amazon-ssm-agent | grep -v grep > /dev/null; then if [[ -n $ECS_CONTAINER_METADATA_URI_V4 ]] ; then echo "Found ECS Container Metadata, running activation with metadata"; TASK_METADATA=$(curl "${ECS_CONTAINER_METADATA_URI_V4}/task"); ECS_TASK_AVAILABILITY_ZONE=$(echo $TASK_METADATA | jq -e -r '.AvailabilityZone'); ECS_TASK_ARN=$(echo $TASK_METADATA | jq -e -r '.TaskARN'); ECS_TASK_REGION=$(echo $ECS_TASK_AVAILABILITY_ZONE | sed 's/.$//'); ECS_TASK_AVAILABILITY_ZONE_REGEX='^(af|ap|ca|cn|eu|me|sa|us|us-gov)-(central|north|(north(east|west))|south|south(east|west)|east|west)-[0-9]{1}[a-z]{1}$'; if ! [[ $ECS_TASK_AVAILABILITY_ZONE =~ $ECS_TASK_AVAILABILITY_ZONE_REGEX ]]; then echo "Error extracting Availability Zone from ECS Container Metadata, exiting" 1>&2; exit 1; fi; ECS_TASK_ARN_REGEX='^arn:(aws|aws-cn|aws-us-gov):ecs:[a-z0-9-]+:[0-9]{12}:task/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$'; if ! [[ $ECS_TASK_ARN =~ $ECS_TASK_ARN_REGEX ]]; then echo "Error extracting Task ARN from ECS Container Metadata, exiting" 1>&2; exit 1; fi; CREATE_ACTIVATION_OUTPUT=$(aws ssm create-activation --iam-role $MANAGED_INSTANCE_ROLE_NAME --tags Key=ECS_TASK_AVAILABILITY_ZONE,Value=$ECS_TASK_AVAILABILITY_ZONE Key=ECS_TASK_ARN,Value=$ECS_TASK_ARN Key=FAULT_INJECTION_SIDECAR,Value=true --region $ECS_TASK_REGION); ACTIVATION_CODE=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationCode); ACTIVATION_ID=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationId); if ! amazon-ssm-agent -register -code $ACTIVATION_CODE -id $ACTIVATION_ID -region $ECS_TASK_REGION; then echo "Failed to register with AWS Systems Manager (SSM), exiting" 1>&2; exit 1; fi; amazon-ssm-agent & SSM_AGENT_PID=$!; wait $SSM_AGENT_PID; else echo "ECS Container Metadata not found, exiting" 1>&2; exit 1; fi; else echo "SSM agent is already running, exiting" 1>&2; exit 1; fi
+          Environment:
+            - Name: MANAGED_INSTANCE_ROLE_NAME
+              Value: !Ref FisSsmManagedInstanceRole
         -
           Name: "carts"
           MountPoints: 
@@ -671,6 +753,7 @@ Resources:
             Action: "sts:AssumeRole"
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref FisTaskSsmManagedPolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
       Policies:
         - PolicyName: ecs 
@@ -716,9 +799,14 @@ Resources:
     Properties:
       Volumes: 
         - Name:  opentelemetry-auto-instrumentation
-      ExecutionRoleArn: !Ref OrdersTaskExecutionRole
-      TaskRoleArn: !Ref OrdersTaskExecutionRole
+      ExecutionRoleArn: !GetAtt OrdersTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt OrdersTaskExecutionRole.Arn
       NetworkMode: awsvpc 
+      # Required for FIS ECS task actions (kill-process + network faults)
+      PidMode: task
+      # Enables the ECS fault-injection endpoints used by FIS network
+      # actions on Fargate (useEcsFaultInjectionEndpoints=true)
+      EnableFaultInjection: true
       Cpu: 1024
       Memory: 2048
       RequiresCompatibilities:
@@ -727,6 +815,23 @@ Resources:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
+        # FIS fault-injection sidecar (AWS-documented pattern): registers the
+        # task as an SSM managed instance so AWS FIS aws:ecs:task-* actions
+        # (cpu-stress, io-stress, kill-process, network faults) can target it.
+        # Essential=false: app containers keep serving if the sidecar stops.
+        # https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html
+        - Name: amazon-ssm-agent
+          Image: public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
+          Cpu: 0
+          Essential: false
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e; dnf upgrade -y; dnf install jq procps awscli -y; term_handler() { echo "Deleting SSM activation $ACTIVATION_ID"; if ! aws ssm delete-activation --activation-id $ACTIVATION_ID --region $ECS_TASK_REGION; then echo "SSM activation $ACTIVATION_ID failed to be deleted" 1>&2; fi; MANAGED_INSTANCE_ID=$(jq -e -r .ManagedInstanceID /var/lib/amazon/ssm/registration); echo "Deregistering SSM Managed Instance $MANAGED_INSTANCE_ID"; if ! aws ssm deregister-managed-instance --instance-id $MANAGED_INSTANCE_ID --region $ECS_TASK_REGION; then echo "SSM Managed Instance $MANAGED_INSTANCE_ID failed to be deregistered" 1>&2; fi; kill -SIGTERM $SSM_AGENT_PID; }; trap term_handler SIGTERM SIGINT; if [[ -z $MANAGED_INSTANCE_ROLE_NAME ]]; then echo "Environment variable MANAGED_INSTANCE_ROLE_NAME not set, exiting" 1>&2; exit 1; fi; if ! ps ax | grep amazon-ssm-agent | grep -v grep > /dev/null; then if [[ -n $ECS_CONTAINER_METADATA_URI_V4 ]] ; then echo "Found ECS Container Metadata, running activation with metadata"; TASK_METADATA=$(curl "${ECS_CONTAINER_METADATA_URI_V4}/task"); ECS_TASK_AVAILABILITY_ZONE=$(echo $TASK_METADATA | jq -e -r '.AvailabilityZone'); ECS_TASK_ARN=$(echo $TASK_METADATA | jq -e -r '.TaskARN'); ECS_TASK_REGION=$(echo $ECS_TASK_AVAILABILITY_ZONE | sed 's/.$//'); ECS_TASK_AVAILABILITY_ZONE_REGEX='^(af|ap|ca|cn|eu|me|sa|us|us-gov)-(central|north|(north(east|west))|south|south(east|west)|east|west)-[0-9]{1}[a-z]{1}$'; if ! [[ $ECS_TASK_AVAILABILITY_ZONE =~ $ECS_TASK_AVAILABILITY_ZONE_REGEX ]]; then echo "Error extracting Availability Zone from ECS Container Metadata, exiting" 1>&2; exit 1; fi; ECS_TASK_ARN_REGEX='^arn:(aws|aws-cn|aws-us-gov):ecs:[a-z0-9-]+:[0-9]{12}:task/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$'; if ! [[ $ECS_TASK_ARN =~ $ECS_TASK_ARN_REGEX ]]; then echo "Error extracting Task ARN from ECS Container Metadata, exiting" 1>&2; exit 1; fi; CREATE_ACTIVATION_OUTPUT=$(aws ssm create-activation --iam-role $MANAGED_INSTANCE_ROLE_NAME --tags Key=ECS_TASK_AVAILABILITY_ZONE,Value=$ECS_TASK_AVAILABILITY_ZONE Key=ECS_TASK_ARN,Value=$ECS_TASK_ARN Key=FAULT_INJECTION_SIDECAR,Value=true --region $ECS_TASK_REGION); ACTIVATION_CODE=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationCode); ACTIVATION_ID=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationId); if ! amazon-ssm-agent -register -code $ACTIVATION_CODE -id $ACTIVATION_ID -region $ECS_TASK_REGION; then echo "Failed to register with AWS Systems Manager (SSM), exiting" 1>&2; exit 1; fi; amazon-ssm-agent & SSM_AGENT_PID=$!; wait $SSM_AGENT_PID; else echo "ECS Container Metadata not found, exiting" 1>&2; exit 1; fi; else echo "SSM agent is already running, exiting" 1>&2; exit 1; fi
+          Environment:
+            - Name: MANAGED_INSTANCE_ROLE_NAME
+              Value: !Ref FisSsmManagedInstanceRole
         -
           Name: ecs-cwagent
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/cloudwatch-agent${Env}:latest'
@@ -857,21 +962,45 @@ Resources:
             Action: "sts:AssumeRole"
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref FisTaskSsmManagedPolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
   AssetsTaskDefinition:
     Type:  AWS::ECS::TaskDefinition
     Properties:
-      ExecutionRoleArn: !Ref AssetsTaskExecutionRole
-      TaskRoleArn: !Ref AssetsTaskExecutionRole
+      ExecutionRoleArn: !GetAtt AssetsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt AssetsTaskExecutionRole.Arn
       NetworkMode: awsvpc 
+      # Required for FIS ECS task actions (kill-process + network faults)
+      PidMode: task
+      # Enables the ECS fault-injection endpoints used by FIS network
+      # actions on Fargate (useEcsFaultInjectionEndpoints=true)
+      EnableFaultInjection: true
       Cpu: 256
-      Memory: 512
+      # 1024 (was 512): headroom for the FIS SSM sidecar (dnf upgrade at start)
+      Memory: 1024
       RequiresCompatibilities:
         - FARGATE
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
+        # FIS fault-injection sidecar (AWS-documented pattern): registers the
+        # task as an SSM managed instance so AWS FIS aws:ecs:task-* actions
+        # (cpu-stress, io-stress, kill-process, network faults) can target it.
+        # Essential=false: app containers keep serving if the sidecar stops.
+        # https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html
+        - Name: amazon-ssm-agent
+          Image: public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
+          Cpu: 0
+          Essential: false
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e; dnf upgrade -y; dnf install jq procps awscli -y; term_handler() { echo "Deleting SSM activation $ACTIVATION_ID"; if ! aws ssm delete-activation --activation-id $ACTIVATION_ID --region $ECS_TASK_REGION; then echo "SSM activation $ACTIVATION_ID failed to be deleted" 1>&2; fi; MANAGED_INSTANCE_ID=$(jq -e -r .ManagedInstanceID /var/lib/amazon/ssm/registration); echo "Deregistering SSM Managed Instance $MANAGED_INSTANCE_ID"; if ! aws ssm deregister-managed-instance --instance-id $MANAGED_INSTANCE_ID --region $ECS_TASK_REGION; then echo "SSM Managed Instance $MANAGED_INSTANCE_ID failed to be deregistered" 1>&2; fi; kill -SIGTERM $SSM_AGENT_PID; }; trap term_handler SIGTERM SIGINT; if [[ -z $MANAGED_INSTANCE_ROLE_NAME ]]; then echo "Environment variable MANAGED_INSTANCE_ROLE_NAME not set, exiting" 1>&2; exit 1; fi; if ! ps ax | grep amazon-ssm-agent | grep -v grep > /dev/null; then if [[ -n $ECS_CONTAINER_METADATA_URI_V4 ]] ; then echo "Found ECS Container Metadata, running activation with metadata"; TASK_METADATA=$(curl "${ECS_CONTAINER_METADATA_URI_V4}/task"); ECS_TASK_AVAILABILITY_ZONE=$(echo $TASK_METADATA | jq -e -r '.AvailabilityZone'); ECS_TASK_ARN=$(echo $TASK_METADATA | jq -e -r '.TaskARN'); ECS_TASK_REGION=$(echo $ECS_TASK_AVAILABILITY_ZONE | sed 's/.$//'); ECS_TASK_AVAILABILITY_ZONE_REGEX='^(af|ap|ca|cn|eu|me|sa|us|us-gov)-(central|north|(north(east|west))|south|south(east|west)|east|west)-[0-9]{1}[a-z]{1}$'; if ! [[ $ECS_TASK_AVAILABILITY_ZONE =~ $ECS_TASK_AVAILABILITY_ZONE_REGEX ]]; then echo "Error extracting Availability Zone from ECS Container Metadata, exiting" 1>&2; exit 1; fi; ECS_TASK_ARN_REGEX='^arn:(aws|aws-cn|aws-us-gov):ecs:[a-z0-9-]+:[0-9]{12}:task/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$'; if ! [[ $ECS_TASK_ARN =~ $ECS_TASK_ARN_REGEX ]]; then echo "Error extracting Task ARN from ECS Container Metadata, exiting" 1>&2; exit 1; fi; CREATE_ACTIVATION_OUTPUT=$(aws ssm create-activation --iam-role $MANAGED_INSTANCE_ROLE_NAME --tags Key=ECS_TASK_AVAILABILITY_ZONE,Value=$ECS_TASK_AVAILABILITY_ZONE Key=ECS_TASK_ARN,Value=$ECS_TASK_ARN Key=FAULT_INJECTION_SIDECAR,Value=true --region $ECS_TASK_REGION); ACTIVATION_CODE=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationCode); ACTIVATION_ID=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationId); if ! amazon-ssm-agent -register -code $ACTIVATION_CODE -id $ACTIVATION_ID -region $ECS_TASK_REGION; then echo "Failed to register with AWS Systems Manager (SSM), exiting" 1>&2; exit 1; fi; amazon-ssm-agent & SSM_AGENT_PID=$!; wait $SSM_AGENT_PID; else echo "ECS Container Metadata not found, exiting" 1>&2; exit 1; fi; else echo "SSM agent is already running, exiting" 1>&2; exit 1; fi
+          Environment:
+            - Name: MANAGED_INSTANCE_ROLE_NAME
+              Value: !Ref FisSsmManagedInstanceRole
         -
           Name: "assets"
           PortMappings:
@@ -933,6 +1062,7 @@ Resources:
             Action: "sts:AssumeRole"
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref FisTaskSsmManagedPolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
       Policies:
         - PolicyName: ecs 
@@ -965,9 +1095,14 @@ Resources:
   CatalogTaskDefinition:
     Type:  AWS::ECS::TaskDefinition
     Properties:
-      ExecutionRoleArn: !Ref CatalogTaskExecutionRole
-      TaskRoleArn: !Ref CatalogTaskExecutionRole
+      ExecutionRoleArn: !GetAtt CatalogTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt CatalogTaskExecutionRole.Arn
       NetworkMode: awsvpc 
+      # Required for FIS ECS task actions (kill-process + network faults)
+      PidMode: task
+      # Enables the ECS fault-injection endpoints used by FIS network
+      # actions on Fargate (useEcsFaultInjectionEndpoints=true)
+      EnableFaultInjection: true
       Cpu: 1024
       Memory: 2048
       RequiresCompatibilities:
@@ -976,6 +1111,23 @@ Resources:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
+        # FIS fault-injection sidecar (AWS-documented pattern): registers the
+        # task as an SSM managed instance so AWS FIS aws:ecs:task-* actions
+        # (cpu-stress, io-stress, kill-process, network faults) can target it.
+        # Essential=false: app containers keep serving if the sidecar stops.
+        # https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html
+        - Name: amazon-ssm-agent
+          Image: public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
+          Cpu: 0
+          Essential: false
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e; dnf upgrade -y; dnf install jq procps awscli -y; term_handler() { echo "Deleting SSM activation $ACTIVATION_ID"; if ! aws ssm delete-activation --activation-id $ACTIVATION_ID --region $ECS_TASK_REGION; then echo "SSM activation $ACTIVATION_ID failed to be deleted" 1>&2; fi; MANAGED_INSTANCE_ID=$(jq -e -r .ManagedInstanceID /var/lib/amazon/ssm/registration); echo "Deregistering SSM Managed Instance $MANAGED_INSTANCE_ID"; if ! aws ssm deregister-managed-instance --instance-id $MANAGED_INSTANCE_ID --region $ECS_TASK_REGION; then echo "SSM Managed Instance $MANAGED_INSTANCE_ID failed to be deregistered" 1>&2; fi; kill -SIGTERM $SSM_AGENT_PID; }; trap term_handler SIGTERM SIGINT; if [[ -z $MANAGED_INSTANCE_ROLE_NAME ]]; then echo "Environment variable MANAGED_INSTANCE_ROLE_NAME not set, exiting" 1>&2; exit 1; fi; if ! ps ax | grep amazon-ssm-agent | grep -v grep > /dev/null; then if [[ -n $ECS_CONTAINER_METADATA_URI_V4 ]] ; then echo "Found ECS Container Metadata, running activation with metadata"; TASK_METADATA=$(curl "${ECS_CONTAINER_METADATA_URI_V4}/task"); ECS_TASK_AVAILABILITY_ZONE=$(echo $TASK_METADATA | jq -e -r '.AvailabilityZone'); ECS_TASK_ARN=$(echo $TASK_METADATA | jq -e -r '.TaskARN'); ECS_TASK_REGION=$(echo $ECS_TASK_AVAILABILITY_ZONE | sed 's/.$//'); ECS_TASK_AVAILABILITY_ZONE_REGEX='^(af|ap|ca|cn|eu|me|sa|us|us-gov)-(central|north|(north(east|west))|south|south(east|west)|east|west)-[0-9]{1}[a-z]{1}$'; if ! [[ $ECS_TASK_AVAILABILITY_ZONE =~ $ECS_TASK_AVAILABILITY_ZONE_REGEX ]]; then echo "Error extracting Availability Zone from ECS Container Metadata, exiting" 1>&2; exit 1; fi; ECS_TASK_ARN_REGEX='^arn:(aws|aws-cn|aws-us-gov):ecs:[a-z0-9-]+:[0-9]{12}:task/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$'; if ! [[ $ECS_TASK_ARN =~ $ECS_TASK_ARN_REGEX ]]; then echo "Error extracting Task ARN from ECS Container Metadata, exiting" 1>&2; exit 1; fi; CREATE_ACTIVATION_OUTPUT=$(aws ssm create-activation --iam-role $MANAGED_INSTANCE_ROLE_NAME --tags Key=ECS_TASK_AVAILABILITY_ZONE,Value=$ECS_TASK_AVAILABILITY_ZONE Key=ECS_TASK_ARN,Value=$ECS_TASK_ARN Key=FAULT_INJECTION_SIDECAR,Value=true --region $ECS_TASK_REGION); ACTIVATION_CODE=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationCode); ACTIVATION_ID=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationId); if ! amazon-ssm-agent -register -code $ACTIVATION_CODE -id $ACTIVATION_ID -region $ECS_TASK_REGION; then echo "Failed to register with AWS Systems Manager (SSM), exiting" 1>&2; exit 1; fi; amazon-ssm-agent & SSM_AGENT_PID=$!; wait $SSM_AGENT_PID; else echo "ECS Container Metadata not found, exiting" 1>&2; exit 1; fi; else echo "SSM agent is already running, exiting" 1>&2; exit 1; fi
+          Environment:
+            - Name: MANAGED_INSTANCE_ROLE_NAME
+              Value: !Ref FisSsmManagedInstanceRole
         -
           Name: "catalog"
           PortMappings:
@@ -1057,6 +1209,7 @@ Resources:
             Action: "sts:AssumeRole"
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref FisTaskSsmManagedPolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
       Policies:
         - PolicyName: ecs 
@@ -1073,9 +1226,14 @@ Resources:
     Properties:
       Volumes: 
         - Name:  opentelemetry-auto-instrumentation-node
-      ExecutionRoleArn: !Ref CheckoutTaskExecutionRole
-      TaskRoleArn: !Ref CheckoutTaskExecutionRole
+      ExecutionRoleArn: !GetAtt CheckoutTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt CheckoutTaskExecutionRole.Arn
       NetworkMode: awsvpc 
+      # Required for FIS ECS task actions (kill-process + network faults)
+      PidMode: task
+      # Enables the ECS fault-injection endpoints used by FIS network
+      # actions on Fargate (useEcsFaultInjectionEndpoints=true)
+      EnableFaultInjection: true
       Cpu: 1024
       Memory: 2048
       RequiresCompatibilities:
@@ -1084,6 +1242,23 @@ Resources:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
+        # FIS fault-injection sidecar (AWS-documented pattern): registers the
+        # task as an SSM managed instance so AWS FIS aws:ecs:task-* actions
+        # (cpu-stress, io-stress, kill-process, network faults) can target it.
+        # Essential=false: app containers keep serving if the sidecar stops.
+        # https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html
+        - Name: amazon-ssm-agent
+          Image: public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
+          Cpu: 0
+          Essential: false
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e; dnf upgrade -y; dnf install jq procps awscli -y; term_handler() { echo "Deleting SSM activation $ACTIVATION_ID"; if ! aws ssm delete-activation --activation-id $ACTIVATION_ID --region $ECS_TASK_REGION; then echo "SSM activation $ACTIVATION_ID failed to be deleted" 1>&2; fi; MANAGED_INSTANCE_ID=$(jq -e -r .ManagedInstanceID /var/lib/amazon/ssm/registration); echo "Deregistering SSM Managed Instance $MANAGED_INSTANCE_ID"; if ! aws ssm deregister-managed-instance --instance-id $MANAGED_INSTANCE_ID --region $ECS_TASK_REGION; then echo "SSM Managed Instance $MANAGED_INSTANCE_ID failed to be deregistered" 1>&2; fi; kill -SIGTERM $SSM_AGENT_PID; }; trap term_handler SIGTERM SIGINT; if [[ -z $MANAGED_INSTANCE_ROLE_NAME ]]; then echo "Environment variable MANAGED_INSTANCE_ROLE_NAME not set, exiting" 1>&2; exit 1; fi; if ! ps ax | grep amazon-ssm-agent | grep -v grep > /dev/null; then if [[ -n $ECS_CONTAINER_METADATA_URI_V4 ]] ; then echo "Found ECS Container Metadata, running activation with metadata"; TASK_METADATA=$(curl "${ECS_CONTAINER_METADATA_URI_V4}/task"); ECS_TASK_AVAILABILITY_ZONE=$(echo $TASK_METADATA | jq -e -r '.AvailabilityZone'); ECS_TASK_ARN=$(echo $TASK_METADATA | jq -e -r '.TaskARN'); ECS_TASK_REGION=$(echo $ECS_TASK_AVAILABILITY_ZONE | sed 's/.$//'); ECS_TASK_AVAILABILITY_ZONE_REGEX='^(af|ap|ca|cn|eu|me|sa|us|us-gov)-(central|north|(north(east|west))|south|south(east|west)|east|west)-[0-9]{1}[a-z]{1}$'; if ! [[ $ECS_TASK_AVAILABILITY_ZONE =~ $ECS_TASK_AVAILABILITY_ZONE_REGEX ]]; then echo "Error extracting Availability Zone from ECS Container Metadata, exiting" 1>&2; exit 1; fi; ECS_TASK_ARN_REGEX='^arn:(aws|aws-cn|aws-us-gov):ecs:[a-z0-9-]+:[0-9]{12}:task/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$'; if ! [[ $ECS_TASK_ARN =~ $ECS_TASK_ARN_REGEX ]]; then echo "Error extracting Task ARN from ECS Container Metadata, exiting" 1>&2; exit 1; fi; CREATE_ACTIVATION_OUTPUT=$(aws ssm create-activation --iam-role $MANAGED_INSTANCE_ROLE_NAME --tags Key=ECS_TASK_AVAILABILITY_ZONE,Value=$ECS_TASK_AVAILABILITY_ZONE Key=ECS_TASK_ARN,Value=$ECS_TASK_ARN Key=FAULT_INJECTION_SIDECAR,Value=true --region $ECS_TASK_REGION); ACTIVATION_CODE=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationCode); ACTIVATION_ID=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationId); if ! amazon-ssm-agent -register -code $ACTIVATION_CODE -id $ACTIVATION_ID -region $ECS_TASK_REGION; then echo "Failed to register with AWS Systems Manager (SSM), exiting" 1>&2; exit 1; fi; amazon-ssm-agent & SSM_AGENT_PID=$!; wait $SSM_AGENT_PID; else echo "ECS Container Metadata not found, exiting" 1>&2; exit 1; fi; else echo "SSM agent is already running, exiting" 1>&2; exit 1; fi
+          Environment:
+            - Name: MANAGED_INSTANCE_ROLE_NAME
+              Value: !Ref FisSsmManagedInstanceRole
         -
           Name: "checkout"
           DependsOn:
@@ -1201,6 +1376,7 @@ Resources:
             Action: "sts:AssumeRole"
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - !Ref FisTaskSsmManagedPolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
       Policies:
         - PolicyName: ecs
@@ -1219,9 +1395,14 @@ Resources:
     Properties:
       Volumes: 
         - Name:  opentelemetry-auto-instrumentation
-      ExecutionRoleArn: !Ref UiTaskExecutionRole
-      TaskRoleArn: !Ref UiTaskExecutionRole
+      ExecutionRoleArn: !GetAtt UiTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt UiTaskExecutionRole.Arn
       NetworkMode: awsvpc 
+      # Required for FIS ECS task actions (kill-process + network faults)
+      PidMode: task
+      # Enables the ECS fault-injection endpoints used by FIS network
+      # actions on Fargate (useEcsFaultInjectionEndpoints=true)
+      EnableFaultInjection: true
       Cpu: 1024
       Memory: 2048
       RequiresCompatibilities:
@@ -1230,6 +1411,23 @@ Resources:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
+        # FIS fault-injection sidecar (AWS-documented pattern): registers the
+        # task as an SSM managed instance so AWS FIS aws:ecs:task-* actions
+        # (cpu-stress, io-stress, kill-process, network faults) can target it.
+        # Essential=false: app containers keep serving if the sidecar stops.
+        # https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html
+        - Name: amazon-ssm-agent
+          Image: public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
+          Cpu: 0
+          Essential: false
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e; dnf upgrade -y; dnf install jq procps awscli -y; term_handler() { echo "Deleting SSM activation $ACTIVATION_ID"; if ! aws ssm delete-activation --activation-id $ACTIVATION_ID --region $ECS_TASK_REGION; then echo "SSM activation $ACTIVATION_ID failed to be deleted" 1>&2; fi; MANAGED_INSTANCE_ID=$(jq -e -r .ManagedInstanceID /var/lib/amazon/ssm/registration); echo "Deregistering SSM Managed Instance $MANAGED_INSTANCE_ID"; if ! aws ssm deregister-managed-instance --instance-id $MANAGED_INSTANCE_ID --region $ECS_TASK_REGION; then echo "SSM Managed Instance $MANAGED_INSTANCE_ID failed to be deregistered" 1>&2; fi; kill -SIGTERM $SSM_AGENT_PID; }; trap term_handler SIGTERM SIGINT; if [[ -z $MANAGED_INSTANCE_ROLE_NAME ]]; then echo "Environment variable MANAGED_INSTANCE_ROLE_NAME not set, exiting" 1>&2; exit 1; fi; if ! ps ax | grep amazon-ssm-agent | grep -v grep > /dev/null; then if [[ -n $ECS_CONTAINER_METADATA_URI_V4 ]] ; then echo "Found ECS Container Metadata, running activation with metadata"; TASK_METADATA=$(curl "${ECS_CONTAINER_METADATA_URI_V4}/task"); ECS_TASK_AVAILABILITY_ZONE=$(echo $TASK_METADATA | jq -e -r '.AvailabilityZone'); ECS_TASK_ARN=$(echo $TASK_METADATA | jq -e -r '.TaskARN'); ECS_TASK_REGION=$(echo $ECS_TASK_AVAILABILITY_ZONE | sed 's/.$//'); ECS_TASK_AVAILABILITY_ZONE_REGEX='^(af|ap|ca|cn|eu|me|sa|us|us-gov)-(central|north|(north(east|west))|south|south(east|west)|east|west)-[0-9]{1}[a-z]{1}$'; if ! [[ $ECS_TASK_AVAILABILITY_ZONE =~ $ECS_TASK_AVAILABILITY_ZONE_REGEX ]]; then echo "Error extracting Availability Zone from ECS Container Metadata, exiting" 1>&2; exit 1; fi; ECS_TASK_ARN_REGEX='^arn:(aws|aws-cn|aws-us-gov):ecs:[a-z0-9-]+:[0-9]{12}:task/[a-zA-Z0-9_-]+/[a-zA-Z0-9]+$'; if ! [[ $ECS_TASK_ARN =~ $ECS_TASK_ARN_REGEX ]]; then echo "Error extracting Task ARN from ECS Container Metadata, exiting" 1>&2; exit 1; fi; CREATE_ACTIVATION_OUTPUT=$(aws ssm create-activation --iam-role $MANAGED_INSTANCE_ROLE_NAME --tags Key=ECS_TASK_AVAILABILITY_ZONE,Value=$ECS_TASK_AVAILABILITY_ZONE Key=ECS_TASK_ARN,Value=$ECS_TASK_ARN Key=FAULT_INJECTION_SIDECAR,Value=true --region $ECS_TASK_REGION); ACTIVATION_CODE=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationCode); ACTIVATION_ID=$(echo $CREATE_ACTIVATION_OUTPUT | jq -e -r .ActivationId); if ! amazon-ssm-agent -register -code $ACTIVATION_CODE -id $ACTIVATION_ID -region $ECS_TASK_REGION; then echo "Failed to register with AWS Systems Manager (SSM), exiting" 1>&2; exit 1; fi; amazon-ssm-agent & SSM_AGENT_PID=$!; wait $SSM_AGENT_PID; else echo "ECS Container Metadata not found, exiting" 1>&2; exit 1; fi; else echo "SSM agent is already running, exiting" 1>&2; exit 1; fi
+          Environment:
+            - Name: MANAGED_INSTANCE_ROLE_NAME
+              Value: !Ref FisSsmManagedInstanceRole
         -
           Name: "ui"
           MountPoints: 

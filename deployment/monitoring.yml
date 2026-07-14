@@ -178,6 +178,88 @@ Resources:
       AlarmActions:
         - !Ref CriticalAlarmTopic
 
+  # --- Per-service global-endpoint health alarms ---
+  # The global-* canaries hit the weighted (50/50) store.<domain> endpoint.
+  # When one region's service is unhealthy, ~half of canary runs fail and
+  # SuccessPercent drops toward 50; disabling the region via ARC restores
+  # 100 (Route 53 shifts to 100/0 on the healthy record). These alarms make
+  # that experiment signal visible per service journey.
+  GlobalHomeCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-home-${AWS::Region}${Env}'
+      AlarmDescription: 'Global endpoint (weighted 50/50) home journey degraded — a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-home${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  GlobalCartCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-cart-${AWS::Region}${Env}'
+      AlarmDescription: 'Global endpoint (weighted 50/50) cart journey degraded — a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-cart${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  GlobalCatalogCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-catalog-${AWS::Region}${Env}'
+      AlarmDescription: 'Global endpoint (weighted 50/50) catalog journey degraded — a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-catalog${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  GlobalOrdersCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-orders-${AWS::Region}${Env}'
+      AlarmDescription: 'Global endpoint (weighted 50/50) orders journey degraded — a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-orders${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
   SystemDashboard:
     Type: AWS::CloudWatch::Dashboard
     Properties:
