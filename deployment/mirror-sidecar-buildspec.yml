@@ -37,7 +37,9 @@ phases:
         # public.ecr.aws pulls nor runtime dnf installs are possible there.
         REPO=amazon-ssm-agent${ENV_SUFFIX}
         echo "FROM public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest" > Dockerfile.ssm-agent
-        echo "RUN dnf upgrade -y && dnf install -y jq procps awscli && dnf clean all" >> Dockerfile.ssm-agent
+        # The FIS ECS network-fault documents require these commands even when
+        # installDependencies is false: setsid, curl, dig, jq, lsof, and pgrep.
+        echo "RUN dnf upgrade -y && dnf install -y util-linux curl-minimal bind-utils jq lsof procps awscli && dnf clean all" >> Dockerfile.ssm-agent
         docker build -t $REPO:latest -f Dockerfile.ssm-agent .
         docker tag $REPO:latest $AWS_ACCOUNT_ID.dkr.ecr.$PRIMARY_REGION.amazonaws.com/$REPO:latest
         docker push $AWS_ACCOUNT_ID.dkr.ecr.$PRIMARY_REGION.amazonaws.com/$REPO:latest
