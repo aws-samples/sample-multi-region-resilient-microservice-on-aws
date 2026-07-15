@@ -818,8 +818,6 @@ ngrh:
 	$(eval _MON_P := $(shell aws cloudformation describe-stacks --stack-name monitoring$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
 	$(eval _MON_S := $(shell aws cloudformation describe-stacks --stack-name monitoring$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
 	$(eval _RS := $(shell aws cloudformation describe-stacks --stack-name region-switch$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _VPC_P := $(shell aws cloudformation describe-stacks --stack-name baseVpc$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _VPC_S := $(shell aws cloudformation describe-stacks --stack-name baseVpc$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
 	@aws cloudformation deploy --template ./ngrh.yaml --region $(PRIMARY_REGION) \
 	--stack-name ngrh$(ENV) --capabilities CAPABILITY_NAMED_IAM \
 	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION) \
@@ -829,8 +827,7 @@ ngrh:
 	OrdersDsqlArnPrimary=$(_ORD_P) OrdersDsqlArnStandby=$(_ORD_S) \
 	GrArn=$(_GR) CanariesArnPrimary=$(_CAN_P) CanariesArnStandby=$(_CAN_S) \
 	MonitoringArnPrimary=$(_MON_P) MonitoringArnStandby=$(_MON_S) \
-	RegionSwitchArn=$(_RS) \
-	BaseVpcArnPrimary=$(_VPC_P) BaseVpcArnStandby=$(_VPC_S)
+	RegionSwitchArn=$(_RS)
 	@echo "NGRH model deployed (stack ngrh$(ENV)). Run 'make ngrh-assess' to run failure-mode assessments."
 
 ngrh-assess:

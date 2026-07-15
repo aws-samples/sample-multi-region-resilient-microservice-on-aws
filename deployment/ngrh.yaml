@@ -54,10 +54,6 @@ Parameters:
     Type: String
   RegionSwitchArn:
     Type: String
-  BaseVpcArnPrimary:
-    Type: String
-  BaseVpcArnStandby:
-    Type: String
     Description: StackId ARN of the ARC Region Switch plan stack (failover/failback orchestration)
 
 Resources:
@@ -229,10 +225,6 @@ Resources:
             - !GetAtt CartJourney.UserJourneyId
             - !GetAtt ViewOrdersJourney.UserJourneyId
       InputSources:
-        # Regional VPC stacks (both regions): network topology (subnets,
-        # AZs, NAT, endpoints) enables NGRH dependency discovery.
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
@@ -302,10 +294,6 @@ Resources:
           UserJourneyIds:
             - !GetAtt BrowseJourney.UserJourneyId
       InputSources:
-        # Regional VPC stacks (both regions): network topology (subnets,
-        # AZs, NAT, endpoints) enables NGRH dependency discovery.
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
@@ -367,10 +355,6 @@ Resources:
             - !GetAtt CartJourney.UserJourneyId
             - !GetAtt CheckoutJourney.UserJourneyId
       InputSources:
-        # Regional VPC stacks (both regions): network topology (subnets,
-        # AZs, NAT, endpoints) enables NGRH dependency discovery.
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
@@ -428,10 +412,6 @@ Resources:
           UserJourneyIds:
             - !GetAtt CheckoutJourney.UserJourneyId
       InputSources:
-        # Regional VPC stacks (both regions): network topology (subnets,
-        # AZs, NAT, endpoints) enables NGRH dependency discovery.
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnStandby }
         # ElastiCache Redis lives in the apps stack.
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
@@ -486,10 +466,6 @@ Resources:
             - !GetAtt CheckoutJourney.UserJourneyId
             - !GetAtt ViewOrdersJourney.UserJourneyId
       InputSources:
-        # Regional VPC stacks (both regions): network topology (subnets,
-        # AZs, NAT, endpoints) enables NGRH dependency discovery.
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnStandby }
         # Aurora DSQL + Amazon MQ (RabbitMQ; MQ broker is in the apps stack).
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
@@ -551,10 +527,6 @@ Resources:
           UserJourneyIds:
             - !GetAtt BrowseJourney.UserJourneyId
       InputSources:
-        # Regional VPC stacks (both regions): network topology (subnets,
-        # AZs, NAT, endpoints) enables NGRH dependency discovery.
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref BaseVpcArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
         - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
         - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
