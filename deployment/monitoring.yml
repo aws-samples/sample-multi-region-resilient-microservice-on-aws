@@ -45,6 +45,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'aurora-cpu-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
       MetricName: CPUUtilization
       Namespace: AWS/RDS
       Statistic: Average
@@ -64,6 +67,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'aurora-connections-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
       MetricName: DatabaseConnections
       Namespace: AWS/RDS
       Statistic: Average
@@ -83,6 +89,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'aurora-lag-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
       MetricName: AuroraGlobalDBReplicationLag
       Namespace: AWS/RDS
       Statistic: Average
@@ -114,6 +123,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'dynamodb-user-errors-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: cart
       MetricName: UserErrors
       Namespace: AWS/DynamoDB
       Statistic: Sum
@@ -130,6 +142,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'dynamodb-system-errors-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: cart
       MetricName: SystemErrors
       Namespace: AWS/DynamoDB
       Statistic: Sum
@@ -158,6 +173,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'orders-created-zero-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: orders
       MetricName: !Sub 'OrdersCreated${Env}'
       Namespace: ecommerce
       Statistic: Sum
@@ -173,6 +191,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'canary-success-low-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: shared
       MetricName: SuccessPercent
       Namespace: CloudWatchSynthetics
       Statistic: Average
@@ -771,10 +792,101 @@ Resources:
   # When all remote canaries fail AND local is healthy for 5 min sustained,
   # the alarm triggers deactivation of the impaired remote region.
   # -------------------------------------------------------------------------
+  GlobalCartCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-cart-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: cart
+      AlarmDescription: 'Global endpoint (weighted 50/50) cart journey degraded - a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-cart${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  GlobalCatalogCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-catalog-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
+      AlarmDescription: 'Global endpoint (weighted 50/50) catalog journey degraded - a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-catalog${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  GlobalOrdersCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-orders-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: orders
+      AlarmDescription: 'Global endpoint (weighted 50/50) orders journey degraded - a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-orders${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
+  GlobalHomeCanaryHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'global-endpoint-health-home-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: ui
+      AlarmDescription: 'Global endpoint (weighted 50/50) home journey degraded - a region is likely unhealthy behind the global record'
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-home${Env}'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CriticalAlarmTopic
+
   RmtHomeFailedAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-home-failed${Env}"
+      Tags:
+        - Key: service
+          Value: ui
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -791,6 +903,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-cart-failed${Env}"
+      Tags:
+        - Key: service
+          Value: cart
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -807,6 +922,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-catalog-failed${Env}"
+      Tags:
+        - Key: service
+          Value: catalog
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -823,6 +941,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-orders-failed${Env}"
+      Tags:
+        - Key: service
+          Value: orders
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -839,6 +960,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-lcl-home-healthy${Env}"
+      Tags:
+        - Key: service
+          Value: ui
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -855,6 +979,9 @@ Resources:
     Type: AWS::CloudWatch::CompositeAlarm
     Properties:
       AlarmName: !Sub "ngrh-region-switch-trigger${Env}"
+      Tags:
+        - Key: service
+          Value: shared
       AlarmRule: !Sub >-
         ALARM(${RmtHomeFailedAlarm})
         AND ALARM(${RmtCartFailedAlarm})
