@@ -106,6 +106,9 @@ Resources:
       AlarmActions:
         - !Ref CriticalAlarmTopic
       AlarmRule: !Sub '(ALARM(${AuroraConnectionsAlarm}) AND (ALARM(${AuroraCPUAlarm}) OR ALARM(${AuroraReplicaLagAlarm})))'
+      Tags:
+        - Key: service
+          Value: catalog
 
   DynamoDBUserErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -147,6 +150,9 @@ Resources:
       AlarmActions:
         - !Ref CriticalAlarmTopic
       AlarmRule: !Sub '(ALARM(${DynamoDBUserErrorsAlarm}) OR ALARM(${DynamoDBSystemErrorsAlarm}))'
+      Tags:
+        - Key: service
+          Value: cart
 
   OrdersCreatedAlarm:
     Type: AWS::CloudWatch::Alarm

@@ -8,7 +8,12 @@
 #   - S3 bucket for reports (encryption, versioning, lifecycle, access block)
 #   - ngrh-invoker IAM role (trusts resiliencehub.amazonaws.com)
 #   - 2 policies (tier1/tier2), 1 system, 4 user journeys
-#   - 6 services with CFN-stack input sources + assertions
+#   - 6 services with TAG-BASED input sources (service in {<name>, shared}) + assertions
+#
+# Resource discovery is by resource tag (key "service"), NOT by CloudFormation
+# stack, so each service only sees the resources it owns plus shared infra.
+# DependencyDiscovery stays ENABLED so the tagged seed is expanded along real
+# dependency edges and the service registers as a traffic source.
 #
 # Idempotent: resources are looked up by name and reused; input sources and
 # assertions are skipped when already present. Safe to re-run.
@@ -34,33 +39,11 @@ rh() {
 log() { echo ">>> $*"; }
 
 # ---------------------------------------------------------------------------
-# Resolve app stack ARNs (same lookups as the Makefile `ngrh` target).
+# Resource discovery is tag-based (key "service"). No app stack ARNs are
+# resolved here — each service's input source is a `service` tag filter
+# matching its own name plus "shared". Ensure the app stacks are deployed
+# WITH the `service` tags before running (make deploy ENV=$ENV).
 # ---------------------------------------------------------------------------
-resolve_stack() { # stack-name region
-  local arn
-  arn=$(aws cloudformation describe-stacks --stack-name "$1" --region "$2" \
-    --query 'Stacks[0].StackId' --output text 2>/dev/null) || true
-  if [ -z "${arn:-}" ] || [ "$arn" = "None" ]; then
-    echo "ERROR: stack '$1' not found in $2 (deploy the app first: make deploy ENV=$ENV)" >&2
-    exit 1
-  fi
-  echo "$arn"
-}
-
-log "Resolving app stack ARNs in $PRIMARY_REGION and $STANDBY_REGION..."
-APPS_P=$(resolve_stack "apps${ENV}" "$PRIMARY_REGION")
-APPS_S=$(resolve_stack "apps${ENV}" "$STANDBY_REGION")
-CAT_P=$(resolve_stack "catalog-db-stack${ENV}" "$PRIMARY_REGION")
-CAT_S=$(resolve_stack "catalog-db-stack${ENV}" "$STANDBY_REGION")
-CARTS_P=$(resolve_stack "carts-db-stack${ENV}" "$PRIMARY_REGION")
-ORD_P=$(resolve_stack "orders-dsql-stack${ENV}" "$PRIMARY_REGION")
-ORD_S=$(resolve_stack "orders-dsql-stack${ENV}" "$STANDBY_REGION")
-GR=$(resolve_stack "gr${ENV}" "$PRIMARY_REGION")
-CAN_P=$(resolve_stack "canaries${ENV}" "$PRIMARY_REGION")
-CAN_S=$(resolve_stack "canaries${ENV}" "$STANDBY_REGION")
-MON_P=$(resolve_stack "monitoring${ENV}" "$PRIMARY_REGION")
-MON_S=$(resolve_stack "monitoring${ENV}" "$STANDBY_REGION")
-RS=$(resolve_stack "region-switch${ENV}" "$PRIMARY_REGION")
 
 # ---------------------------------------------------------------------------
 # S3 bucket for NGRH reports (mirror of NgrhBucket in ngrh.yaml).
@@ -219,17 +202,16 @@ CART_ID=$(ensure_journey "ManageCart" "Add/remove items, view cart")
 VIEWORDERS_ID=$(ensure_journey "ViewOrders" "Order history")
 
 # ---------------------------------------------------------------------------
-# Shared assertion texts (verbatim from ngrh.yaml).
+# Shared assertion texts (verbatim from ngrh.yaml). Tag-scoped discovery removes
+# the need for negative "does not use X" assertions; only genuine
+# compensating-control / strategy assertions are retained.
 # ---------------------------------------------------------------------------
 A_FAILOVER="Regional failover is automated via ARC Region Switch plan (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts Route 53 DNS via data-plane health checks."
 A_AZ="This architecture uses regional failover as the response to significant AZ impairments rather than AZ-level isolation mechanisms (zonal shift, zonal autoshift, ALB ATW). The ARC Region Switch plan pre-scales the surviving region to 200% and shifts DNS within the RTO, making AZ-scoped mitigations unnecessary for this design."
-A_NO_REDIS="This service does not use ElastiCache Redis. The Redis replication groups discovered from the shared apps stack belong to the checkout service only."
-A_NO_MQ="This service does not use Amazon MQ RabbitMQ. The MQ brokers discovered from the shared apps stack belong to the orders service only."
-A_NO_AURORA="This service does not use Aurora Global Database. The Aurora clusters discovered from other input sources belong to the catalog service only."
 A_CATALOG_RPO="Catalog is read-only in-region; data is written by an external ingest process from an external system of record. On regional failover, any unreplicated catalog updates are recovered by re-running ingest, so there is no unrecoverable data loss. Aurora Global async replication is an accepted compensating control for the Tier-1 RPO target."
 A_CATALOG_AURORA="Catalog uses Aurora Global Database as its only data store."
 A_ORDERS_MQ="RabbitMQ is used only for post-commit event notification (OrderCreatedEvent published after DSQL transaction commits). The order of record is durably stored in Aurora DSQL (RPO 0) before any MQ publish. Lost MQ messages affect downstream notifications only, not order data integrity."
-A_ASSETS_STATELESS="Assets is a stateless nginx container serving static files (images, CSS, JS). It has no data store, no session state, and no further dependencies. It does not use ElastiCache Redis, Amazon MQ RabbitMQ, Aurora, DynamoDB, or any other data store. Findings about these resources are not applicable."
+A_ASSETS_STATELESS="Assets is a stateless nginx container serving static files (images, CSS, JS). It has no data store, no session state, and no further dependencies."
 
 # ---------------------------------------------------------------------------
 # Services.
@@ -279,15 +261,16 @@ ensure_service() { # name policy_arn journey_ids_csv
   echo "$arn"
 }
 
-add_input_source() { # service_arn stack_arn
-  local svc="$1" stack="$2"
-  if rh list-input-sources --service-arn "$svc" --output json | jq -e --arg s "$stack" \
-      '.inputSourceSummaries[]? | select(.resourceConfiguration.cfnStackArn == $s)' >/dev/null; then
+add_tag_input_source() { # service_arn service_name
+  local svc="$1" name="$2"
+  # Idempotent: skip if a resourceTags input source already covers this service value.
+  if rh list-input-sources --service-arn "$svc" --output json | jq -e --arg n "$name" \
+      '.inputSourceSummaries[]? | select((.resourceConfiguration.resourceTags // [])[]? | (.key == "service") and ((.values // []) | index($n)))' >/dev/null; then
     return
   fi
-  log "  input source: $stack"
+  log "  input source: tag service in [$name, shared]"
   rh create-input-source --service-arn "$svc" \
-    --resource-configuration "{\"cfnStackArn\":\"$stack\"}" >/dev/null
+    --resource-configuration "{\"resourceTags\":[{\"key\":\"service\",\"values\":[\"$name\",\"shared\"]}]}" >/dev/null
 }
 
 add_assertion() { # service_arn text
@@ -302,54 +285,42 @@ add_assertion() { # service_arn text
 
 # --- ui: all four journeys, Tier-1 ---
 UI_ARN=$(ensure_service "ui${ENV}" "$TIER1_ARN" "$BROWSE_ID,$CHECKOUT_ID,$CART_ID,$VIEWORDERS_ID")
-for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$GR" "$CAN_P" "$CAN_S" "$RS"; do
-  add_input_source "$UI_ARN" "$s"
-done
-for a in "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_MQ" "$A_NO_AURORA"; do
+add_tag_input_source "$UI_ARN" "ui"
+for a in "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$UI_ARN" "$a"
 done
 
 # --- catalog: Browse journey, Tier-2 ---
 CATALOG_ARN=$(ensure_service "catalog${ENV}" "$TIER2_ARN" "$BROWSE_ID")
-for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$CAT_P" "$CAT_S" "$RS"; do
-  add_input_source "$CATALOG_ARN" "$s"
-done
-for a in "$A_CATALOG_RPO" "$A_CATALOG_AURORA" "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_MQ"; do
+add_tag_input_source "$CATALOG_ARN" "catalog"
+for a in "$A_CATALOG_RPO" "$A_CATALOG_AURORA" "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$CATALOG_ARN" "$a"
 done
 
 # --- cart: Cart + Checkout journeys, Tier-1 ---
 CART_ARN=$(ensure_service "cart${ENV}" "$TIER1_ARN" "$CART_ID,$CHECKOUT_ID")
-for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$CARTS_P" "$RS"; do
-  add_input_source "$CART_ARN" "$s"
-done
-for a in "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_MQ" "$A_NO_AURORA"; do
+add_tag_input_source "$CART_ARN" "cart"
+for a in "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$CART_ARN" "$a"
 done
 
 # --- checkout: Checkout journey, Tier-2 ---
 CHECKOUT_ARN=$(ensure_service "checkout${ENV}" "$TIER2_ARN" "$CHECKOUT_ID")
-for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$RS"; do
-  add_input_source "$CHECKOUT_ARN" "$s"
-done
-for a in "$A_FAILOVER" "$A_AZ" "$A_NO_MQ" "$A_NO_AURORA"; do
+add_tag_input_source "$CHECKOUT_ARN" "checkout"
+for a in "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$CHECKOUT_ARN" "$a"
 done
 
 # --- orders: Checkout + ViewOrders journeys, Tier-1 ---
 ORDERS_ARN=$(ensure_service "orders${ENV}" "$TIER1_ARN" "$CHECKOUT_ID,$VIEWORDERS_ID")
-for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$ORD_P" "$ORD_S" "$RS"; do
-  add_input_source "$ORDERS_ARN" "$s"
-done
-for a in "$A_FAILOVER" "$A_AZ" "$A_NO_REDIS" "$A_NO_AURORA" "$A_ORDERS_MQ"; do
+add_tag_input_source "$ORDERS_ARN" "orders"
+for a in "$A_FAILOVER" "$A_AZ" "$A_ORDERS_MQ"; do
   add_assertion "$ORDERS_ARN" "$a"
 done
 
 # --- assets: Browse journey, Tier-2 ---
 ASSETS_ARN=$(ensure_service "assets${ENV}" "$TIER2_ARN" "$BROWSE_ID")
-for s in "$APPS_P" "$APPS_S" "$MON_P" "$MON_S" "$RS"; do
-  add_input_source "$ASSETS_ARN" "$s"
-done
+add_tag_input_source "$ASSETS_ARN" "assets"
 for a in "$A_ASSETS_STATELESS" "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$ASSETS_ARN" "$a"
 done

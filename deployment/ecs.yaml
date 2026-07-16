@@ -72,6 +72,9 @@ Resources:
         - 
           Key: "Name"
           Value: "retail-store-arordersmq-broker"
+        - 
+          Key: "service"
+          Value: "orders"
       EncryptionOptions: 
           UseAwsOwnedKey: true
       Users:
@@ -113,6 +116,9 @@ Resources:
         - 
           Key: "Name"
           Value: "retail-store-ar-checkout"
+        - 
+          Key: "service"
+          Value: "checkout"
   CheckoutEcSubnetGroup:
       Type: "AWS::ElastiCache::SubnetGroup"
       Properties:
@@ -133,6 +139,9 @@ Resources:
     Properties: 
       VpcId: !Ref VpcId
       GroupDescription: ECS Task
+      Tags:
+        - Key: service
+          Value: shared
       SecurityGroupIngress:
         -
           SourceSecurityGroupId: !Ref sgAlb
@@ -267,6 +276,9 @@ Resources:
     Properties: 
       VpcId: !Ref VpcId
       GroupDescription: ECS Alb
+      Tags:
+        - Key: service
+          Value: shared
       SecurityGroupIngress:
         - CidrIp: !Sub '{{resolve:ssm:VpcCidr${Env}}}'
           IpProtocol: tcp
@@ -300,6 +312,9 @@ Resources:
         - 
           Key: "created-by"
           Value: "retail-store-sample-app"
+        - 
+          Key: "service"
+          Value: "orders"
       VpcId: !Ref VpcId
       SecurityGroupIngress: 
         - 
@@ -341,6 +356,9 @@ Resources:
         - 
           Key: "created-by"
           Value: "retail-store-sample-app"
+        - 
+          Key: "service"
+          Value: "checkout"
       VpcId: !Ref VpcId
       SecurityGroupIngress: 
         - 
@@ -378,6 +396,9 @@ Resources:
       Name: !Sub 'retail-store-ar-mq${Env}'
       KmsKeyId: !Ref KmsKey
       SecretString: !Sub "{\"host\":\"amqps://${OrdersMqBroker}.mq.${AWS::Region}.on.aws:5671\",\"password\":\"{{resolve:secretsmanager:retail-store-ar-mq-password${Env}}}\",\"username\":\"mq\"}"
+      Tags:
+        - Key: "service"
+          Value: "orders"
   
   MqPassword:
     Type: "AWS::SecretsManager::Secret"
@@ -386,6 +407,9 @@ Resources:
       KmsKeyId: !Ref KmsKey
       GenerateSecretString: 
         ExcludePunctuation: true
+      Tags:
+        - Key: "service"
+          Value: "orders"
 
   LogGroupKey:
     Type: AWS::KMS::Key
@@ -427,6 +451,9 @@ Resources:
   Alb:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
+      Tags:
+        - Key: service
+          Value: shared
       Scheme: internal
       LoadBalancerAttributes:
         - Key: routing.http.drop_invalid_header_fields.enabled
@@ -447,6 +474,9 @@ Resources:
   AlbTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties: 
+      Tags:
+        - Key: service
+          Value: ui
       TargetGroupAttributes:
       - 
         Key: load_balancing.algorithm.type
@@ -484,6 +514,10 @@ Resources:
 
   EcsCluster:
     Type: AWS::ECS::Cluster
+    # NGRH: intentionally NOT tagged "service" -- tagging the shared ECS cluster makes
+    # every NGRH service discover ALL sibling ECS services on it via dependency
+    # discovery (validated 2026-07-16). Left untagged so each service discovers only
+    # its own ECS service. (The apps stack deploy intentionally passes no --tags.)
     Properties:
       ServiceConnectDefaults:
         Namespace: !Sub retail-store-ar${Env}
@@ -510,6 +544,9 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Tags:
+        - Key: "service"
+          Value: "cart"
       Policies:
         - PolicyName: ecs 
           PolicyDocument: 
@@ -555,6 +592,9 @@ Resources:
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
+      Tags:
+        - Key: "service"
+          Value: "cart"
       ContainerDefinitions:
         -
           Name: "carts"
@@ -636,6 +676,9 @@ Resources:
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
       TaskDefinition: !Ref CartsTaskDefinition
+      Tags:
+        - Key: "service"
+          Value: "cart"
       ServiceConnectConfiguration:
         Enabled: true
         Namespace: !Sub retail-store-ar${Env}
@@ -672,6 +715,9 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Tags:
+        - Key: "service"
+          Value: "orders"
       Policies:
         - PolicyName: ecs 
           PolicyDocument: 
@@ -726,6 +772,9 @@ Resources:
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
+      Tags:
+        - Key: "service"
+          Value: "orders"
       ContainerDefinitions:
         -
           Name: ecs-cwagent
@@ -822,6 +871,9 @@ Resources:
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
       TaskDefinition: !Ref OrdersTaskDefinition
+      Tags:
+        - Key: "service"
+          Value: "orders"
       ServiceConnectConfiguration:
         Enabled: true
         Namespace: !Sub retail-store-ar${Env}
@@ -858,6 +910,9 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Tags:
+        - Key: "service"
+          Value: "assets"
   AssetsTaskDefinition:
     Type:  AWS::ECS::TaskDefinition
     Properties:
@@ -871,6 +926,9 @@ Resources:
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
+      Tags:
+        - Key: "service"
+          Value: "assets"
       ContainerDefinitions:
         -
           Name: "assets"
@@ -898,6 +956,9 @@ Resources:
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
       TaskDefinition: !Ref AssetsTaskDefinition
+      Tags:
+        - Key: "service"
+          Value: "assets"
       ServiceConnectConfiguration:
         Enabled: true
         Namespace: !Sub retail-store-ar${Env}
@@ -934,6 +995,9 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Tags:
+        - Key: "service"
+          Value: "catalog"
       Policies:
         - PolicyName: ecs 
           PolicyDocument: 
@@ -975,6 +1039,9 @@ Resources:
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
+      Tags:
+        - Key: "service"
+          Value: "catalog"
       ContainerDefinitions:
         -
           Name: "catalog"
@@ -1016,6 +1083,9 @@ Resources:
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
       TaskDefinition: !Ref CatalogTaskDefinition
+      Tags:
+        - Key: "service"
+          Value: "catalog"
       ServiceConnectConfiguration:
         Enabled: true
         LogConfiguration:
@@ -1058,6 +1128,9 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Tags:
+        - Key: "service"
+          Value: "checkout"
       Policies:
         - PolicyName: ecs 
           PolicyDocument: 
@@ -1083,6 +1156,9 @@ Resources:
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
+      Tags:
+        - Key: "service"
+          Value: "checkout"
       ContainerDefinitions:
         -
           Name: "checkout"
@@ -1167,6 +1243,9 @@ Resources:
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
       TaskDefinition: !Ref CheckoutTaskDefinition
+      Tags:
+        - Key: "service"
+          Value: "checkout"
       ServiceConnectConfiguration:
         Enabled: true
         Namespace: !Sub retail-store-ar${Env}
@@ -1202,6 +1281,9 @@ Resources:
       ManagedPolicyArns: 
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
         - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Tags:
+        - Key: "service"
+          Value: "ui"
       Policies:
         - PolicyName: ecs
           PolicyDocument:
@@ -1229,6 +1311,9 @@ Resources:
       RuntimePlatform:
         CpuArchitecture: X86_64
         OperatingSystemFamily: LINUX
+      Tags:
+        - Key: "service"
+          Value: "ui"
       ContainerDefinitions:
         -
           Name: "ui"
@@ -1325,6 +1410,9 @@ Resources:
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
       TaskDefinition: !Ref UiTaskDefinition
+      Tags:
+        - Key: "service"
+          Value: "ui"
       ServiceConnectConfiguration:
         Enabled: true
         LogConfiguration:
