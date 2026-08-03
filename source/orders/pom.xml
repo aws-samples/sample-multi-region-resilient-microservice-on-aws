@@ -18,8 +18,10 @@
 		<java.version>17</java.version>
 		<mapstruct.version>1.6.3</mapstruct.version>
 		<!-- Override Spring Boot 3.5.14 BOM (42.7.10) to patch CVE-2026-42198
-		     (pgjdbc SCRAM-SHA-256 client-side DoS, fixed in 42.7.11). -->
-		<postgresql.version>42.7.11</postgresql.version>
+		     (pgjdbc SCRAM-SHA-256 client-side DoS, fixed in 42.7.11) and
+		     CVE-2026-54291 (scram-client MITM protection bypass via
+		     SCRAM-SHA-256-PLUS downgrade, fixed in 42.7.12). -->
+		<postgresql.version>42.7.12</postgresql.version>
 	</properties>
 
 	<dependencies>
