@@ -23,6 +23,11 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <java.version>17</java.version>
     <mapstruct.version>1.6.3</mapstruct.version>
+    <!-- Override Spring Boot 3.5.14 BOM (2.21.2) to patch CVE-2026-54512 and
+         CVE-2026-54513 (jackson-databind PolymorphicTypeValidator bypasses)
+         and GHSA-r7wm-3cxj-wff9 (jackson-core async parser maxNumberLength
+         bypass), all fixed in 2.21.4. -->
+    <jackson-bom.version>2.21.5</jackson-bom.version>
   </properties>
 
   <dependencies>
