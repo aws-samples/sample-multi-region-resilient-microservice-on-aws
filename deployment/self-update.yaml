@@ -33,6 +33,11 @@ Parameters:
 Resources:
   SelfUpdateRole:
     Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "ecs:RegisterTaskDefinition/DeregisterTaskDefinition and List* do not support resource-level permissions and require Resource '*'. All scopable write actions (UpdateService, UpdateStack, ECR push) are constrained to apps/self-update resources."
     Properties:
       RoleName: !Sub 'mr-app-self-update-role${Env}'
       AssumeRolePolicyDocument:
@@ -77,13 +82,20 @@ Resources:
                   - !Sub 'arn:aws:cloudformation:${StandbyRegion}:${AWS::AccountId}:stack/apps${Env}/*'
               - Effect: Allow
                 Action:
+                  - ecs:UpdateService
                   - ecs:DescribeServices
-                  - ecs:DescribeTaskDefinition
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:service/apps${Env}-*/*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:service/apps${Env}-*/*'
+              - Effect: Allow
+                Action:
                   - ecs:RegisterTaskDefinition
                   - ecs:DeregisterTaskDefinition
-                  - ecs:UpdateService
+                  - ecs:DescribeTaskDefinition
                   - ecs:ListServices
                   - ecs:ListClusters
+                # These ECS actions do not support resource-level permissions
+                # and require Resource '*' (see checkov skip CKV_AWS_111 above).
                 Resource: '*'
               - Effect: Allow
                 Action: iam:PassRole
