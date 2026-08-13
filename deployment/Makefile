@@ -555,6 +555,10 @@ chaos-engineering: primary_infrastructure standby_infrastructure
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
 	@aws cloudformation deploy --template-file ./chaos/multi-region-scenario.yaml --stack-name chaos${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} Region=${PRIMARY_REGION}
 
+self-update: codebuild-infra
+	@echo "Deploying weekly self-update (repave) automation in ${PRIMARY_REGION}"
+	@aws cloudformation deploy --template-file ./self-update.yaml --stack-name self-update${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} PrimaryRegion=${PRIMARY_REGION} StandbyRegion=${STANDBY_REGION}
+
 clean:
 	@echo "To remove all stacks deployed by this solution, run 'make destroy-all'"
 

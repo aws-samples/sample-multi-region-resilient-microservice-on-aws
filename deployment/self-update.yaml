@@ -1,0 +1,237 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Self-update automation for long-lived installs. Weekly EventBridge Scheduler
+  triggers a CodeBuild repave: clone main, rebuild all service images (fresh
+  base layers + current dependencies), re-mirror observability sidecars, then
+  roll out - a CloudFormation Tag update when the commit changed, or a forced
+  ECS deployment when only base layers moved. Combined with the ECR lifecycle
+  policies, superseded vulnerable images are expired and their Inspector
+  findings auto-close without operator intervention.
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: String to enable multiple deployments per AWS region
+  PrimaryRegion:
+    Type: String
+    Default: 'us-east-1'
+  StandbyRegion:
+    Type: String
+    Default: 'us-west-2'
+  GitRepoUrl:
+    Type: String
+    Default: 'https://github.com/aws-samples/sample-multi-region-resilient-microservice-on-aws'
+    Description: Public repository cloned for each repave (branch main)
+  ScheduleExpression:
+    Type: String
+    Default: 'cron(0 6 ? * SUN *)'
+    Description: Weekly repave schedule (UTC)
+
+Resources:
+  SelfUpdateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'mr-app-self-update-role${Env}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EcrPush
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                Resource:
+                  - !Sub 'arn:aws:ecr:${PrimaryRegion}:${AWS::AccountId}:repository/*${Env}'
+                  - !Sub 'arn:aws:ecr:${StandbyRegion}:${AWS::AccountId}:repository/*${Env}'
+        - PolicyName: Rollout
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                  - cloudformation:GetTemplate
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${PrimaryRegion}:${AWS::AccountId}:stack/apps${Env}/*'
+                  - !Sub 'arn:aws:cloudformation:${StandbyRegion}:${AWS::AccountId}:stack/apps${Env}/*'
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:UpdateService
+                  - ecs:ListServices
+                  - ecs:ListClusters
+                Resource: '*'
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*${Env}*'
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/*'
+        - PolicyName: Logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/mr-app-self-update${Env}*'
+        - PolicyName: Kms
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Sub 'arn:aws:kms:*:${AWS::AccountId}:key/*'
+
+  SelfUpdateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub 'mr-app-self-update${Env}'
+      Description: Weekly repave - rebuild images from main and roll out
+      ServiceRole: !GetAtt SelfUpdateRole.Arn
+      TimeoutInMinutes: 60
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ENV_SUFFIX
+            Value: !Ref Env
+          - Name: PRIMARY_REGION
+            Value: !Ref PrimaryRegion
+          - Name: STANDBY_REGION
+            Value: !Ref StandbyRegion
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+      Source:
+        Type: GITHUB
+        Location: !Ref GitRepoUrl
+        GitCloneDepth: 1
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - TAG=$(git rev-parse --short=7 HEAD)
+                - echo "Repave from main @ $TAG"
+                - for R in $PRIMARY_REGION $STANDBY_REGION; do aws ecr get-login-password --region $R | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com; done
+            build:
+              commands:
+                # 1. Rebuild every service image from current main (fresh base layers)
+                - |
+                  for ENTRY in catalog:catalog checkout:checkout ui:ui carts:cart assets:assets orders:orders; do
+                    SVC=${ENTRY%%:*}; SRC=${ENTRY##*:}
+                    echo "Building $SVC from source/$SRC..."
+                    docker build --pull -t $SVC:$TAG source/$SRC
+                    for R in $PRIMARY_REGION $STANDBY_REGION; do
+                      docker tag $SVC:$TAG $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${SVC}${ENV_SUFFIX}:$TAG
+                      docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${SVC}${ENV_SUFFIX}:$TAG
+                    done
+                  done
+                # 2. Re-mirror observability sidecars at the pinned versions
+                - |
+                  for ENTRY in $(grep -oE 'public\.ecr\.aws/[a-z-]+/[a-z-]+:[a-zA-Z0-9.]+' deployment/mirror-sidecar-buildspec.yml | sort -u); do
+                    NAME=$(basename ${ENTRY%%:*}); TAG_VAL=${ENTRY##*:}
+                    docker pull $ENTRY
+                    for R in $PRIMARY_REGION $STANDBY_REGION; do
+                      docker tag $ENTRY $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${NAME}${ENV_SUFFIX}:$TAG_VAL
+                      docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${NAME}${ENV_SUFFIX}:$TAG_VAL
+                    done
+                  done
+            post_build:
+              commands:
+                # 3. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise
+                - |
+                  for R in $PRIMARY_REGION $STANDBY_REGION; do
+                    CURRENT=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query "Stacks[0].Parameters[?ParameterKey=='Tag'].ParameterValue" --output text)
+                    if [ "$CURRENT" != "$TAG" ]; then
+                      echo "$R: updating apps${ENV_SUFFIX} Tag $CURRENT -> $TAG"
+                      aws cloudformation update-stack --region $R --stack-name apps${ENV_SUFFIX} \
+                        --use-previous-template \
+                        --parameters ParameterKey=Tag,ParameterValue=$TAG \
+                          ParameterKey=Env,UsePreviousValue=true \
+                          ParameterKey=PrimaryRegion,UsePreviousValue=true \
+                          ParameterKey=StandbyRegion,UsePreviousValue=true \
+                          ParameterKey=KmsKey,UsePreviousValue=true \
+                        --capabilities CAPABILITY_NAMED_IAM
+                      aws cloudformation wait stack-update-complete --region $R --stack-name apps${ENV_SUFFIX}
+                    else
+                      echo "$R: same commit - forcing new deployment to pick up rebuilt layers"
+                      CL=$(aws ecs list-clusters --region $R --query 'clusterArns[0]' --output text)
+                      for S in $(aws ecs list-services --region $R --cluster $CL --query 'serviceArns[]' --output text); do
+                        aws ecs update-service --region $R --cluster $CL --service $S --force-new-deployment --query 'service.serviceName' --output text
+                      done
+                    fi
+                  done
+                - echo "Repave complete - ECR lifecycle policies will expire superseded images and Inspector findings will auto-close"
+
+  ScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartBuild
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: codebuild:StartBuild
+                Resource: !GetAtt SelfUpdateProject.Arn
+
+  WeeklyRepaveSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub 'mr-app-weekly-repave${Env}'
+      Description: Weekly image repave so CVE findings self-remediate
+      ScheduleExpression: !Ref ScheduleExpression
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 60
+      Target:
+        Arn: !GetAtt SelfUpdateProject.Arn
+        RoleArn: !GetAtt ScheduleRole.Arn
+
+Outputs:
+  SelfUpdateProjectName:
+    Value: !Ref SelfUpdateProject
