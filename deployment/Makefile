@@ -555,6 +555,10 @@ chaos-engineering: primary_infrastructure standby_infrastructure
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
 	@aws cloudformation deploy --template-file ./chaos/multi-region-scenario.yaml --stack-name chaos${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} Region=${PRIMARY_REGION}
 
+self-update: codebuild-infra
+	@echo "Deploying weekly self-update (repave) automation in ${PRIMARY_REGION}"
+	@aws cloudformation deploy --template-file ./self-update.yaml --stack-name self-update${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} PrimaryRegion=${PRIMARY_REGION} StandbyRegion=${STANDBY_REGION}
+
 clean:
 	@echo "To remove all stacks deployed by this solution, run 'make destroy-all'"
 
@@ -643,7 +647,7 @@ destroy-global_routing: destroy-canaries-standby destroy-canaries-primary destro
 	@aws cloudformation delete-stack --stack-name gr${ENV} --region ${PRIMARY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name gr${ENV} --region ${PRIMARY_REGION}
 
-destroy-infra: destroy-ecr-standby destroy-ecr-primary destroy-databases-standby destroy-databases-primary destroy-client-primary destroy-client-standby destroy-codebuild destroy-monitoring destroy-arc-dns-status destroy-chaos-engineering destroy-load-generator destroy-global_routing
+destroy-infra: destroy-self-update destroy-ecr-standby destroy-ecr-primary destroy-databases-standby destroy-databases-primary destroy-client-primary destroy-client-standby destroy-codebuild destroy-monitoring destroy-arc-dns-status destroy-chaos-engineering destroy-load-generator destroy-global_routing
 	@echo "Deleting networking resources in both regions..."
 	@aws cloudformation delete-stack --stack-name baseInfra${ENV} --region ${STANDBY_REGION}
 	@aws cloudformation delete-stack --stack-name baseInfra${ENV} --region ${PRIMARY_REGION}
@@ -675,6 +679,11 @@ destroy-apps-standby: destroy-canaries-primary destroy-canaries-standby destroy-
 	@echo "Deleting applications in ${STANDBY_REGION}..."
 	@aws cloudformation delete-stack --stack-name apps${ENV} --region ${STANDBY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name apps${ENV} --region ${STANDBY_REGION}
+
+destroy-self-update:
+	@echo "Deleting self-update (repave) automation stack..."
+	@aws cloudformation delete-stack --stack-name self-update${ENV} --region ${PRIMARY_REGION}
+	@aws cloudformation wait stack-delete-complete --stack-name self-update${ENV} --region ${PRIMARY_REGION}
 
 destroy-codebuild:
 	@echo "Deleting CodeBuild stack..."

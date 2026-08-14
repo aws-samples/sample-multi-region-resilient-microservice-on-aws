@@ -16,8 +16,8 @@ phases:
       - |
         for ENTRY in \
           "cloudwatch-agent${ENV_SUFFIX}:public.ecr.aws/cloudwatch-agent/cloudwatch-agent:latest" \
-          "adot-autoinstrumentation-java${ENV_SUFFIX}:public.ecr.aws/aws-observability/adot-autoinstrumentation-java:v1.32.5" \
-          "adot-autoinstrumentation-node${ENV_SUFFIX}:public.ecr.aws/aws-observability/adot-autoinstrumentation-node:v0.3.0"; do
+          "adot-autoinstrumentation-java${ENV_SUFFIX}:public.ecr.aws/aws-observability/adot-autoinstrumentation-java:v2.29.0" \
+          "adot-autoinstrumentation-node${ENV_SUFFIX}:public.ecr.aws/aws-observability/adot-autoinstrumentation-node:v0.12.0"; do
           REPO=${ENTRY%%:*}; SRC=${ENTRY#*:}; TAG_VAL=${SRC##*:}
           echo "Pulling $SRC..."
           docker pull $SRC

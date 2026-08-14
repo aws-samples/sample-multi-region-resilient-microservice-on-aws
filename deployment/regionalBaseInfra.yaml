@@ -207,6 +207,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'checkout${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -222,6 +224,8 @@ Resources:
           ScanOnPush: true
       RepositoryName: !Sub 'catalog${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -237,6 +241,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'carts${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -252,6 +258,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'assets${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -267,6 +275,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'orders${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -282,6 +292,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'ui${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -297,6 +309,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'cloudwatch-agent${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -312,6 +326,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'adot-autoinstrumentation-java${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
@@ -327,6 +343,8 @@ Resources:
         ScanOnPush: true
       RepositoryName: !Sub 'adot-autoinstrumentation-node${Env}'
       ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 2 most recent tagged images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}'
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
