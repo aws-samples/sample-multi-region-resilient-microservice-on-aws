@@ -19,6 +19,11 @@
 		<spring-cloud>2021.0.3</spring-cloud>
 		<spring-cloud-aws.version>2.4.2</spring-cloud-aws.version>
 		<org.mapstruct.version>1.6.3</org.mapstruct.version>
+		<!-- Override Spring Boot 3.5.14 BOM (4.1.132.Final) to patch
+		     CVE-2026-42581/42584 (netty-codec-http), CVE-2026-42579
+		     (netty-codec-dns) and CVE-2026-45674/47691 (netty-resolver-dns),
+		     all fixed in the 4.2 line. -->
+		<netty.version>4.2.15.Final</netty.version>
 		<!-- Override Spring Boot 3.5.14 BOM (2.21.2) to patch CVE-2026-54512 and
 		     CVE-2026-54513 (jackson-databind PolymorphicTypeValidator bypasses)
 		     and GHSA-r7wm-3cxj-wff9 (jackson-core async parser maxNumberLength

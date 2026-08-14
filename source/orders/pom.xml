@@ -22,6 +22,10 @@
 		     CVE-2026-54291 (scram-client MITM protection bypass via
 		     SCRAM-SHA-256-PLUS downgrade, fixed in 42.7.12). -->
 		<postgresql.version>42.7.12</postgresql.version>
+		<!-- Override Spring Boot 3.5.14 BOM (4.1.132.Final) to patch
+		     CVE-2026-42581 and CVE-2026-42584 (netty-codec-http request
+		     smuggling / decoder state confusion), fixed in the 4.2 line. -->
+		<netty.version>4.2.15.Final</netty.version>
 		<!-- Override Spring Boot 3.5.14 BOM (2.21.2) to patch CVE-2026-54512 and
 		     CVE-2026-54513 (jackson-databind PolymorphicTypeValidator bypasses)
 		     and GHSA-r7wm-3cxj-wff9 (jackson-core async parser maxNumberLength
