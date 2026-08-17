@@ -87,6 +87,15 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:service/apps${Env}-*/*'
                   - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:service/apps${Env}-*/*'
+              # CloudFormation resolves !GetAtt EcsCluster.Arn on the scalable
+              # targets with the CALLER's permissions (observed 2026-08-17:
+              # ecs:DescribeClusters denial rolled back the apps update after
+              # the service updates had already succeeded).
+              - Effect: Allow
+                Action: ecs:DescribeClusters
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:cluster/apps${Env}-*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:cluster/apps${Env}-*'
               - Effect: Allow
                 Action:
                   - ecs:RegisterTaskDefinition
@@ -110,6 +119,35 @@ Resources:
                   # when resolving SSM-typed template parameters during UpdateStack.
                   - ssm:GetParameters
                 Resource: !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/*'
+              # The apps stack update creates new task-definition revisions and
+              # updates services; CloudFormation resolves the template's secret
+              # dynamic references and Fn::GetAtt on security groups / load
+              # balancers with the CALLER's permissions (observed 2026-08-17:
+              # secretsmanager:GetSecretValue on cartsTable-devSecret and
+              # ec2:Describe* denials rolled back the update).
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:*${Env}*'
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: '*'
+                Condition:
+                  StringLike:
+                    kms:ViaService: secretsmanager.*.amazonaws.com
+              # CloudFormation re-fetches resource attributes (observed with
+              # ecs:DescribeClusters for !GetAtt EcsCluster.Arn) using the
+              # CALLER's permissions during update; kms:DescribeKey covers
+              # !GetAtt LogGroupKey.Arn the same way. Read-only.
+              - Effect: Allow
+                Action: kms:DescribeKey
+                Resource: !Sub 'arn:aws:kms:*:${AWS::AccountId}:key/*'
+              - Effect: Allow
+                Action:
+                  - ec2:Describe*
+                  - elasticloadbalancing:Describe*
+                # Read-only attribute resolution; these Describe actions do not
+                # support resource-level permissions.
+                Resource: '*'
         - PolicyName: Logs
           PolicyDocument:
             Version: '2012-10-17'
