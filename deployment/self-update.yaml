@@ -145,6 +145,13 @@ Resources:
                 Action:
                   - ec2:Describe*
                   - elasticloadbalancing:Describe*
+                  # CFN resolves the checkout ElastiCache (Redis) attributes
+                  # during service updates via elasticache:DescribeReplicationGroups
+                  # with the CALLER's credentials. A denial here is retried by the
+                  # CFN handler for 30-40 min and then misreported as a stack-level
+                  # "Internal Failure" with no resource event and no surfaced
+                  # AccessDenied (observed live 2026-08-17 in both regions).
+                  - elasticache:Describe*
                 # Read-only attribute resolution; these Describe actions do not
                 # support resource-level permissions.
                 Resource: '*'
