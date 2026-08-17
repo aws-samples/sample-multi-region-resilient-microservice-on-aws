@@ -106,6 +106,9 @@ Resources:
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
+                  # GetParameters (plural) is the batch API CloudFormation calls
+                  # when resolving SSM-typed template parameters during UpdateStack.
+                  - ssm:GetParameters
                 Resource: !Sub 'arn:aws:ssm:*:${AWS::AccountId}:parameter/*'
         - PolicyName: Logs
           PolicyDocument:
@@ -187,8 +190,12 @@ Resources:
                   done
             post_build:
               commands:
-                # 3. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise
+                # 3. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise.
+                # set -e: any rollout failure MUST fail the build -- without it a denied
+                # UpdateStack is swallowed by the loop and CodeBuild reports SUCCEEDED
+                # while services keep running the old images (observed 2026-08-16).
                 - |
+                  set -e
                   for R in $PRIMARY_REGION $STANDBY_REGION; do
                     CURRENT=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query "Stacks[0].Parameters[?ParameterKey=='Tag'].ParameterValue" --output text)
                     if [ "$CURRENT" != "$TAG" ]; then
