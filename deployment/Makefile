@@ -577,8 +577,36 @@ test-creds:
 # destroy-databases-primary depends on destroy-databases-standby.
 # DSQL parallel deletion is handled in destroy-dsql-both-regions via & and wait.
 
-destroy-all: destroy-ngrh destroy-infra
+destroy-all: destroy-ngrh destroy-infra destroy-cloudmap-namespace
 	@echo "Removed all cloudformation stacks!!!"
+
+# ECS Service Connect implicitly creates the retail-store-ar${ENV} Cloud Map
+# namespace (ecs.yaml ServiceConnectDefaults), but CloudFormation does not own
+# it, so stack deletion leaks one namespace per deploy. At the default Cloud Map
+# quota (50 namespaces/account/region) leaked namespaces make every subsequent
+# deploy fail: EcsCluster CREATE_FAILED "number of namespaces has reached the
+# maximum allowed limit". Delete the namespace explicitly after the ECS stacks
+# are gone (runs last; only deletes when the namespace has no services left).
+destroy-cloudmap-namespace:
+	@echo "Deleting leaked Cloud Map namespace retail-store-ar${ENV} (both regions)"
+	@for region in ${PRIMARY_REGION} ${STANDBY_REGION}; do \
+		ns_id=$$(aws servicediscovery list-namespaces --region $$region \
+			--query "Namespaces[?Name=='retail-store-ar${ENV}']|[0].Id" --output text 2>/dev/null); \
+		if [ "$$ns_id" != "None" ] && [ -n "$$ns_id" ]; then \
+			svc_count=$$(aws servicediscovery list-services --region $$region \
+				--filters "Name=NAMESPACE_ID,Values=$$ns_id,Condition=EQ" \
+				--query 'length(Services)' --output text 2>/dev/null); \
+			if [ "$$svc_count" = "0" ]; then \
+				aws servicediscovery delete-namespace --region $$region --id $$ns_id >/dev/null \
+					&& echo "$$region: deleted namespace $$ns_id" \
+					|| echo "$$region: failed to delete namespace $$ns_id (continuing)"; \
+			else \
+				echo "$$region: namespace $$ns_id still has $$svc_count services, skipping"; \
+			fi; \
+		else \
+			echo "$$region: no retail-store-ar${ENV} namespace found"; \
+		fi; \
+	done
 
 destroy-chaos-engineering:
 	@echo "Deleting Chaos Engineering stacks"
