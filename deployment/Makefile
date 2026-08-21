@@ -473,7 +473,18 @@ monitoring: restore-reconciliation arc-dns-status
 
 arc-dns-status: region-switch boto3-layer
 	@echo "Deploy ARC DNS status Lambda to both regions"
-	$(eval _PLAN_ARN:=$(shell aws arc-region-switch list-plans --region $(PRIMARY_REGION) --query "plans[?starts_with(name, 'retail-store-ar')].arn | [0]" --output text))
+	# Resolve the plan ARN from the region-switch stack output rather than a
+	# list-plans name filter: the plan is named by failover.yaml (not
+	# retail-store-ar*), so a name grep silently resolves to the literal
+	# string "None" and the Lambda then publishes no metrics, leaving the
+	# "Active Regions in DNS" dashboard chart empty.
+	$(eval _PLAN_ARN:=$(shell aws cloudformation describe-stacks \
+		--stack-name region-switch$(ENV) --region $(PRIMARY_REGION) \
+		--query "Stacks[0].Outputs[?OutputKey=='RegionSwitchPlanArn'].OutputValue" --output text))
+	@if [ -z "$(_PLAN_ARN)" ] || [ "$(_PLAN_ARN)" = "None" ]; then \
+		echo "ERROR: could not resolve RegionSwitchPlanArn from region-switch$(ENV) stack outputs"; \
+		exit 1; \
+	fi
 	$(eval _HZ_ID:=$(shell aws cloudformation describe-stack-resource --stack-name gr$(ENV) --logical-resource-id HostedZone --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _RECORD:=$(shell aws secretsmanager get-secret-value --secret-id DNSRecordSecret$(ENV) --region $(PRIMARY_REGION) --query 'SecretString' --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./arc-dns-status.yaml \
