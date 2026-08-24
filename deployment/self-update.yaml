@@ -246,6 +246,9 @@ Resources:
                 # while services keep running the old images (observed 2026-08-16).
                 - |
                   set -e
+                  # Pass 1 -- SUBMIT ONLY. Both regions' updates are in flight before any
+                  # wait begins, so CloudFormation progresses them concurrently.
+                  WAIT_REGIONS=""
                   for R in $PRIMARY_REGION $STANDBY_REGION; do
                     CURRENT=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query "Stacks[0].Parameters[?ParameterKey=='Tag'].ParameterValue" --output text)
                     if [ "$CURRENT" != "$TAG" ]; then
@@ -258,7 +261,7 @@ Resources:
                           ParameterKey=StandbyRegion,UsePreviousValue=true \
                           ParameterKey=KmsKey,UsePreviousValue=true \
                         --capabilities CAPABILITY_NAMED_IAM
-                      aws cloudformation wait stack-update-complete --region $R --stack-name apps${ENV_SUFFIX}
+                      WAIT_REGIONS="$WAIT_REGIONS $R"
                     else
                       echo "$R: same commit - forcing new deployment to pick up rebuilt layers"
                       CL=$(aws ecs list-clusters --region $R --query 'clusterArns[0]' --output text)
@@ -266,6 +269,17 @@ Resources:
                         aws ecs update-service --region $R --cluster $CL --service $S --force-new-deployment --query 'service.serviceName' --output text
                       done
                     fi
+                  done
+                  # Pass 2 -- WAIT. These waits stay SEQUENTIAL on purpose. Because both
+                  # updates were already submitted in pass 1, elapsed time is now
+                  # max(region) instead of sum(region): by the time the first wait
+                  # returns, the second region has been converging the whole time.
+                  # Do NOT background these with '&'. set -e does not trip on a
+                  # background job's exit status, so backgrounding would silently
+                  # restore the 2026-08-16 failure mode this block exists to prevent.
+                  for R in $WAIT_REGIONS; do
+                    echo "$R: waiting for stack-update-complete"
+                    aws cloudformation wait stack-update-complete --region $R --stack-name apps${ENV_SUFFIX}
                   done
                 - echo "Repave complete - ECR lifecycle policies will expire superseded images and Inspector findings will auto-close"
 
