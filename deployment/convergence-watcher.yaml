@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Repave convergence watcher, scoped to ONE region -- deploy one copy per region
+  (primary and standby). The self-update CodeBuild post_build starts one
+  execution per region after submitting the rollout; the execution -- not the
+  CodeBuild status -- is the authoritative convergence verdict for its region.
+  Rationale: on 2026-08-23 the build hit its 60-minute cap while both stacks had
+  in fact rolled out successfully (CodeBuild FAILED on a healthy repave), and
+  the timed-out build never verified ECS convergence or image tags. Native
+  Step Functions SDK integrations are same-region only, hence one state machine
+  per region instead of a cross-region fan-out.
+
+Parameters:
+  Env:
+    Type: String
+    Default: ''
+    Description: Environment suffix (e.g. "-dev"), matching the apps stack.
+
+Resources:
+  FailureTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'convergence-watcher-failures${Env}'
+
+  WatcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: Converge
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/apps${Env}/*'
+              - Effect: Allow
+                Action: ecs:DescribeServices
+                Resource: !Sub 'arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/apps${Env}-*/*'
+              - Effect: Allow
+                Action:
+                  - ecs:ListServices
+                  - ecs:DescribeTaskDefinition
+                # These ECS actions do not support resource-level permissions
+                # (same constraint documented in self-update.yaml). Read-only.
+                Resource: '*'
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref FailureTopic
+
+  # Timeout kills the execution WITHOUT running NotifyFailure (TimeoutSeconds is
+  # execution-level), and a JSONata evaluation error in a Choice state fails the
+  # execution with no Catch path. These alarms cover both silent-death modes so
+  # convergence failure can never be silent -- the same fail-loud contract as
+  # set -e in the buildspec (2026-08-16 incident).
+  TimedOutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'convergence-watcher-timed-out${Env}'
+      AlarmDescription: A repave convergence watcher execution hit its 90-min timeout without converging.
+      Namespace: AWS/States
+      MetricName: ExecutionsTimedOut
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref WatcherStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref FailureTopic
+
+  FailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'convergence-watcher-failed${Env}'
+      AlarmDescription: >-
+        A repave convergence watcher execution failed. Duplicates the SNS publish
+        when NotifyFailure ran, but also catches unhandled runtime errors (e.g. a
+        JSONata failure in a Choice state) that bypass NotifyFailure entirely.
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Ref WatcherStateMachine
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref FailureTopic
+
+  WatcherStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub 'convergence-watcher${Env}'
+      RoleArn: !GetAtt WatcherRole.Arn
+      # JSONata expressions use $var / {% %} syntax which contains no ${...},
+      # so Fn::Sub only interpolates the one intended placeholder (FailureTopic).
+      DefinitionString: !Sub |
+        {
+          "Comment": "Convergence watcher for the apps stack repave, scoped to this region. Input: {tag, stackName, clusterArn, path (CFN|ECS), submittedAt (ISO8601 UTC), buildId}.",
+          "QueryLanguage": "JSONata",
+          "StartAt": "Init",
+          "TimeoutSeconds": 5400,
+          "States": {
+            "Init": {
+              "Type": "Pass",
+              "Comment": "Hoist the build's handoff payload into variables. stackStatus/convergedSvc/totalSvc are DEFAULTED here because the ECS path never runs the stack gate and NotifyFailure's message references them -- an unassigned variable would make the JSONata evaluation itself fail and mask the real failure.",
+              "Assign": {
+                "tag": "{% $states.input.tag %}",
+                "stackName": "{% $states.input.stackName %}",
+                "clusterArn": "{% $states.input.clusterArn %}",
+                "path": "{% $states.input.path %}",
+                "submittedAt": "{% $states.input.submittedAt %}",
+                "buildId": "{% $states.input.buildId %}",
+                "stackAttempts": 0,
+                "svcAttempts": 0,
+                "stackStatus": "N/A",
+                "convergedSvc": 0,
+                "totalSvc": 0
+              },
+              "Next": "ChoosePath"
+            },
+            "ChoosePath": {
+              "Type": "Choice",
+              "Comment": "The buildspec branches per region: new commit => CFN update-stack; same commit => ecs force-new-deployment (NO CloudFormation activity at all). Only the CFN path has a stack gate.",
+              "Choices": [
+                { "Condition": "{% $path = 'CFN' %}", "Next": "WaitStack" }
+              ],
+              "Default": "WaitServices"
+            },
+            "WaitStack": { "Type": "Wait", "Seconds": 30, "Next": "DescribeStack" },
+            "DescribeStack": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:cloudformation:describeStacks",
+              "Arguments": { "StackName": "{% $stackName %}" },
+              "Assign": {
+                "stackAttempts": "{% $stackAttempts + 1 %}",
+                "stackStatus": "{% $states.result.Stacks[0].StackStatus %}",
+                "stackTag": "{% $states.result.Stacks[0].Parameters[ParameterKey = 'Tag'].ParameterValue %}",
+                "stackUpdatedAt": "{% $states.result.Stacks[0].LastUpdatedTime %}"
+              },
+              "Retry": [ { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 } ],
+              "Next": "EvalStack"
+            },
+            "EvalStack": {
+              "Type": "Choice",
+              "Comment": "STALE-READ GUARD: UPDATE_COMPLETE alone is NOT sufficient. If the first poll lands before CloudFormation registers the new update, it reads the PREVIOUS update's terminal state and declares instant success. All three conditions must hold.",
+              "Choices": [
+                { "Condition": "{% $stackStatus = 'UPDATE_COMPLETE' and $stackTag = $tag and $toMillis($stackUpdatedAt) >= $toMillis($submittedAt) %}", "Next": "WaitServices" },
+                { "Condition": "{% $stackStatus in ['UPDATE_FAILED', 'UPDATE_ROLLBACK_COMPLETE', 'UPDATE_ROLLBACK_FAILED', 'ROLLBACK_COMPLETE', 'ROLLBACK_FAILED'] %}", "Next": "NotifyFailure" },
+                { "Condition": "{% $stackAttempts >= 80 %}", "Next": "NotifyFailure" }
+              ],
+              "Default": "WaitStack"
+            },
+            "WaitServices": { "Type": "Wait", "Seconds": 30, "Next": "ListServices" },
+            "ListServices": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ecs:listServices",
+              "Arguments": { "Cluster": "{% $clusterArn %}", "MaxResults": 100 },
+              "Assign": { "serviceArns": "{% $states.result.ServiceArns %}" },
+              "Retry": [ { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 } ],
+              "Next": "DescribeServices"
+            },
+            "DescribeServices": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ecs:describeServices",
+              "Comment": "SDK integrations return the raw API response in PascalCase (Services/Deployments/RolloutState), NOT the camelCase of the CLI/SDK docs.",
+              "Arguments": { "Cluster": "{% $clusterArn %}", "Services": "{% $serviceArns %}" },
+              "Assign": {
+                "svcAttempts": "{% $svcAttempts + 1 %}",
+                "totalSvc": "{% $count($states.result.Services) %}",
+                "convergedSvc": "{% $count($states.result.Services[DesiredCount > 0 and RunningCount = DesiredCount and PendingCount = 0 and Deployments[0].RolloutState = 'COMPLETED']) %}",
+                "failedSvc": "{% $count($states.result.Services[Deployments[0].RolloutState = 'FAILED']) %}",
+                "svcPairs": "{% $states.result.Services.{'name': ServiceName, 'td': TaskDefinition, 'tag': $tag} %}"
+              },
+              "Retry": [ { "ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2 } ],
+              "Next": "EvalServices"
+            },
+            "EvalServices": {
+              "Type": "Choice",
+              "Comment": "TRANSIENT TOLERANCE: on 2026-08-23 the us-west-2 ui service threw repeated 'unable to place a task' events (Fargate Spot capacity churn) between 07:24 and 07:36 and self-recovered at 07:41. Placement errors are NOT terminal -- only RolloutState=FAILED or the attempt ceiling ends the poll.",
+              "Choices": [
+                { "Condition": "{% $failedSvc > 0 %}", "Next": "NotifyFailure" },
+                { "Condition": "{% $totalSvc > 0 and $convergedSvc = $totalSvc %}", "Next": "VerifyImageTags" },
+                { "Condition": "{% $svcAttempts >= 80 %}", "Next": "NotifyFailure" }
+              ],
+              "Default": "WaitServices"
+            },
+            "VerifyImageTags": {
+              "Type": "Map",
+              "Comment": "CLOSES THE REAL GAP: 12/12 running + RolloutState COMPLETED can all be true of the OLD task definition. VERIFIED 2026-08-24 against live data: container name does NOT equal task-def family (family apps-dev-CheckoutTaskDefinition-w4AqpZ0hvLOb, containers init / ecs-cwagent / checkout). The reliable contract is ECR repo name == ECS service name (service checkout-dev -> image .../checkout-dev:431033a). tag is carried per-item rather than read from an outer variable, so this does not depend on Map variable scoping.",
+              "Items": "{% $svcPairs %}",
+              "MaxConcurrency": 6,
+              "ItemProcessor": {
+                "ProcessorConfig": { "Mode": "INLINE" },
+                "StartAt": "DescribeTaskDefinition",
+                "States": {
+                  "DescribeTaskDefinition": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::aws-sdk:ecs:describeTaskDefinition",
+                    "Arguments": { "TaskDefinition": "{% $states.input.td %}" },
+                    "Output": {
+                      "name": "{% $states.input.name %}",
+                      "tag": "{% $states.input.tag %}",
+                      "appImage": "{% $states.result.TaskDefinition.ContainerDefinitions[$contains(Image, '/' & $states.input.name & ':')].Image %}"
+                    },
+                    "Next": "AssertTag"
+                  },
+                  "AssertTag": {
+                    "Type": "Choice",
+                    "Comment": "Sidecars (adot-autoinstrumentation-node, cloudwatch-agent) never carry the repave tag, so a loose any-container check would be wrong. Containers[0] is the ADOT init sidecar, not the app.",
+                    "Choices": [
+                      { "Condition": "{% $exists($states.input.appImage) and $contains($states.input.appImage, ':' & $states.input.tag) %}", "Next": "TagOk" }
+                    ],
+                    "Default": "TagStale"
+                  },
+                  "TagOk": { "Type": "Pass", "Output": { "ok": true }, "End": true },
+                  "TagStale": {
+                    "Type": "Fail",
+                    "Error": "StaleImageTag",
+                    "Cause": "Service converged but its app container image does not reference the expected repave tag (or no container matched the service-name repo)."
+                  }
+                }
+              },
+              "Catch": [ { "ErrorEquals": ["States.ALL"], "Next": "NotifyFailure" } ],
+              "Next": "Converged"
+            },
+            "Converged": {
+              "Type": "Succeed",
+              "Comment": "Terminal SUCCESS. This execution -- not the CodeBuild status -- is the authoritative rollout verdict for this region."
+            },
+            "NotifyFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Comment": "FAIL LOUD. Mirrors the intent of set -e in the buildspec: the 2026-08-16 incident was a denied UpdateStack silently swallowed while CodeBuild reported SUCCEEDED. Convergence failure must never be silent.",
+              "Arguments": {
+                "TopicArn": "${FailureTopic}",
+                "Subject": "Repave convergence FAILED",
+                "Message": "{% 'Repave convergence failed.\nbuildId: ' & $buildId & '\ntag: ' & $tag & '\nstack: ' & $stackName & '\nstackStatus: ' & $string($stackStatus) & '\nconverged: ' & $string($convergedSvc) & '/' & $string($totalSvc) %}"
+              },
+              "Next": "Failed"
+            },
+            "Failed": {
+              "Type": "Fail",
+              "Error": "ConvergenceFailed",
+              "Cause": "Rollout did not converge within the execution timeout, or a terminal failure was observed. See the SNS notification and execution history."
+            }
+          }
+        }
+
+Outputs:
+  StateMachineArn:
+    Value: !Ref WatcherStateMachine
+  FailureTopicArn:
+    Value: !Ref FailureTopic
