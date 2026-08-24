@@ -160,6 +160,17 @@ Resources:
                 # Read-only attribute resolution; these Describe actions do not
                 # support resource-level permissions.
                 Resource: '*'
+              # Hand off convergence verification to the per-region Step
+              # Functions watchers (convergence-watcher.yaml). The build submits
+              # the rollout and starts one execution per region; the executions
+              # are the authoritative convergence verdict, decoupled from the
+              # 60-minute build cap (which reported FAILED on a fully successful
+              # rollout on 2026-08-23).
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource:
+                  - !Sub 'arn:aws:states:${PrimaryRegion}:${AWS::AccountId}:stateMachine:convergence-watcher${Env}'
+                  - !Sub 'arn:aws:states:${StandbyRegion}:${AWS::AccountId}:stateMachine:convergence-watcher${Env}'
         - PolicyName: Logs
           PolicyDocument:
             Version: '2012-10-17'
@@ -246,9 +257,13 @@ Resources:
                 # while services keep running the old images (observed 2026-08-16).
                 - |
                   set -e
+                  # Captured BEFORE any submit so the watcher's stale-read guard
+                  # (LastUpdatedTime >= submittedAt) is strictly satisfiable.
+                  SUBMITTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                   # Pass 1 -- SUBMIT ONLY. Both regions' updates are in flight before any
                   # wait begins, so CloudFormation progresses them concurrently.
                   WAIT_REGIONS=""
+                  CFN_REGIONS=""
                   for R in $PRIMARY_REGION $STANDBY_REGION; do
                     CURRENT=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query "Stacks[0].Parameters[?ParameterKey=='Tag'].ParameterValue" --output text)
                     if [ "$CURRENT" != "$TAG" ]; then
@@ -262,6 +277,7 @@ Resources:
                           ParameterKey=KmsKey,UsePreviousValue=true \
                         --capabilities CAPABILITY_NAMED_IAM
                       WAIT_REGIONS="$WAIT_REGIONS $R"
+                      CFN_REGIONS="$CFN_REGIONS $R"
                     else
                       echo "$R: same commit - forcing new deployment to pick up rebuilt layers"
                       CL=$(aws ecs list-clusters --region $R --query 'clusterArns[0]' --output text)
@@ -270,6 +286,25 @@ Resources:
                       done
                     fi
                   done
+                  # Hand off to the per-region convergence watchers (Step Functions,
+                  # convergence-watcher.yaml). Covered by set -e: a failed handoff
+                  # fails the build rather than leaving nobody watching. The
+                  # executions verify stack state, ECS steady state, AND per-service
+                  # image tags -- checks a timed-out build never performs
+                  # (2026-08-23: build FAILED at the 60-min cap on a rollout that
+                  # had fully landed, with ECS convergence left unverified).
+                  for R in $PRIMARY_REGION $STANDBY_REGION; do
+                    CL=$(aws ecs list-clusters --region $R --query 'clusterArns[0]' --output text)
+                    case " $CFN_REGIONS " in
+                      *" $R "*) ROLLOUT_PATH=CFN ;;
+                      *)        ROLLOUT_PATH=ECS ;;
+                    esac
+                    echo "$R: starting convergence-watcher execution (path=$ROLLOUT_PATH)"
+                    aws stepfunctions start-execution --region $R \
+                      --state-machine-arn arn:aws:states:$R:$AWS_ACCOUNT_ID:stateMachine:convergence-watcher${ENV_SUFFIX} \
+                      --name repave-$TAG-$(date +%s) \
+                      --input "{\"tag\":\"$TAG\",\"stackName\":\"apps${ENV_SUFFIX}\",\"clusterArn\":\"$CL\",\"path\":\"$ROLLOUT_PATH\",\"submittedAt\":\"$SUBMITTED_AT\",\"buildId\":\"$CODEBUILD_BUILD_ID\"}"
+                  done
                   # Pass 2 -- WAIT. These waits stay SEQUENTIAL on purpose. Because both
                   # updates were already submitted in pass 1, elapsed time is now
                   # max(region) instead of sum(region): by the time the first wait
@@ -277,6 +312,9 @@ Resources:
                   # Do NOT background these with '&'. set -e does not trip on a
                   # background job's exit status, so backgrounding would silently
                   # restore the 2026-08-16 failure mode this block exists to prevent.
+                  # NOTE: these waits are the fail-loud backstop until the watchers
+                  # are proven on a live repave; once proven, remove this pass so the
+                  # build is fully decoupled from CloudFormation convergence time.
                   for R in $WAIT_REGIONS; do
                     echo "$R: waiting for stack-update-complete"
                     aws cloudformation wait stack-update-complete --region $R --stack-name apps${ENV_SUFFIX}
