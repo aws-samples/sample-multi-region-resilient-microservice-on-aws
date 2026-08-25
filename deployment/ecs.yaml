@@ -646,6 +646,9 @@ Resources:
                 DnsName: carts
                 Port: 8080
             PortName: carts
+            Timeout:
+              PerRequestTimeoutSeconds: 3
+              IdleTimeoutSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
@@ -832,6 +835,9 @@ Resources:
                 DnsName: orders
                 Port: 8080
             PortName: orders
+            Timeout:
+              PerRequestTimeoutSeconds: 3
+              IdleTimeoutSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
@@ -908,6 +914,9 @@ Resources:
                 DnsName: assets
                 Port: 8080
             PortName: assets
+            Timeout:
+              PerRequestTimeoutSeconds: 3
+              IdleTimeoutSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
@@ -1032,6 +1041,9 @@ Resources:
                 DnsName: catalog
                 Port: 8080
             PortName: catalog
+            Timeout:
+              PerRequestTimeoutSeconds: 3
+              IdleTimeoutSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
@@ -1177,6 +1189,9 @@ Resources:
                 DnsName: checkout
                 Port: 8080
             PortName: checkout
+            Timeout:
+              PerRequestTimeoutSeconds: 3
+              IdleTimeoutSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED
@@ -1272,7 +1287,18 @@ Resources:
             - Name: "ENDPOINTS_ORDERS"
               Value: http://orders:8080
             - Name: "ENDPOINTS_ASSETS"
-              Value: http://assets:8080   
+              Value: http://assets:8080
+            # ui -> downstream client timeouts. These MUST stay above the
+            # internal services' PerRequestTimeoutSeconds (3s, set on each
+            # ServiceConnectConfiguration below/above) so the Service Connect
+            # proxy times out first and can attribute the failure upstream,
+            # which is what enables its retries and outlier detection.
+            - Name: "ENDPOINTS_TIMEOUT_CONNECT_MILLIS"
+              Value: "1000"
+            - Name: "ENDPOINTS_TIMEOUT_READ_SECONDS"
+              Value: "10"
+            - Name: "ENDPOINTS_TIMEOUT_WRITE_SECONDS"
+              Value: "10"
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -1341,6 +1367,9 @@ Resources:
                 DnsName: ui
                 Port: 8080
             PortName: ui
+            Timeout:
+              PerRequestTimeoutSeconds: 15
+              IdleTimeoutSeconds: 300
       NetworkConfiguration:
         AwsvpcConfiguration:
           AssignPublicIp: DISABLED

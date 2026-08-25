@@ -68,12 +68,32 @@ public class Clients {
     @Value("${endpoints.http.keep-alive}")
     private boolean keepAlive;
 
+    // Downstream call timeouts.
+    //
+    // These form one half of a deliberate hierarchy with the Service Connect
+    // proxy timeouts set in deployment/ecs.yaml. The read timeout MUST stay
+    // ABOVE the internal services' PerRequestTimeoutSeconds (3s), so that the
+    // proxy times out first and can attribute the failure to the upstream
+    // task. That is what activates Service Connect's retry (2 attempts,
+    // avoiding the failed host) and its outlier detection / passive health
+    // checks. If this timeout drops below the proxy's, the client aborts first,
+    // the proxy records no upstream failure, and an unresponsive task is never
+    // ejected from the load-balancing pool.
+    @Value("${endpoints.timeout.connect-millis:1000}")
+    private int connectTimeoutMillis;
+
+    @Value("${endpoints.timeout.read-seconds:10}")
+    private int readTimeoutSeconds;
+
+    @Value("${endpoints.timeout.write-seconds:10}")
+    private int writeTimeoutSeconds;
+
     private WebClient createWebClient(ObjectMapper mapper, WebClient.Builder webClientBuilder) {
         TcpClient tcpClient = TcpClient.create()
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000) // Connection Timeout
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, connectTimeoutMillis)
                 .doOnConnected(connection ->
-                        connection.addHandlerLast(new ReadTimeoutHandler(10)) // Read Timeout
-                                .addHandlerLast(new WriteTimeoutHandler(10))); // Write Timeout
+                        connection.addHandlerLast(new ReadTimeoutHandler(readTimeoutSeconds))
+                                .addHandlerLast(new WriteTimeoutHandler(writeTimeoutSeconds)));
 
         ExchangeStrategies strategies = ExchangeStrategies
                 .builder()
