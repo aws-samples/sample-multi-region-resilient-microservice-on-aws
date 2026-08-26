@@ -849,12 +849,18 @@ Resources:
     Type: AWS::CloudWatch::CompositeAlarm
     Properties:
       AlarmName: !Sub "ngrh-region-switch-trigger${Env}"
+      # LclHomeHealthyAlarm is an inverted-sense alarm: it uses
+      # SuccessPercent >= 90, so its ALARM state means the LOCAL region is
+      # HEALTHY. The guard below must therefore reference ALARM(), not OK().
+      # Using OK() required the local region to be UNHEALTHY before a switch
+      # could fire, which blocked evacuation in exactly the scenario this
+      # alarm exists for.
       AlarmRule: !Sub >-
         ALARM(${RmtHomeFailedAlarm})
         AND ALARM(${RmtCartFailedAlarm})
         AND ALARM(${RmtCatalogFailedAlarm})
         AND ALARM(${RmtOrdersFailedAlarm})
-        AND OK(${LclHomeHealthyAlarm})
+        AND ALARM(${LclHomeHealthyAlarm})
 
 Outputs:
   RegionSwitchTriggerAlarmArn:
