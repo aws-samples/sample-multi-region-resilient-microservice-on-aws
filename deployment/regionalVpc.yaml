@@ -155,6 +155,23 @@ Resources:
 
   canaryBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_21
+            comment: >-
+              Versioning is deliberately NOT enabled. This bucket holds only
+              ephemeral artifacts that expire in 24h (canary run logs and
+              reports, ALB access logs). On a versioned bucket, lifecycle
+              expiration does not delete an object -- it inserts a delete
+              marker -- so the bucket accumulates a large, permanently
+              in-flight population of noncurrent versions and delete markers
+              (measured: ~195,000 markers in a 19-day deployment). Those
+              markers have no recovery value here and have to be enumerated
+              and deleted one page at a time at teardown, which is the
+              dominant cost of destroy-all. Without versioning, expiration
+              permanently removes the object and the marker mechanism does
+              not exist at all.
     Properties:
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -165,16 +182,13 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
-      VersioningConfiguration:
-        Status: Enabled
       LoggingConfiguration:
         LogFilePrefix: access-logs/
       LifecycleConfiguration:
         Rules:
-          # Canary artifacts are ephemeral. Versioning is enabled on this
-          # bucket, so expiring only current versions leaves noncurrent
-          # versions (and their delete markers) behind forever. Expire both,
-          # and abort dangling multipart uploads, so storage stays bounded.
+          # Canary artifacts are ephemeral: expire them after a day and abort
+          # dangling multipart uploads so storage stays bounded. On this
+          # (unversioned) bucket, expiration deletes the object outright.
           - Id: DeleteAfter24Hours
             Status: Enabled
             ExpirationInDays: 1
@@ -182,9 +196,13 @@ Resources:
               NoncurrentDays: 1
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
-          # Once a delete marker has no noncurrent versions behind it, remove
-          # it too (kept in a separate rule: ExpiredObjectDeleteMarker cannot
-          # coexist with ExpirationInDays in the same rule).
+          # Both version-oriented rules above/below are no-ops on a bucket
+          # that was never versioned, and are retained on purpose for the
+          # upgrade path: an already-deployed bucket that had versioning
+          # Enabled moves to Suspended (S3 has no path back to "never
+          # versioned"), and a versioning-SUSPENDED bucket still inserts a
+          # delete marker on every delete. Removing these rules would let
+          # markers accumulate forever on existing deployments.
           - Id: CleanupExpiredDeleteMarkers
             Status: Enabled
             ExpiredObjectDeleteMarker: true
