@@ -23,10 +23,12 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <java.version>17</java.version>
     <mapstruct.version>1.6.3</mapstruct.version>
-    <!-- Override Spring Boot 3.5.14 BOM (10.1.54) to patch CVE-2026-43515
-         (security constraints), CVE-2026-43512 (DIGEST auth bypass) and
-         CVE-2026-41293 (HTTP/2 header validation), fixed in 10.1.55. -->
-    <tomcat.version>10.1.57</tomcat.version>
+    <!-- Override Spring Boot 3.5.14 BOM (10.1.54) to patch CVE-2026-65182
+         (security constraint bypass), CVE-2026-65905 (DIGEST replay) and
+         CVE-2026-68525 (FORM auth method-constraint bypass), all fixed
+         after 10.1.57; plus the earlier CVE-2026-43515, CVE-2026-43512
+         and CVE-2026-41293 fixed in 10.1.55. -->
+    <tomcat.version>10.1.59</tomcat.version>
     <!-- Override Spring Boot 3.5.14 BOM (2.21.2) to patch CVE-2026-54512 and
          CVE-2026-54513 (jackson-databind PolymorphicTypeValidator bypasses)
          and GHSA-r7wm-3cxj-wff9 (jackson-core async parser maxNumberLength
