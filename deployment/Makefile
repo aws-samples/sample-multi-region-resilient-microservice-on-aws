@@ -824,17 +824,8 @@ destroy-dsql-both-regions: destroy-apps-primary destroy-apps-standby destroy-dsq
 	@echo "DSQL stacks deleted in both regions"
 
 destroy-databases-primary: destroy-apps-primary destroy-databases-standby destroy-dsql-both-regions destroy-secrets-rotation destroy-crdr-roles destroy-dsql-vpc-endpoint
-	@echo "Removing standby cluster from global cluster (if still attached)..."
-	@aws rds remove-from-global-cluster \
-		--global-cluster-identifier catalog-global-db-cluster$(ENV) \
-		--db-cluster-identifier arn:aws:rds:$(STANDBY_REGION):$(AWS_ACCOUNT_ID):cluster:catalog-dbcluster-02-$(STANDBY_REGION) \
-		--region $(PRIMARY_REGION) --no-cli-pager 2>/dev/null || true
-	@echo "Removing primary cluster from global cluster (if still attached)..."
-	@aws rds remove-from-global-cluster \
-		--global-cluster-identifier catalog-global-db-cluster$(ENV) \
-		--db-cluster-identifier arn:aws:rds:$(PRIMARY_REGION):$(AWS_ACCOUNT_ID):cluster:catalog-dbcluster-01-$(PRIMARY_REGION) \
-		--region $(PRIMARY_REGION) --no-cli-pager 2>/dev/null || true
-	@sleep 15
+	@echo "Ensuring the global cluster is fully detached (idempotent -- normally a no-op by now)..."
+	@./detach-global-cluster.sh catalog-global-db-cluster$(ENV) $(PRIMARY_REGION)
 	@aws rds delete-global-cluster --global-cluster-identifier catalog-global-db-cluster$(ENV) \
 		--region $(PRIMARY_REGION) --no-cli-pager 2>/dev/null || true
 	@echo "Deleting databases in ${PRIMARY_REGION}..."
@@ -843,13 +834,8 @@ destroy-databases-primary: destroy-apps-primary destroy-databases-standby destro
 	@aws cloudformation wait stack-delete-complete --stack-name carts-db-stack${ENV} --region ${PRIMARY_REGION}
 
 destroy-databases-standby: destroy-apps-standby destroy-dsql-both-regions destroy-restore-reconciliation-ssm destroy-crdr-roles destroy-dsql-vpc-endpoint-standby
-	@echo "Detaching standby Aurora cluster from global cluster..."
-	@aws rds remove-from-global-cluster \
-		--global-cluster-identifier catalog-global-db-cluster$(ENV) \
-		--db-cluster-identifier arn:aws:rds:$(STANDBY_REGION):$(AWS_ACCOUNT_ID):cluster:catalog-dbcluster-02-$(STANDBY_REGION) \
-		--region $(PRIMARY_REGION) --no-cli-pager 2>/dev/null || true
-	@echo "Waiting for standby cluster to detach..."
-	@sleep 30
+	@echo "Detaching all clusters from the global cluster (readers first, writer last)..."
+	@./detach-global-cluster.sh catalog-global-db-cluster$(ENV) $(PRIMARY_REGION)
 	@echo "Deleting databases in ${STANDBY_REGION}..."
 	@./safe-delete-db-stack.sh catalog-db-stack${ENV} ${STANDBY_REGION} aurora DBCluster
 

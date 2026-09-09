@@ -92,11 +92,39 @@ elif [ "$RESOURCE_TYPE" = "dsql" ]; then
 fi
 
 if [ "$RESOURCE_EXISTS" = "false" ]; then
-    echo "Resource $LOGICAL_ID is already gone. Retrying stack delete with --retain-resources..."
+    echo "Resource $LOGICAL_ID is already gone."
 else
-    echo "Resource deleted directly. Retrying stack delete with --retain-resources..."
+    echo "Resource deleted directly."
 fi
 
-aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION" --retain-resources "$LOGICAL_ID"
+# Retain ONLY the resources CloudFormation actually failed to delete -- and
+# prefer retaining nothing at all.
+#
+# The previous version always passed "$LOGICAL_ID" (the cluster). That is the
+# wrong set twice over: the resource that failed was typically the DB *instance*,
+# not the cluster, and retaining a cluster that still exists removes the stack
+# while leaving a live Aurora cluster orphaned -- billing with no stack left to
+# find it by. Observed live: catalog-db-stack had DBInstance2 in DELETE_FAILED
+# while DBCluster sat untouched at CREATE_COMPLETE.
+#
+# The steps above already removed the underlying cluster and instances, so the
+# normal path is a plain retry that CloudFormation completes cleanly. Retention
+# is the loud exception, not the silent default.
+FAILED_RESOURCES=$(aws cloudformation describe-stack-resources \
+    --stack-name "$STACK_NAME" --region "$REGION" \
+    --query 'StackResources[?ResourceStatus==`DELETE_FAILED`].LogicalResourceId' \
+    --output text 2>/dev/null)
+
+if [ -z "$FAILED_RESOURCES" ]; then
+    echo "Retrying stack deletion (nothing needs retaining)..."
+    aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
+else
+    echo "WARNING: retaining [$FAILED_RESOURCES] -- these survive the stack and" >&2
+    echo "WARNING: must be cleaned up manually or they will bill indefinitely." >&2
+    # shellcheck disable=SC2086 # intentional word-splitting: may be several IDs
+    aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION" \
+        --retain-resources $FAILED_RESOURCES
+fi
+
 aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION"
 echo "$STACK_NAME cleaned up successfully"
