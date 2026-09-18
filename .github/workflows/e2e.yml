@@ -35,7 +35,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
       - name: Set ENV to short sha
-        run: echo "ENV=-$(echo ${{ github.event.pull_request.head.sha || github.sha }} | cut -c1-7)" >> $GITHUB_ENV
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: echo "ENV=-${SHA:0:7}" >> "$GITHUB_ENV"
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
