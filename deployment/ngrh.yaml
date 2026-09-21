@@ -27,6 +27,14 @@ Parameters:
 
 Resources:
 
+  # cfn-lint has no bundled schema for the AWS::ResilienceHubV2::* resource
+  # types, so it reports every one of them as E3006 "does not exist in
+  # us-east-1". The types are real and deploy successfully; the linter simply
+  # does not know them yet. E3006 is therefore suppressed per resource below
+  # rather than globally, so the check keeps guarding genuinely misspelled
+  # resource types everywhere else in this repo, and every other cfn-lint
+  # rule still applies to this template.
+
   # -------------------------------------------------------------------------
   # Shared NGRH bucket — reports go under /reports/, design files under
   # /design-files/. Name is CFN-generated (random suffix) to avoid collisions.
@@ -102,6 +110,11 @@ Resources:
   # NOTE: AvailabilitySlo.Target units to confirm at test time (expected %).
   # -------------------------------------------------------------------------
   TierOnePolicy:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Policy
     Properties:
       Name: !Sub "ngrh-tier1${Env}"
@@ -115,6 +128,11 @@ Resources:
         DisasterRecoveryApproach: ACTIVE_ACTIVE
 
   TierTwoPolicy:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Policy
     Properties:
       Name: !Sub "ngrh-tier2${Env}"
@@ -131,6 +149,11 @@ Resources:
   # System (the application container).
   # -------------------------------------------------------------------------
   System:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::System
     Properties:
       Name: !Sub "resilient-microservice${Env}"
@@ -140,6 +163,11 @@ Resources:
   # User Journeys.
   # -------------------------------------------------------------------------
   BrowseJourney:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::UserJourney
     Properties:
       SystemIdentifier: !GetAtt System.SystemArn
@@ -147,6 +175,11 @@ Resources:
       Description: "Home page, product listing, product detail"
 
   CheckoutJourney:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::UserJourney
     Properties:
       SystemIdentifier: !GetAtt System.SystemArn
@@ -154,6 +187,11 @@ Resources:
       Description: "Shipping -> delivery -> payment -> confirm -> order"
 
   CartJourney:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::UserJourney
     Properties:
       SystemIdentifier: !GetAtt System.SystemArn
@@ -161,6 +199,11 @@ Resources:
       Description: "Add/remove items, view cart"
 
   ViewOrdersJourney:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::UserJourney
     Properties:
       SystemIdentifier: !GetAtt System.SystemArn
@@ -182,6 +225,11 @@ Resources:
   # are retained.
   # -------------------------------------------------------------------------
   UiService:
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Service
     Properties:
       Name: !Sub "ui${Env}"
@@ -229,6 +277,11 @@ Resources:
 
   CatalogService:
     DependsOn: UiService
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Service
     Properties:
       Name: !Sub "catalog${Env}"
@@ -280,6 +333,11 @@ Resources:
 
   CartService:
     DependsOn: CatalogService
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Service
     Properties:
       Name: !Sub "cart${Env}"
@@ -320,6 +378,11 @@ Resources:
 
   CheckoutService:
     DependsOn: CartService
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Service
     Properties:
       Name: !Sub "checkout${Env}"
@@ -359,6 +422,11 @@ Resources:
 
   OrdersService:
     DependsOn: CheckoutService
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Service
     Properties:
       Name: !Sub "orders${Env}"
@@ -405,6 +473,11 @@ Resources:
 
   AssetsService:
     DependsOn: OrdersService
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3006
     Type: AWS::ResilienceHubV2::Service
     Properties:
       Name: !Sub "assets${Env}"

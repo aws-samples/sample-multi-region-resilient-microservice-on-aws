@@ -91,6 +91,16 @@ Resources:
   # SSM, CloudWatch (logs/metrics/alarms/dashboards/synthetics), SNS, EventBridge,
   # CodeBuild, ApplicationAutoScaling, FIS. All scoped to us-east-1 / us-west-2.
   RegionalServicesPolicy:
+    Metadata:
+      # cfn-lint validates IAM actions against a bundled list that lags new APIs.
+      # dynamodb:DescribeGlobalTableWitness and dynamodb:UpdateGlobalTableWitness
+      # are real actions on the DynamoDB global-table witness API -- cfn-lint
+      # already knows their Create and Delete siblings -- so W3037 is a false
+      # positive. Scoped here so typo'd actions elsewhere are still caught.
+      cfn-lint:
+        config:
+          ignore_checks:
+            - W3037
     Type: AWS::IAM::ManagedPolicy
     Properties:
       PolicyDocument:

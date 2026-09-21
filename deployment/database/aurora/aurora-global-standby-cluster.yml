@@ -121,6 +121,15 @@ Resources:
       Description: !Sub 'The arn of the ${NamingPrefix} Secret'
       Value: !Ref DBSecretArn
   DBCluster:
+    Metadata:
+      # cfn-lint validates EngineVersion against a bundled enum that lags Aurora
+      # releases. 8.0.mysql_aurora.3.10.4 is generally available (2026-03-30,
+      # MySQL 8.0.42-compatible) but is absent from that list, so E3690 is a
+      # false positive. Must stay in step with the primary cluster template.
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3690
     DependsOn:
       - SubnetGroup
     Type: AWS::RDS::DBCluster

@@ -162,6 +162,15 @@ Resources:
       SourceDBClusterIdentifier: !Ref DBCluster
   DBCluster:
     Metadata:
+      # cfn-lint validates EngineVersion against a bundled enum that lags Aurora
+      # releases. 8.0.mysql_aurora.3.10.4 is generally available (2026-03-30,
+      # MySQL 8.0.42-compatible) but is absent from that list, so E3690 is a
+      # false positive. Scoped to this resource so the check still guards every
+      # other engine version in the repo.
+      cfn-lint:
+        config:
+          ignore_checks:
+            - E3690
       cdk_nag:
         rules_to_suppress:
           - id: AwsSolutions-RDS10
