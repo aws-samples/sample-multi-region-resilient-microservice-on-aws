@@ -169,7 +169,7 @@ Resources:
                                   - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
-                          TimeoutMinutes: 15
+                          TimeoutMinutes: 10
                     - Name: scale-orders
                       ExecutionBlockType: ECSServiceScaling
                       ExecutionBlockConfiguration:
@@ -187,7 +187,7 @@ Resources:
                                   - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
-                          TimeoutMinutes: 15
+                          TimeoutMinutes: 10
                     - Name: scale-assets
                       ExecutionBlockType: ECSServiceScaling
                       ExecutionBlockConfiguration:
@@ -205,7 +205,7 @@ Resources:
                                   - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
-                          TimeoutMinutes: 15
+                          TimeoutMinutes: 10
                     - Name: scale-catalog
                       ExecutionBlockType: ECSServiceScaling
                       ExecutionBlockConfiguration:
@@ -223,7 +223,7 @@ Resources:
                                   - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
-                          TimeoutMinutes: 15
+                          TimeoutMinutes: 10
                     - Name: scale-checkout
                       ExecutionBlockType: ECSServiceScaling
                       ExecutionBlockConfiguration:
@@ -241,7 +241,7 @@ Resources:
                                   - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
-                          TimeoutMinutes: 15
+                          TimeoutMinutes: 10
                     - Name: scale-ui
                       ExecutionBlockType: ECSServiceScaling
                       ExecutionBlockConfiguration:
@@ -259,7 +259,7 @@ Resources:
                                   - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
-                          TimeoutMinutes: 15
+                          TimeoutMinutes: 10
             - Name: failover-catalog-db
               ExecutionBlockType: AuroraGlobalDatabase
               ExecutionBlockConfiguration:
@@ -271,7 +271,7 @@ Resources:
                   Behavior: switchoverOnly
                   Ungraceful:
                     Ungraceful: failover
-                  TimeoutMinutes: 20
+                  TimeoutMinutes: 10
             - Name: shift-dns-traffic-away
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:
