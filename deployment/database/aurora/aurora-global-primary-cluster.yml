@@ -175,6 +175,11 @@ Resources:
       - DBIamRoleForMonitoring
       - DBCredentialsSecret
     Type: AWS::RDS::DBCluster
+    # The default DeletionPolicy for a DB cluster is Snapshot, so every teardown
+    # left a manual cluster snapshot behind, encrypted with a storage key that is
+    # scheduled for deletion by the same teardown. The catalog is loaded by an
+    # external, re-runnable process, so there is nothing in the cluster to keep.
+    DeletionPolicy: Delete
     Properties:
       ServerlessV2ScalingConfiguration:
         MinCapacity: 1

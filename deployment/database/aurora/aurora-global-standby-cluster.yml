@@ -124,6 +124,8 @@ Resources:
     DependsOn:
       - SubnetGroup
     Type: AWS::RDS::DBCluster
+    # See the primary template: no snapshot on delete, the catalog is re-loadable.
+    DeletionPolicy: Delete
     Properties:
       ServerlessV2ScalingConfiguration:
         MinCapacity: 1
