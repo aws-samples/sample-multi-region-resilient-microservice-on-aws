@@ -327,7 +327,16 @@ e2e.addJob('e2e', {
     { name: 'Checkout', uses: 'actions/checkout@v4' },
     {
       name: 'Set ENV to short sha',
-      run: 'echo "ENV=-$(echo ${{ github.event.pull_request.head.sha || github.sha }} | cut -c1-7)" >> $GITHUB_ENV',
+      // Pass the github context value through an intermediate env var
+      // instead of expanding it inside the shell script. Expression
+      // expansion happens before the shell runs, so a context value
+      // interpolated into `run:` is a script-injection vector (ACAT rule
+      // "Script Injection in GitHub Actions workflows"; Aristotle #427).
+      // Bash parameter expansion of "$SHA" does not re-parse its contents.
+      env: {
+        SHA: '${{ github.event.pull_request.head.sha || github.sha }}',
+      },
+      run: 'echo "ENV=-${SHA:0:7}" >> "$GITHUB_ENV"',
     },
     {
       name: 'Configure AWS credentials',
