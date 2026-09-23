@@ -217,10 +217,15 @@ jobs:
               aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region "$region" || true
             done
             # baseVpc: standby first (peering connection lives on standby side).
-            aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.STANDBY_REGION }} || true
-            aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.STANDBY_REGION }} || true
-            aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
-            aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+            # delete-vpc-stack.sh empties the canary bucket immediately before each
+            # attempt and retries when the bucket alone fails. destroy-apps-* emptied
+            # it early in destroy-all, but the ALB it then deleted kept delivering
+            # access logs for about a minute, and the bucket's own S3 access logs
+            # land hours later, so a plain delete here fails on canaryBucket ("The
+            # bucket you tried to delete is not empty") -- run 35887370433 lost its
+            # standby baseVpc to three ALB log objects written 33s after the empty.
+            ./delete-vpc-stack.sh baseVpc${{ env.ENV }} ${{ env.STANDBY_REGION }} || true
+            ./delete-vpc-stack.sh baseVpc${{ env.ENV }} ${{ env.AWS_REGION }} || true
           fi
 
           # Delete ECR repos in both regions.

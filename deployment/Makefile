@@ -702,12 +702,15 @@ destroy-infra: destroy-self-update destroy-convergence-watcher destroy-ecr-stand
 	@aws cloudformation wait stack-delete-complete --stack-name baseInfra${ENV} --region ${STANDBY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name baseInfra${ENV} --region ${PRIMARY_REGION}
 	@echo "Networking resources deleted in both regions"
+	# delete-vpc-stack.sh empties the canary bucket immediately before each
+	# delete. destroy-apps-* emptied it much earlier, but the ALB keeps
+	# delivering access logs for about a minute after that, and the bucket's
+	# own S3 access logs land hours later, so by now it is not empty again and
+	# CloudFormation would fail the stack on canaryBucket.
 	@echo "Deleting standby VPC first (depends on primary VPC secret for peering)..."
-	@aws cloudformation delete-stack --stack-name baseVpc${ENV} --region ${STANDBY_REGION}
-	@aws cloudformation wait stack-delete-complete --stack-name baseVpc${ENV} --region ${STANDBY_REGION}
+	./delete-vpc-stack.sh baseVpc${ENV} ${STANDBY_REGION}
 	@echo "Deleting primary VPC..."
-	@aws cloudformation delete-stack --stack-name baseVpc${ENV} --region ${PRIMARY_REGION}
-	@aws cloudformation wait stack-delete-complete --stack-name baseVpc${ENV} --region ${PRIMARY_REGION}
+	./delete-vpc-stack.sh baseVpc${ENV} ${PRIMARY_REGION}
 	@echo "VPCs deleted in both regions"
 
 destroy-apps-primary: destroy-canaries-primary destroy-canaries-standby destroy-global_routing

@@ -7,12 +7,14 @@ conflicts we've encountered in production.
 Run with:  pytest tests/test_makefile_dependencies.py -v
 """
 
+import os
 import re
 import pytest
 from pathlib import Path
 from collections import defaultdict, deque
 
-MAKEFILE_PATH = Path(__file__).parent.parent / "deployment" / "Makefile"
+DEPLOYMENT_DIR = Path(__file__).parent.parent / "deployment"
+MAKEFILE_PATH = DEPLOYMENT_DIR / "Makefile"
 
 
 # ---------------------------------------------------------------------------
@@ -344,14 +346,19 @@ class TestDestroyOrdering:
             f"(standby at line {standby}, primary at line {primary})"
         )
 
+    # baseVpc is deleted through delete-vpc-stack.sh (which empties the canary
+    # bucket immediately before the delete), so a "baseVpc delete" in this
+    # recipe is the helper invocation, not a bare delete-stack.
+    BASEVPC_DELETE = r"delete-vpc-stack\.sh baseVpc\$\{ENV\}"
+
     def test_destroy_infra_basevpc_standby_before_primary(self):
         """Peering must be removed from standby side first."""
         recipe = parse_recipe(MAKEFILE_PATH, "destroy-infra")
         standby = self._recipe_index(
-            recipe, r"delete-stack.*baseVpc.*\$\{STANDBY_REGION\}"
+            recipe, self.BASEVPC_DELETE + r" \$\{STANDBY_REGION\}"
         )
         primary = self._recipe_index(
-            recipe, r"delete-stack.*baseVpc.*\$\{PRIMARY_REGION\}"
+            recipe, self.BASEVPC_DELETE + r" \$\{PRIMARY_REGION\}"
         )
         assert standby >= 0, "destroy-infra recipe missing baseVpc standby delete"
         assert primary >= 0, "destroy-infra recipe missing baseVpc primary delete"
@@ -361,6 +368,17 @@ class TestDestroyOrdering:
             f"(standby at line {standby}, primary at line {primary})"
         )
 
+    def test_destroy_infra_deletes_basevpc_through_the_bucket_emptying_helper(self):
+        """A bare delete-stack on baseVpc fails on canaryBucket: the ALB keeps
+        delivering access logs after destroy-apps emptied the bucket, and the
+        bucket logs its own S3 access hours later (e2e run 35887370433)."""
+        recipe = parse_recipe(MAKEFILE_PATH, "destroy-infra")
+        assert not any(re.search(r"delete-stack.*baseVpc", line) for line in recipe), (
+            "baseVpc must be deleted via delete-vpc-stack.sh, not a bare delete-stack"
+        )
+        helper = DEPLOYMENT_DIR / "delete-vpc-stack.sh"
+        assert helper.exists() and os.access(helper, os.X_OK)
+
     def test_destroy_infra_baseinfra_before_basevpc(self):
         """baseInfra (subnets, route tables) depends on baseVpc; tear down in order."""
         recipe = parse_recipe(MAKEFILE_PATH, "destroy-infra")
@@ -369,7 +387,7 @@ class TestDestroyOrdering:
         for i, line in enumerate(recipe):
             if re.search(r"delete-stack.*baseInfra", line):
                 last_baseinfra = max(last_baseinfra, i)
-            if re.search(r"delete-stack.*baseVpc", line):
+            if re.search(self.BASEVPC_DELETE, line):
                 first_basevpc = min(first_basevpc, i)
         assert last_baseinfra >= 0, "destroy-infra recipe missing baseInfra deletes"
         assert first_basevpc < len(recipe), "destroy-infra recipe missing baseVpc deletes"
