@@ -133,6 +133,48 @@ jobs:
           echo "Cleaning up e2e environment..."
           make destroy-all ENV=${{ env.ENV }} || true
 
+          # destroy-all stops at its first failing target, so a stall anywhere in
+          # the database chain leaves every stack queued behind it -- secrets-rotation,
+          # codebuild, arc-dns-status, chaos, monitoring, ... -- untouched, and the
+          # secrets-rotation Lambda's ENIs then pin baseInfra's subnets. Sweep every
+          # stack of this run that is neither a database nor a VPC stack first, which
+          # is the Makefile's own order (those go before the databases, the VPC stacks
+          # last). A second pass retries whatever landed in DELETE_FAILED, typically a
+          # security group whose Lambda ENIs had not yet been released.
+          is_db_or_vpc() {
+            case "$1" in
+              baseInfra${{ env.ENV }}|baseVpc${{ env.ENV }}|catalog-db-stack${{ env.ENV }}|carts-db-stack${{ env.ENV }}|orders-dsql-stack${{ env.ENV }}) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          sweep_pass() {
+            local region name
+            for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+              for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, '${{ env.ENV }}') && !ends_with(StackStatus, '_IN_PROGRESS')].StackName" --output text 2>/dev/null || true); do
+                is_db_or_vpc "$name" && continue
+                echo "$region: $name still present, deleting"
+                aws cloudformation delete-stack --stack-name "$name" --region "$region" || true
+              done
+            done
+          }
+          settle() {
+            # Wait until no swept stack is still in progress (45 min cap per pass).
+            local i region name busy
+            for i in $(seq 1 90); do
+              busy=""
+              for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+                for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, '${{ env.ENV }}') && ends_with(StackStatus, '_IN_PROGRESS')].StackName" --output text 2>/dev/null || true); do
+                  is_db_or_vpc "$name" || busy="$busy $region/$name"
+                done
+              done
+              [ -z "$busy" ] && return 0
+              sleep 30
+            done
+            echo "::warning::Still deleting after 45 min:$busy"
+          }
+          sweep_pass; settle
+          sweep_pass; settle
+
           # Belt-and-suspenders, in the order the Makefile itself uses.
           # baseInfra owns the interface VPC endpoints and baseVpc owns the
           # retail-store-ar CMK that encrypts every database credentials secret.

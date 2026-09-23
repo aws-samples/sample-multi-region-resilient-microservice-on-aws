@@ -28,8 +28,8 @@ set -uo pipefail
 GLOBAL_CLUSTER=${1:?usage: detach-global-cluster.sh <global-cluster-id> <region>}
 REGION=${2:?usage: detach-global-cluster.sh <global-cluster-id> <region>}
 
-POLL_ATTEMPTS=40
-POLL_SLEEP=15
+POLL_ATTEMPTS=${POLL_ATTEMPTS:-40}
+POLL_SLEEP=${POLL_SLEEP:-15}
 
 # Emits "<DBClusterArn>\t<IsWriter>" per member; empty output means no members.
 # stderr is folded into stdout so callers can inspect the failure text.
@@ -85,34 +85,74 @@ fi
 echo "Global cluster $GLOBAL_CLUSTER members:"
 echo "$OUT" | sed 's/^/  /'
 
-# Readers first. The writer is only removable once it is the last member.
-echo "$OUT" | awk '$2=="False" {print $1}' | while read -r arn; do
-    [ -n "$arn" ] && detach_one "$arn"
+# Poll membership until a condition holds. $1 is "readers" (wait until no
+# non-writer member is listed) or "all" (wait until no member is listed).
+# Returns 0 when the condition holds or the global cluster is gone, 1 when the
+# cluster cannot be described, 2 on timeout. Leaves the last listing in $OUT.
+wait_for() {
+    local what=$1 _
+    for _ in $(seq 1 "$POLL_ATTEMPTS"); do
+        if ! OUT=$(members); then
+            if gone "$OUT"; then
+                echo "Global cluster $GLOBAL_CLUSTER no longer exists."
+                OUT=""
+                return 0
+            fi
+            echo "ERROR: cannot re-describe global cluster $GLOBAL_CLUSTER:" >&2
+            echo "$OUT" >&2
+            return 1
+        fi
+        case "$what" in
+            readers) [ -z "$(echo "$OUT" | awk '$2=="False"')" ] && return 0 ;;
+            all)     [ -z "$OUT" ] && return 0 ;;
+        esac
+        sleep "$POLL_SLEEP"
+    done
+    return 2
+}
+
+# Readers first. RemoveFromGlobalCluster is asynchronous: the call returns while
+# the member is still listed, and Aurora rejects the writer's removal for as long
+# as ANY other member is listed ("Can't remove writer cluster when there are
+# other clusters"). Issuing the writer detach straight after the readers' is
+# therefore a race the writer loses whenever the reader has not finished
+# leaving -- which is what stranded destroy-all on its database step. So: detach
+# the readers, wait until only the writer is listed, and only then detach it.
+#
+# Plain for-loops rather than `... | while read`: a pipeline runs its body in a
+# subshell, so a failed detach there cannot stop this script, and the writer
+# detach would be attempted regardless.
+readers=$(echo "$OUT" | awk '$2=="False" {print $1}')
+writer=$(echo "$OUT" | awk '$2=="True" {print $1}')
+
+for arn in $readers; do
+    detach_one "$arn" || exit 1
 done
-echo "$OUT" | awk '$2=="True" {print $1}' | while read -r arn; do
-    [ -n "$arn" ] && detach_one "$arn"
+
+if [ -n "$readers" ]; then
+    echo "Waiting for the reader detach to complete before touching the writer..."
+    wait_for readers
+    case $? in
+        1) exit 1 ;;
+        2) echo "ERROR: $GLOBAL_CLUSTER still lists a reader after $((POLL_ATTEMPTS * POLL_SLEEP))s:" >&2
+           echo "$OUT" >&2
+           exit 1 ;;
+    esac
+fi
+
+for arn in $writer; do
+    detach_one "$arn" || exit 1
 done
 
 # Confirm membership actually reached zero. The previous code used a bare
 # `sleep 30` and assumed success, which is how the silent failure above went
 # unnoticed for so long.
-for _ in $(seq 1 "$POLL_ATTEMPTS"); do
-    if ! OUT=$(members); then
-        if gone "$OUT"; then
-            echo "Global cluster $GLOBAL_CLUSTER no longer exists."
-            exit 0
-        fi
-        echo "ERROR: cannot re-describe global cluster $GLOBAL_CLUSTER:" >&2
-        echo "$OUT" >&2
-        exit 1
-    fi
-    if [ -z "$OUT" ]; then
-        echo "All members detached from $GLOBAL_CLUSTER."
-        exit 0
-    fi
-    sleep "$POLL_SLEEP"
-done
-
-echo "ERROR: $GLOBAL_CLUSTER still has members after $((POLL_ATTEMPTS * POLL_SLEEP))s:" >&2
-echo "$OUT" >&2
-exit 1
+wait_for all
+case $? in
+    0) echo "All members detached from $GLOBAL_CLUSTER."
+       exit 0 ;;
+    1) exit 1 ;;
+    *) echo "ERROR: $GLOBAL_CLUSTER still has members after $((POLL_ATTEMPTS * POLL_SLEEP))s:" >&2
+       echo "$OUT" >&2
+       exit 1 ;;
+esac
