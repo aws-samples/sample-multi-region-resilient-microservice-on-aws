@@ -38,6 +38,8 @@ Resources:
         skip:
           - id: CKV_AWS_111
             comment: "ecs:RegisterTaskDefinition/DeregisterTaskDefinition and List* do not support resource-level permissions and require Resource '*'. All scopable write actions (UpdateService, UpdateStack, ECR push) are constrained to apps/self-update resources."
+          - id: CKV_AWS_107
+            comment: "sts:GetServiceBearerToken is required to authenticate docker pulls against the ECR Public Gallery (aws ecr-public get-login-password). It mints a token usable only with ECR Public and supports no resource-level permissions."
     Properties:
       RoleName: !Sub 'mr-app-self-update-role${Env}'
       AssumeRolePolicyDocument:
@@ -53,7 +55,17 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: ecr:GetAuthorizationToken
+                Action:
+                  - ecr:GetAuthorizationToken
+                  # Authenticated pulls from the ECR Public Gallery, where the
+                  # service base images live. Anonymous pulls share a rate
+                  # limit across every CodeBuild tenant behind the same egress
+                  # IP; authenticated pulls get a per-account limit.
+                  # (Docker Hub anonymous pulls returned HTTP 429 and failed
+                  # five of six image builds on 2026-09-25.) Neither action
+                  # supports resource-level permissions.
+                  - ecr-public:GetAuthorizationToken
+                  - sts:GetServiceBearerToken
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -226,10 +238,26 @@ Resources:
                 - TAG=$(git rev-parse --short=7 HEAD)
                 - echo "Repave from main @ $TAG"
                 - for R in $PRIMARY_REGION $STANDBY_REGION; do aws ecr get-login-password --region $R | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com; done
+                # Base images come from the ECR Public Gallery. Log in so the
+                # pulls are authenticated (per-account rate limit) rather than
+                # anonymous (shared per-IP limit). The ECR Public API lives in
+                # us-east-1 regardless of where this project runs.
+                - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
             build:
+              # Without this, CodeBuild runs post_build after a FAILED build
+              # phase (see "Build phase transitions" in the CodeBuild guide),
+              # and post_build would roll the apps stack forward to a Tag
+              # whose images were never pushed. Observed 2026-09-25: five of
+              # six image builds failed, both regions still got the Tag
+              # update, and ECS spent two hours failing to pull images that
+              # did not exist. ABORT ends the build here instead.
+              on-failure: ABORT
               commands:
-                # 1. Rebuild every service image from current main (fresh base layers)
+                # 1. Rebuild every service image from current main (fresh base layers).
+                #    set -e: stop at the first failed build instead of tagging and
+                #    pushing an image that does not exist and moving on to the next.
                 - |
+                  set -e
                   for ENTRY in catalog:catalog checkout:checkout ui:ui carts:cart assets:assets orders:orders; do
                     SVC=${ENTRY%%:*}; SRC=${ENTRY##*:}
                     echo "Building $SVC from source/$SRC..."
@@ -241,6 +269,7 @@ Resources:
                   done
                 # 2. Re-mirror observability sidecars at the pinned versions
                 - |
+                  set -e
                   for ENTRY in $(grep -oE 'public\.ecr\.aws/[a-z-]+/[a-z-]+:[a-zA-Z0-9.]+' deployment/mirror-sidecar-buildspec.yml | sort -u); do
                     NAME=$(basename ${ENTRY%%:*}); TAG_VAL=${ENTRY##*:}
                     docker pull $ENTRY
