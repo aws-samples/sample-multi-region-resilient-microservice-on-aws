@@ -133,16 +133,100 @@ jobs:
           echo "Cleaning up e2e environment..."
           make destroy-all ENV=${{ env.ENV }} || true
 
-          # Belt-and-suspenders: ensure VPC stacks are gone in both regions.
+          # destroy-all stops at its first failing target, so a stall anywhere in
+          # the database chain leaves every stack queued behind it -- secrets-rotation,
+          # codebuild, arc-dns-status, chaos, monitoring, ... -- untouched, and the
+          # secrets-rotation Lambda's ENIs then pin baseInfra's subnets. Sweep every
+          # stack of this run that is neither a database nor a VPC stack first, which
+          # is the Makefile's own order (those go before the databases, the VPC stacks
+          # last). A second pass retries whatever landed in DELETE_FAILED, typically a
+          # security group whose Lambda ENIs had not yet been released.
+          is_db_or_vpc() {
+            case "$1" in
+              baseInfra${{ env.ENV }}|baseVpc${{ env.ENV }}|catalog-db-stack${{ env.ENV }}|carts-db-stack${{ env.ENV }}|orders-dsql-stack${{ env.ENV }}) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          sweep_pass() {
+            local region name
+            for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+              for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, '${{ env.ENV }}') && !ends_with(StackStatus, '_IN_PROGRESS')].StackName" --output text 2>/dev/null || true); do
+                is_db_or_vpc "$name" && continue
+                echo "$region: $name still present, deleting"
+                aws cloudformation delete-stack --stack-name "$name" --region "$region" || true
+              done
+            done
+          }
+          settle() {
+            # Wait until no swept stack is still in progress (45 min cap per pass).
+            local i region name busy
+            for i in $(seq 1 90); do
+              busy=""
+              for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+                for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, '${{ env.ENV }}') && ends_with(StackStatus, '_IN_PROGRESS')].StackName" --output text 2>/dev/null || true); do
+                  is_db_or_vpc "$name" || busy="$busy $region/$name"
+                done
+              done
+              [ -z "$busy" ] && return 0
+              sleep 30
+            done
+            echo "::warning::Still deleting after 45 min:$busy"
+          }
+          sweep_pass; settle
+          sweep_pass; settle
+
+          # Belt-and-suspenders, in the order the Makefile itself uses.
+          # baseInfra owns the interface VPC endpoints and baseVpc owns the
+          # retail-store-ar CMK that encrypts every database credentials secret.
+          # Deleting either while a database stack is still present leaves that
+          # stack unable to finish: its custom-resource callback has no route out
+          # of the VPC, or CloudFormation cannot resolve a secret whose key is
+          # pending deletion. Both end with Aurora running and billing. So the
+          # databases go first, through the same helpers destroy-all uses (detach
+          # the global cluster, standby catalog stack before the primary because
+          # its instances resolve a secret the primary owns, direct RDS delete and
+          # a retained retry on DELETE_FAILED), and the VPC stacks are touched only
+          # once no database stack remains in either region.
+          present() { aws cloudformation describe-stacks --stack-name "$1" --region "$2" >/dev/null 2>&1; }
+          if present catalog-db-stack${{ env.ENV }} ${{ env.STANDBY_REGION }} || present catalog-db-stack${{ env.ENV }} ${{ env.AWS_REGION }}; then
+            ./detach-global-cluster.sh catalog-global-db-cluster${{ env.ENV }} ${{ env.AWS_REGION }} || true
+            ./safe-delete-db-stack.sh catalog-db-stack${{ env.ENV }} ${{ env.STANDBY_REGION }} aurora DBCluster || true
+            aws rds delete-global-cluster --global-cluster-identifier catalog-global-db-cluster${{ env.ENV }} --region ${{ env.AWS_REGION }} --no-cli-pager 2>/dev/null || true
+            ./safe-delete-db-stack.sh catalog-db-stack${{ env.ENV }} ${{ env.AWS_REGION }} aurora DBCluster || true
+          fi
           for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
-            aws cloudformation delete-stack --stack-name baseInfra${{ env.ENV }} --region "$region" || true
-            aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region "$region" || true
+            if present orders-dsql-stack${{ env.ENV }} "$region"; then
+              ./safe-delete-db-stack.sh orders-dsql-stack${{ env.ENV }} "$region" dsql OrdersDsqlCluster || true
+            fi
+            if present carts-db-stack${{ env.ENV }} "$region"; then
+              aws cloudformation delete-stack --stack-name carts-db-stack${{ env.ENV }} --region "$region" || true
+              aws cloudformation wait stack-delete-complete --stack-name carts-db-stack${{ env.ENV }} --region "$region" || true
+            fi
           done
-          # baseVpc: standby first (peering connection lives on standby side).
-          aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.STANDBY_REGION }} || true
-          aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.STANDBY_REGION }} || true
-          aws cloudformation delete-stack --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
-          aws cloudformation wait stack-delete-complete --stack-name baseVpc${{ env.ENV }} --region ${{ env.AWS_REGION }} || true
+          remaining=""
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            for stack in catalog-db-stack${{ env.ENV }} carts-db-stack${{ env.ENV }} orders-dsql-stack${{ env.ENV }}; do
+              if present "$stack" "$region"; then remaining="$remaining $region/$stack"; fi
+            done
+          done
+          if [ -n "$remaining" ]; then
+            echo "::warning::Database stacks still present, leaving baseInfra and baseVpc in place so a retry can finish:$remaining"
+          else
+            for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+              aws cloudformation delete-stack --stack-name baseInfra${{ env.ENV }} --region "$region" || true
+              aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region "$region" || true
+            done
+            # baseVpc: standby first (peering connection lives on standby side).
+            # delete-vpc-stack.sh empties the canary bucket immediately before each
+            # attempt and retries when the bucket alone fails. destroy-apps-* emptied
+            # it early in destroy-all, but the ALB it then deleted kept delivering
+            # access logs for about a minute, and the bucket's own S3 access logs
+            # land hours later, so a plain delete here fails on canaryBucket ("The
+            # bucket you tried to delete is not empty") -- run 35887370433 lost its
+            # standby baseVpc to three ALB log objects written 33s after the empty.
+            ./delete-vpc-stack.sh baseVpc${{ env.ENV }} ${{ env.STANDBY_REGION }} || true
+            ./delete-vpc-stack.sh baseVpc${{ env.ENV }} ${{ env.AWS_REGION }} || true
+          fi
 
           # Delete ECR repos in both regions.
           for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
@@ -158,6 +242,18 @@ jobs:
             done
           done
 
-          echo "Teardown complete"
+          # Say what is left. Every stack of this run carries the ENV suffix, so an
+          # empty list is the only real proof the estate is gone; the ECS clusters
+          # and Aurora instances are what bill when it is not.
+          left=""
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            names=$(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, '${{ env.ENV }}')].StackName" --output text 2>/dev/null || true)
+            if [ -n "$names" ]; then left="$left $region: $names"; fi
+          done
+          if [ -n "$left" ]; then
+            echo "::warning::Teardown incomplete, stacks still present:$left"
+          else
+            echo "Teardown complete"
+          fi
         working-directory: deployment
     timeout-minutes: 300

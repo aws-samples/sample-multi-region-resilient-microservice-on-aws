@@ -124,6 +124,8 @@ Resources:
     DependsOn:
       - SubnetGroup
     Type: AWS::RDS::DBCluster
+    # See the primary template: no snapshot on delete, the catalog is re-loadable.
+    DeletionPolicy: Delete
     Properties:
       ServerlessV2ScalingConfiguration:
         MinCapacity: 1
@@ -258,14 +260,36 @@ Resources:
           import logging
           import boto3
           import os
+          import time
           # Init of the logging module
           logger=logging.getLogger()
           logger.setLevel(logging.INFO)
           
+          def send_response(event, context, status, responseData):
+              # CloudFormation learns the outcome only from this callback, so a send
+              # that never lands leaves the stack waiting out its full one-hour
+              # custom-resource timeout and then failing. Retry instead of giving up
+              # on the first error.
+              for attempt in range(1, 4):
+                  try:
+                      cfnresponse.send(event, context, status, responseData)
+                      return
+                  except Exception as err:
+                      logger.error('Attempt %s: could not send %s to CloudFormation: %s', attempt, status, err)
+                      time.sleep(2)
+              logger.error('Gave up sending %s to CloudFormation', status)
+          
           def lambda_handler(event, context):
+              request_type = event.get('RequestType')
+              # Delete must never be able to block stack deletion. Respond before
+              # constructing any client or calling any AWS API.
+              if request_type == 'Delete':
+                  logger.info('Delete requires no action')
+                  send_response(event, context, cfnresponse.SUCCESS, {'message': 'No action required for Delete'})
+                  return
               try:
                 rds = boto3.client('rds')
-                if event.get('RequestType') == 'Create':
+                if request_type == 'Create':
                     responseData = {}
                     rds.modify_db_cluster(
                         DBClusterIdentifier=os.environ['DBClusterIdentifier'],
@@ -273,8 +297,8 @@ Resources:
                     )
                     responseData['message'] = 'Success'
                     logger.info('Sending %s to cloudformation', responseData['message'])
-                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
-                elif event.get('RequestType') == 'Update':
+                    send_response(event, context, cfnresponse.SUCCESS, responseData)
+                elif request_type == 'Update':
                     responseData = {}
                     rds.modify_db_cluster(
                         DBClusterIdentifier=os.environ['DBClusterIdentifier'],
@@ -282,17 +306,17 @@ Resources:
                     )
                     responseData['message'] = 'Success'
                     logger.info('Sending %s to cloudformation', responseData['message'])
-                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                    send_response(event, context, cfnresponse.SUCCESS, responseData)
                 else:
-                    logger.error('Unknown operation: %s', event.get('RequestType'))
+                    logger.info('RequestType %s requires no action', request_type)
                     responseData = {}
-                    responseData['message'] = "Invalid operation"
-                    cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                    responseData['message'] = 'No action required for RequestType %s' % request_type
+                    send_response(event, context, cfnresponse.SUCCESS, responseData)
               except Exception as err:
                 responseData = {}
                 responseData['message'] = 'Failed'
                 logger.error(err)
-                cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+                send_response(event, context, cfnresponse.FAILED, responseData)
       Description: FUnction to enable Global Write Forwarding
 
   InvokeCustomLambda:
