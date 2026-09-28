@@ -558,6 +558,9 @@ Resources:
       ContainerDefinitions:
         -
           Name: "carts"
+          DependsOn:
+            - ContainerName: init
+              Condition: SUCCESS
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
               ContainerPath: /otel-auto-instrumentation
@@ -758,6 +761,9 @@ Resources:
             - otel-auto-instrumentation/javaagent.jar
         -
           Name: "orders"
+          DependsOn:
+            - ContainerName: init
+              Condition: SUCCESS
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
               ContainerPath: /otel-auto-instrumentation
@@ -1247,6 +1253,9 @@ Resources:
       ContainerDefinitions:
         -
           Name: "ui"
+          DependsOn:
+            - ContainerName: init
+              Condition: SUCCESS
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
               ContainerPath: /otel-auto-instrumentation
