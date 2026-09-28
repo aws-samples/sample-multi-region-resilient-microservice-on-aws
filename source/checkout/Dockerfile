@@ -1,4 +1,4 @@
-FROM node:26-alpine3.24
+FROM public.ecr.aws/docker/library/node:26-alpine3.24
 
 RUN apk upgrade --no-cache
 

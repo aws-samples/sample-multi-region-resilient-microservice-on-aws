@@ -21,6 +21,11 @@ Resources:
 
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_107
+            comment: "sts:GetServiceBearerToken is required to authenticate docker pulls against the ECR Public Gallery (aws ecr-public get-login-password). It mints a token usable only with ECR Public and supports no resource-level permissions."
     Properties:
       RoleName: !Sub 'mr-app-codebuild-role${Env}'
       AssumeRolePolicyDocument:
@@ -38,6 +43,12 @@ Resources:
               - Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                  # Authenticated pulls of the service base images from the
+                  # ECR Public Gallery (per-account rate limit instead of the
+                  # anonymous per-IP one). Neither action supports
+                  # resource-level permissions.
+                  - ecr-public:GetAuthorizationToken
+                  - sts:GetServiceBearerToken
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -128,14 +139,13 @@ Resources:
                   fi
                 - PRIMARY_REPO=$AWS_ACCOUNT_ID.dkr.ecr.$PRIMARY_REGION.amazonaws.com/${SERVICE_NAME}${ENV_SUFFIX}
                 - STANDBY_REPO=$AWS_ACCOUNT_ID.dkr.ecr.$STANDBY_REGION.amazonaws.com/${SERVICE_NAME}${ENV_SUFFIX}
+                # The Dockerfiles pull their base images from the ECR Public
+                # Gallery. Log in so the pulls are authenticated (per-account
+                # rate limit) rather than anonymous (shared per-IP limit). The
+                # ECR Public API lives in us-east-1 regardless of build region.
+                - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
             build:
               commands:
-                - |
-                  echo "Rewriting Dockerfile to use ECR Public Gallery mirrors..."
-                  sed -i 's#FROM golang:#FROM public.ecr.aws/docker/library/golang:#g' Dockerfile
-                  sed -i 's#FROM node:#FROM public.ecr.aws/docker/library/node:#g' Dockerfile
-                  sed -i 's#FROM amazoncorretto:#FROM public.ecr.aws/docker/library/amazoncorretto:#g' Dockerfile
-                  cat Dockerfile
                 - echo Building Docker image for $SERVICE_NAME...
                 - docker build --platform linux/amd64 -t ${SERVICE_NAME}${ENV_SUFFIX}:${TAG} .
             post_build:
