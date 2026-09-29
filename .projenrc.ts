@@ -114,7 +114,15 @@ dep.config.updates.push(
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
     ignore: [
-      { 'dependency-name': 'org.springframework.boot:spring-boot-starter-parent' },
+      // Major and minor Spring Boot bumps have broken the services before and
+      // need a deliberate migration. Patch releases carry the Spring
+      // Framework, Micrometer and Tomcat security fixes trivy gates on, so
+      // they flow through Dependabot and are proven by the e2e like any other
+      // dependency update.
+      {
+        'dependency-name': 'org.springframework.boot:spring-boot-starter-parent',
+        'update-types': ['version-update:semver-major', 'version-update:semver-minor'],
+      },
       { 'dependency-name': 'de.codecentric:chaos-monkey-spring-boot', 'update-types': ['version-update:semver-major'] },
       { 'dependency-name': 'org.springdoc:springdoc-openapi-starter-webmvc-ui', 'update-types': ['version-update:semver-major'] },
     ],
