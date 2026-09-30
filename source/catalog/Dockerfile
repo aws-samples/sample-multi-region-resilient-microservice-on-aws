@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM public.ecr.aws/docker/library/golang:1.25 AS builder
+FROM public.ecr.aws/docker/library/golang:1.27 AS builder
 RUN go env -w GOPROXY=direct
 
 WORKDIR /workspace
