@@ -606,27 +606,15 @@ destroy-all: destroy-ngrh destroy-infra destroy-cloudmap-namespace
 # quota (50 namespaces/account/region) leaked namespaces make every subsequent
 # deploy fail: EcsCluster CREATE_FAILED "number of namespaces has reached the
 # maximum allowed limit". Delete the namespace explicitly after the ECS stacks
-# are gone (runs last; only deletes when the namespace has no services left).
+# are gone (runs last). Both regions are attempted; the target fails if either
+# namespace could not be deleted, because a namespace left behind is a leak the
+# operator has to see -- the earlier best-effort loop reported "no namespace
+# found" whenever the caller lacked servicediscovery permissions.
 destroy-cloudmap-namespace:
 	@echo "Deleting leaked Cloud Map namespace retail-store-ar${ENV} (both regions)"
-	@for region in ${PRIMARY_REGION} ${STANDBY_REGION}; do \
-		ns_id=$$(aws servicediscovery list-namespaces --region $$region \
-			--query "Namespaces[?Name=='retail-store-ar${ENV}']|[0].Id" --output text 2>/dev/null); \
-		if [ "$$ns_id" != "None" ] && [ -n "$$ns_id" ]; then \
-			svc_count=$$(aws servicediscovery list-services --region $$region \
-				--filters "Name=NAMESPACE_ID,Values=$$ns_id,Condition=EQ" \
-				--query 'length(Services)' --output text 2>/dev/null); \
-			if [ "$$svc_count" = "0" ]; then \
-				aws servicediscovery delete-namespace --region $$region --id $$ns_id >/dev/null \
-					&& echo "$$region: deleted namespace $$ns_id" \
-					|| echo "$$region: failed to delete namespace $$ns_id (continuing)"; \
-			else \
-				echo "$$region: namespace $$ns_id still has $$svc_count services, skipping"; \
-			fi; \
-		else \
-			echo "$$region: no retail-store-ar${ENV} namespace found"; \
-		fi; \
-	done
+	@rc=0; for region in ${PRIMARY_REGION} ${STANDBY_REGION}; do \
+		./delete-cloudmap-namespace.sh retail-store-ar${ENV} $$region || rc=1; \
+	done; exit $$rc
 
 destroy-chaos-engineering:
 	@echo "Deleting Chaos Engineering stacks"

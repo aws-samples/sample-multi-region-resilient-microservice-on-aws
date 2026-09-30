@@ -23,10 +23,22 @@ A third from run 35887370433 (2026-09-23), the run that proved the first two:
    empties it immediately before every attempt and retries a bucket-only
    failure; both destroy-infra and the guard go through it.
 
+A fourth, found by counting Cloud Map namespaces in the e2e account on 2026-09-30:
+
+4. destroy-cloudmap-namespace sent every `aws servicediscovery` error to
+   /dev/null and printed "no namespace found" on failure. The e2e role had no
+   servicediscovery permission, so every run since the target was added (08-18)
+   reported a clean teardown while leaking the retail-store-ar namespace ECS
+   Service Connect had created: 61 namespaces, against a quota of 50 per region
+   at which EcsCluster creation fails. delete-cloudmap-namespace.sh now owns the
+   deletion for both the Makefile and the guard, exits non-zero on any failure,
+   and the role grants the three calls it makes.
+
 The stub `aws` below is a tiny state machine over a JSON file: RDS global
 cluster membership with asynchronous removal, CloudFormation stacks with
-asynchronous deletion and an optional first-attempt failure, and S3 buckets
-whose objects can "land" between an empty and CloudFormation's DeleteBucket.
+asynchronous deletion and an optional first-attempt failure, S3 buckets
+whose objects can "land" between an empty and CloudFormation's DeleteBucket,
+and Cloud Map namespaces with a per-region AccessDenied switch.
 Every invocation is appended to a log so the tests can assert ORDER, not just
 end state.
 
@@ -36,6 +48,7 @@ Run with:  pytest tests/test_teardown_helpers.py -v
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import textwrap
@@ -48,7 +61,14 @@ REPO = Path(__file__).parent.parent
 DEPLOYMENT = REPO / "deployment"
 DETACH = Path(os.environ.get("DETACH_SCRIPT", DEPLOYMENT / "detach-global-cluster.sh"))
 DELETE_VPC = DEPLOYMENT / "delete-vpc-stack.sh"
+DELETE_NS = DEPLOYMENT / "delete-cloudmap-namespace.sh"
+MAKEFILE = DEPLOYMENT / "Makefile"
+OIDC_ROLE = DEPLOYMENT / "github-oidc-role.yaml"
+ECS_TEMPLATE = DEPLOYMENT / "ecs.yaml"
 E2E_WORKFLOW = Path(os.environ.get("E2E_WORKFLOW", REPO / ".github" / "workflows" / "e2e.yml"))
+# The stub_env fixture puts a fake `make` first on PATH (destroy-all bailing); the
+# Makefile target tests need the real one, resolved before that PATH is built.
+REAL_MAKE = shutil.which("make")
 
 WRITER = "arn:aws:rds:us-east-1:111111111111:cluster:catalog-dbcluster-01-us-east-1-t"
 READER = "arn:aws:rds:us-west-2:111111111111:cluster:catalog-dbcluster-02-us-west-2-t"
@@ -199,6 +219,36 @@ if svc == "s3api":
     if op == "delete-objects":
         buckets[bucket]["objects"] = 0
         save()
+        sys.exit(0)
+
+if svc == "servicediscovery":
+    region = opt("--region")
+    namespaces = state.setdefault("namespaces", {}).setdefault(region, [])
+    action = "".join(p.title() for p in op.split("-"))
+    if region in state.get("cloudmap_denied", []):
+        fail("(AccessDeniedException) when calling the %s operation: User: arn:aws:sts::111111111111:assumed-role/github-actions-microservice-e2e/e2e is not authorized to perform: servicediscovery:%s" % (action, action))
+    if op == "list-namespaces":
+        m = re.search(r"Name=='([^']+)'", opt("--query") or "")
+        hits = [n for n in namespaces if m is None or n["name"] == m.group(1)]
+        print(hits[0]["id"] if hits else "None")
+        sys.exit(0)
+    if op == "list-services":
+        m = re.search(r"Values=([^,]+)", opt("--filters") or "")
+        ns = next((n for n in namespaces if m and n["id"] == m.group(1)), None)
+        print(ns.get("services", 0) if ns else 0)
+        sys.exit(0)
+    if op == "delete-namespace":
+        ns_id = opt("--id")
+        ns = next((n for n in namespaces if n["id"] == ns_id), None)
+        if ns is None:
+            fail("(NamespaceNotFound) when calling the DeleteNamespace operation: Namespace %s not found" % ns_id)
+        if ns.get("services"):
+            fail("(ResourceInUse) when calling the DeleteNamespace operation: Namespace %s still has services" % ns_id)
+        if ns.get("delete_fails"):
+            fail("(InternalServiceError) when calling the DeleteNamespace operation: stub-induced failure", 255)
+        namespaces.remove(ns)
+        save()
+        print(json.dumps({"OperationId": "op-" + ns_id}))
         sys.exit(0)
 
 # ecr delete-repository, secretsmanager delete-secret, anything else: accepted, no output.
@@ -488,3 +538,225 @@ class TestTeardownSweep:
         deleted = {c[c.index("--stack-name") + 1] for c in _calls(log) if c[:2] == ["cloudformation", "delete-stack"]}
         assert "chaos" + ENV_SUFFIX in deleted            # the sweep still ran
         assert not any(n.startswith(("baseInfra", "baseVpc")) for n in deleted)
+
+
+# ---------------------------------------------------------------------------
+# delete-cloudmap-namespace.sh -- the helper both destroy-all and the guard use
+# ---------------------------------------------------------------------------
+
+NAMESPACE = "retail-store-ar" + ENV_SUFFIX
+
+
+def _namespace(ns_id="ns-abc1234", services=0, **extra):
+    return [dict(id=ns_id, name=NAMESPACE, services=services, **extra)]
+
+
+def _run_delete_ns(env, region=PRIMARY):
+    return subprocess.run([str(DELETE_NS), NAMESPACE, region], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def _sd_ops(log: Path, region=None):
+    """Cloud Map operations in call order, optionally for one region."""
+    return [c[1] for c in _calls(log)
+            if c[0] == "servicediscovery" and (region is None or c[c.index("--region") + 1] == region)]
+
+
+class TestDeleteCloudMapNamespace:
+
+    def test_an_empty_namespace_is_deleted(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace()}}))
+        r = _run_delete_ns(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted namespace ns-abc1234" in r.stdout
+        assert _sd_ops(log) == ["list-namespaces", "list-services", "delete-namespace"]
+        assert json.loads(state.read_text())["namespaces"][PRIMARY] == []
+
+    def test_access_denied_is_a_failure_with_the_api_error_left_visible(self, stub_env):
+        # The defect: the old loop swallowed this error and reported the namespace
+        # as absent, so 61 leaked namespaces read as 61 clean teardowns.
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace()}, "cloudmap_denied": [PRIMARY]}))
+        r = _run_delete_ns(env)
+        assert r.returncode != 0
+        assert "AccessDeniedException" in r.stderr and "servicediscovery:ListNamespaces" in r.stderr
+        assert "may be leaking" in r.stdout
+        assert "no %s namespace found" % NAMESPACE not in r.stdout
+        assert "delete-namespace" not in _sd_ops(log)
+        assert json.loads(state.read_text())["namespaces"][PRIMARY] == _namespace()
+
+    def test_an_absent_namespace_is_a_no_op(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {}}))
+        r = _run_delete_ns(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "no %s namespace found" % NAMESPACE in r.stdout
+        assert _sd_ops(log) == ["list-namespaces"]
+
+    def test_a_namespace_that_still_has_services_is_reported_not_skipped(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace(services=2)}}))
+        r = _run_delete_ns(env)
+        assert r.returncode != 0
+        assert "still has 2 services" in r.stdout
+        assert "delete-namespace" not in _sd_ops(log)
+
+    def test_a_failed_delete_is_reported(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace(delete_fails=True)}}))
+        r = _run_delete_ns(env)
+        assert r.returncode != 0
+        assert "failed to delete namespace ns-abc1234" in r.stdout
+        assert "InternalServiceError" in r.stderr
+
+
+@pytest.mark.skipif(REAL_MAKE is None, reason="make not installed")
+class TestDestroyCloudMapNamespaceTarget:
+
+    def _run_make(self, env):
+        # The Makefile shells out to `aws sts get-caller-identity` while parsing;
+        # the stub answers that with nothing, which is fine for this target.
+        return subprocess.run([REAL_MAKE, "-C", str(DEPLOYMENT), "destroy-cloudmap-namespace", "ENV=" + ENV_SUFFIX],
+                              env=env, capture_output=True, text=True, timeout=120)
+
+    def test_both_regions_are_attempted_and_one_failure_fails_the_target(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(json.dumps({
+            "namespaces": {PRIMARY: _namespace("ns-primary"), STANDBY: _namespace("ns-standby")},
+            "cloudmap_denied": [PRIMARY],
+        }))
+        r = self._run_make(env)
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "AccessDeniedException" in r.stderr
+        # The standby namespace was still deleted: one failing region must not
+        # stop the other from being cleaned up.
+        assert _sd_ops(log, STANDBY) == ["list-namespaces", "list-services", "delete-namespace"]
+        assert json.loads(state.read_text())["namespaces"][STANDBY] == []
+
+    def test_nothing_to_delete_in_either_region_is_a_clean_exit(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {}}))
+        r = self._run_make(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _sd_ops(log, PRIMARY) == ["list-namespaces"] and _sd_ops(log, STANDBY) == ["list-namespaces"]
+
+
+# ---------------------------------------------------------------------------
+# The role grant and the namespace name, derived from the helper and ecs.yaml
+# ---------------------------------------------------------------------------
+
+class _CfnLoader(yaml.SafeLoader):
+    """SafeLoader that tolerates CloudFormation short-form tags (!Sub, !Ref...)."""
+
+
+def _cfn_tag(loader, tag_suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    return loader.construct_mapping(node)
+
+
+_CfnLoader.add_multi_constructor("!", _cfn_tag)
+
+
+def _load_template(path):
+    # Drive the SafeLoader subclass directly rather than passing it to yaml.load
+    # as the Loader argument: same parse, no yaml.load call (bandit B506 accepts
+    # only the literal SafeLoader name there).
+    loader = _CfnLoader(path.read_text())
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
+def _helper_api_calls():
+    ops = set(re.findall(r"aws servicediscovery ([a-z-]+)", DELETE_NS.read_text()))
+    assert ops, "delete-cloudmap-namespace.sh makes no servicediscovery calls?"
+    return {"servicediscovery:" + "".join(p.title() for p in op.split("-")) for op in ops}
+
+
+def _role_allows_everywhere():
+    """Actions the e2e role's managed policies allow on Resource '*'."""
+    template = _load_template(OIDC_ROLE)
+    allowed = set()
+    for res in template["Resources"].values():
+        if res["Type"] != "AWS::IAM::ManagedPolicy":
+            continue
+        for st in res["Properties"]["PolicyDocument"]["Statement"]:
+            resource = st.get("Resource")
+            if st.get("Effect") != "Allow" or "*" not in (resource if isinstance(resource, list) else [resource]):
+                continue
+            actions = st["Action"] if isinstance(st["Action"], list) else [st["Action"]]
+            allowed.update(actions)
+    return allowed
+
+
+class TestCloudMapRoleAndNaming:
+
+    def test_the_e2e_role_grants_every_call_the_helper_makes(self):
+        # Derived from the script, so a new call added there without a grant
+        # fails here rather than in the next teardown.
+        needed = _helper_api_calls()
+        assert needed == {"servicediscovery:ListNamespaces", "servicediscovery:ListServices",
+                          "servicediscovery:DeleteNamespace"}
+        allowed = _role_allows_everywhere()
+        missing = {a for a in needed if a not in allowed and "servicediscovery:*" not in allowed}
+        assert not missing, f"github-oidc-role.yaml does not grant {sorted(missing)}"
+
+    def test_the_helper_makes_no_call_beyond_the_three_it_is_granted(self):
+        # The grant is deliberately narrow; widen both together or neither.
+        assert _helper_api_calls() <= {"servicediscovery:ListNamespaces", "servicediscovery:ListServices",
+                                       "servicediscovery:DeleteNamespace"}
+
+    def test_the_makefile_and_the_guard_name_the_namespace_service_connect_creates(self):
+        cluster = next(r for r in _load_template(ECS_TEMPLATE)["Resources"].values()
+                       if r["Type"] == "AWS::ECS::Cluster")
+        assert cluster["Properties"]["ServiceConnectDefaults"]["Namespace"] == "retail-store-ar${Env}"
+        makefile = MAKEFILE.read_text()
+        assert "./delete-cloudmap-namespace.sh retail-store-ar${ENV}" in makefile
+        assert "2>/dev/null" not in makefile.split("destroy-cloudmap-namespace:")[1].split("\n\n")[0], \
+            "the Cloud Map target must not hide its API errors again"
+        assert "./delete-cloudmap-namespace.sh %s" % NAMESPACE in _teardown_script()
+
+
+# ---------------------------------------------------------------------------
+# The guard: the namespace goes after the stacks, and a leftover is incomplete
+# ---------------------------------------------------------------------------
+
+class TestTeardownGuardCloudMap:
+
+    def test_the_namespace_is_deleted_after_the_stacks_and_the_teardown_is_complete(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(json.dumps({
+            "stacks": {PRIMARY: dict([_stack("chaos")]), STANDBY: {}},
+            "members": [], "global_gone": True,
+            "namespaces": {PRIMARY: _namespace("ns-primary"), STANDBY: _namespace("ns-standby")},
+        }))
+        r = _run_teardown(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Teardown complete" in r.stdout, r.stdout
+        calls = _calls(log)
+        last_stack_delete = max(i for i, c in enumerate(calls) if c[:2] == ["cloudformation", "delete-stack"])
+        ns_deletes = [i for i, c in enumerate(calls) if c[:2] == ["servicediscovery", "delete-namespace"]]
+        assert len(ns_deletes) == 2 and min(ns_deletes) > last_stack_delete
+        final = json.loads(state.read_text())
+        assert final["namespaces"] == {PRIMARY: [], STANDBY: []}
+
+    def test_a_namespace_the_role_cannot_delete_makes_the_teardown_incomplete(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(json.dumps({
+            "stacks": {PRIMARY: {}, STANDBY: {}},
+            "members": [], "global_gone": True,
+            "namespaces": {PRIMARY: _namespace("ns-primary"), STANDBY: _namespace("ns-standby")},
+            "cloudmap_denied": [PRIMARY],
+        }))
+        r = _run_teardown(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr          # the guard reports, it does not abort
+        assert "Teardown incomplete" in r.stdout, r.stdout
+        assert "Cloud Map namespaces still present: %s/%s" % (PRIMARY, NAMESPACE) in r.stdout
+        assert "AccessDeniedException" in r.stderr              # the cause is in the log, not swallowed
+        final = json.loads(state.read_text())
+        assert final["namespaces"][PRIMARY] == _namespace("ns-primary") and final["namespaces"][STANDBY] == []
