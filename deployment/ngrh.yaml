@@ -93,8 +93,13 @@ Resources:
             ExpiredObjectDeleteMarker: true
 
   # -------------------------------------------------------------------------
-  # Invoker role NGRH assumes to discover resources / run assessments.
-  # Trust resiliencehub.amazonaws.com, attach the managed execution policy.
+  # Invoker role NGRH assumes to discover resources, run assessments and run
+  # tests. The V2 assessment policy covers discovery and assessment reads.
+  # The resilience testing policy lets NGRH create, start, stop and read the
+  # FIS experiment behind each test run (tagged managedBy=resiliencehub),
+  # pass the test's experiment role to FIS, and read CloudWatch alarm history
+  # for the test's alarms. Without it every test run fails at
+  # fis:CreateExperimentTemplate.
   # -------------------------------------------------------------------------
   InvokerRole:
     Type: AWS::IAM::Role
@@ -107,8 +112,12 @@ Resources:
             Principal:
               Service: resiliencehub.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSResilienceHubV2AssessmentExecutionPolicy
+        - arn:aws:iam::aws:policy/AWSResilienceHubResilienceTestingPolicy
       Policies:
         # S3 write access for NGRH report output and design file reads.
         # All other read permissions (CFN, ARC, EC2, ECS, etc.) are covered
@@ -126,6 +135,231 @@ Resources:
                 Resource:
                   - !GetAtt NgrhBucket.Arn
                   - !Sub "${NgrhBucket.Arn}/*"
+
+  # -------------------------------------------------------------------------
+  # Experiment role for NGRH tests: choose it as the IAM role when creating a
+  # test. NGRH builds an FIS experiment from the test template and FIS
+  # assumes this role to inject the faults, so it carries the permissions
+  # the FIS actions reference lists for every action in the four NGRH test
+  # templates (AZ recovery, dependency validation, multi-Region isolation,
+  # multi-Region recovery). The four network actions use the AWS managed
+  # FIS network policy; the rest are below. SSM commands are limited to the
+  # FIS-provided AWSFIS-* documents. Faults on ECS tasks additionally need
+  # the FIS SSM agent sidecar and enableFaultInjection in the task definition.
+  # -------------------------------------------------------------------------
+  TestExperimentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ngrh-test-experiment${Env}"
+      Description: FIS experiment role for Resilience Hub (NGRH) tests
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: fis.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:fis:*:${AWS::AccountId}:experiment/*"
+      ManagedPolicyArns:
+        # aws:network:disrupt-connectivity, route-table- and transit-gateway-
+        # disrupt-cross-region-connectivity; tag-scoped to managedByFIS.
+        - arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorNetworkAccess
+      Policies:
+        - PolicyName: ngrh-test-faults
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # aws:ec2:stop-instances (AZ recovery)
+              - Sid: Ec2StopStartInstances
+                Effect: Allow
+                Action:
+                  - ec2:StopInstances
+                  - ec2:StartInstances
+                Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+              # Restart instances that have encrypted EBS volumes.
+              - Sid: Ec2EncryptedVolumeGrant
+                Effect: Allow
+                Action: kms:CreateGrant
+                Resource: !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*"
+                Condition:
+                  StringLike:
+                    kms:ViaService: ec2.*.amazonaws.com
+                  Bool:
+                    kms:GrantIsForAWSResource: "true"
+              # aws:ec2:api-/asg-insufficient-instance-capacity-error (AZ recovery).
+              # InjectApiError has no resource type, so it is scoped by action id.
+              - Sid: Ec2CapacityErrors
+                Effect: Allow
+                Action: ec2:InjectApiError
+                Resource: "*"
+                Condition:
+                  ForAnyValue:StringEquals:
+                    ec2:FisActionId:
+                      - aws:ec2:api-insufficient-instance-capacity-error
+                      - aws:ec2:asg-insufficient-instance-capacity-error
+              # aws:elasticache:replicationgroup-interrupt-az-power (AZ recovery)
+              - Sid: ElastiCacheAzPower
+                Effect: Allow
+                Action:
+                  - elasticache:InterruptClusterAzPower
+                  - elasticache:DescribeReplicationGroups
+                Resource: !Sub "arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:replicationgroup:*"
+              # aws:rds:failover-db-cluster (AZ recovery)
+              - Sid: RdsFailoverCluster
+                Effect: Allow
+                Action:
+                  - rds:FailoverDBCluster
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:*"
+                  - !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:*"
+              # aws:arc:start-zonal-autoshift (AZ recovery). Load balancers are
+              # resources; Auto Scaling groups and EKS clusters are matched by
+              # the zonal shift resource identifier.
+              - Sid: ZonalShiftLoadBalancers
+                Effect: Allow
+                Action:
+                  - arc-zonal-shift:StartZonalShift
+                  - arc-zonal-shift:GetManagedResource
+                  - arc-zonal-shift:UpdateZonalShift
+                  - arc-zonal-shift:CancelZonalShift
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:elasticloadbalancing:*:${AWS::AccountId}:loadbalancer/app/*"
+                  - !Sub "arn:${AWS::Partition}:elasticloadbalancing:*:${AWS::AccountId}:loadbalancer/net/*"
+              - Sid: ZonalShiftAsgAndEks
+                Effect: Allow
+                Action:
+                  - arc-zonal-shift:StartZonalShift
+                  - arc-zonal-shift:GetManagedResource
+                  - arc-zonal-shift:UpdateZonalShift
+                  - arc-zonal-shift:CancelZonalShift
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    arc-zonal-shift:ResourceIdentifier:
+                      - !Sub "arn:${AWS::Partition}:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*"
+                      - !Sub "arn:${AWS::Partition}:eks:*:${AWS::AccountId}:cluster/*"
+              # aws:ssm:send-command on EC2 instances, and the SSM commands FIS
+              # runs on ECS tasks registered by the FIS sidecar
+              # (aws:ecs:task-network-packet-loss). Only FIS-provided documents.
+              - Sid: SsmRunFisDocuments
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:*:*:document/AWSFIS-*"
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:managed-instance/*"
+              # ssm:CancelCommand has no resource type; FIS uses it to stop its
+              # own commands when an action ends or is stopped.
+              - Sid: SsmCancelCommands
+                Effect: Allow
+                Action: ssm:CancelCommand
+                Resource: "*"
+              # aws:ecs:task-network-packet-loss target lookup
+              - Sid: EcsTaskTargets
+                Effect: Allow
+                Action:
+                  - ecs:DescribeTasks
+                  - ecs:DescribeContainerInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task/*/*"
+                  - !Sub "arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:container-instance/*/*"
+              # aws:eks:pod-network-packet-loss target lookup. The role also
+              # needs an EKS access entry in each cluster it targets.
+              - Sid: EksPodTargets
+                Effect: Allow
+                Action: eks:DescribeCluster
+                Resource: !Sub "arn:${AWS::Partition}:eks:*:${AWS::AccountId}:cluster/*"
+              # aws:network:disrupt-vpc-endpoint (multi-Region isolation): FIS
+              # swaps the endpoint's security groups for an empty one it creates.
+              - Sid: VpcEndpointIsolation
+                Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:ModifyVpcEndpoint
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc-endpoint/*"
+              - Sid: VpcEndpointIsolationTags
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: CreateSecurityGroup
+              - Sid: VpcEndpointCrossRegion
+                Effect: Allow
+                Action: vpce:AllowMultiRegion
+                Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc-endpoint/*"
+              # aws:s3:bucket-pause-replication (multi-Region isolation), limited
+              # to this account's buckets. Condition form follows the FIS
+              # example policy for this action.
+              - Sid: S3PauseReplication
+                Effect: Allow
+                Action: s3:PauseReplication
+                Resource: !Sub "arn:${AWS::Partition}:s3:::*"
+                Condition:
+                  StringEquals:
+                    s3:ResourceAccount: !Ref "AWS::AccountId"
+              - Sid: S3ReplicationConfigForPause
+                Effect: Allow
+                Action:
+                  - s3:PutReplicationConfiguration
+                  - s3:GetReplicationConfiguration
+                Resource: !Sub "arn:${AWS::Partition}:s3:::*"
+                Condition:
+                  BoolIfExists:
+                    s3:IsReplicationPauseRequest: "true"
+                  StringEquals:
+                    s3:ResourceAccount: !Ref "AWS::AccountId"
+              # aws:dynamodb:global-table-pause-replication (multi-Region isolation)
+              - Sid: DynamoDbPauseReplication
+                Effect: Allow
+                Action:
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:GetResourcePolicy
+                  - dynamodb:DescribeTable
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/*"
+              # Multi-Region strong consistency (MRSC) global tables only.
+              - Sid: DynamoDbMrscPauseReplication
+                Effect: Allow
+                Action: dynamodb:InjectError
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    dynamodb:FisActionId: aws:dynamodb:global-table-pause-replication
+              # aws:memorydb:multi-region-cluster-pause-replication (multi-Region isolation)
+              - Sid: MemoryDbPauseReplication
+                Effect: Allow
+                Action:
+                  - memorydb:DescribeMultiRegionClusters
+                  - memorydb:PauseMultiRegionClusterReplication
+                Resource: !Sub "arn:${AWS::Partition}:memorydb::${AWS::AccountId}:multiregioncluster/*"
+              # Read-only lookups FIS uses to resolve and track targets. None of
+              # these actions accepts a resource ARN.
+              - Sid: TargetResolution
+                Effect: Allow
+                Action:
+                  - arc-zonal-shift:ListManagedResources
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ecs:ListTasks
+                  - s3:ListAllMyBuckets
+                  - ssm:ListCommands
+                  - tag:GetResources
+                Resource: "*"
 
   # -------------------------------------------------------------------------
   # Resiliency policies. One RTO/RPO bar per tier, applied across AZ + Region.
@@ -561,6 +795,14 @@ Outputs:
   NgrhBucketName:
     Description: NGRH shared bucket (reports, design files). Empty before stack delete.
     Value: !Ref NgrhBucket
+  InvokerRoleName:
+    Description: Role NGRH assumes for discovery, assessments and tests (each service's invoker role)
+    Value: !Ref InvokerRole
+  TestExperimentRoleName:
+    Description: IAM role to choose when creating an NGRH test (FIS assumes it to inject the faults)
+    Value: !Ref TestExperimentRole
+  TestExperimentRoleArn:
+    Value: !GetAtt TestExperimentRole.Arn
   ServiceArns:
     Description: Comma-separated service ARNs (used by `make ngrh-assess`)
     Value: !Join
