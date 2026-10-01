@@ -45,6 +45,9 @@ updates:
       - auto-merge
     ignore:
       - dependency-name: org.springframework.boot:spring-boot-starter-parent
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
       - dependency-name: de.codecentric:chaos-monkey-spring-boot
         update-types:
           - version-update:semver-major
@@ -66,6 +69,9 @@ updates:
       - auto-merge
     ignore:
       - dependency-name: org.springframework.boot:spring-boot-starter-parent
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
       - dependency-name: de.codecentric:chaos-monkey-spring-boot
         update-types:
           - version-update:semver-major
@@ -87,6 +93,9 @@ updates:
       - auto-merge
     ignore:
       - dependency-name: org.springframework.boot:spring-boot-starter-parent
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
       - dependency-name: de.codecentric:chaos-monkey-spring-boot
         update-types:
           - version-update:semver-major

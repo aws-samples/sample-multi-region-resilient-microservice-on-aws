@@ -89,7 +89,8 @@ Resources:
   # Regional services: CloudFormation, ECS, ECR, RDS/Aurora, DynamoDB, DSQL,
   # ElastiCache, MQ, EC2, ELB, Lambda, KMS (regional keys), SecretsManager,
   # SSM, CloudWatch (logs/metrics/alarms/dashboards/synthetics), SNS, EventBridge,
-  # CodeBuild, ApplicationAutoScaling, FIS. All scoped to us-east-1 / us-west-2.
+  # CodeBuild, ApplicationAutoScaling, FIS, Cloud Map (namespace teardown only).
+  # All scoped to us-east-1 / us-west-2.
   RegionalServicesPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -127,6 +128,12 @@ Resources:
               - states:*
               - resource-groups:*
               - tag:*
+              # ECS Service Connect creates the retail-store-ar Cloud Map namespace
+              # outside CloudFormation; delete-cloudmap-namespace.sh removes it at
+              # teardown and needs exactly these three calls.
+              - servicediscovery:ListNamespaces
+              - servicediscovery:ListServices
+              - servicediscovery:DeleteNamespace
             Resource: '*'
             Condition:
               StringEquals:
