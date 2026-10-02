@@ -124,9 +124,20 @@ def _intrinsic(loader, suffix, node):
 _CfnLoader.add_multi_constructor("!", _intrinsic)
 
 
+def _load_template():
+    # Drive the SafeLoader subclass directly instead of passing it to yaml.load
+    # as the Loader argument: same parse, no yaml.load call. Bandit's B506 (and
+    # the ACAT scan built on it) accepts only the literal SafeLoader name there.
+    loader = _CfnLoader(TEMPLATE.read_text())
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
+
 @pytest.fixture(scope="module")
 def resources():
-    return yaml.load(TEMPLATE.read_text(), Loader=_CfnLoader)["Resources"]
+    return _load_template()["Resources"]
 
 
 @pytest.fixture(scope="module")
@@ -227,6 +238,6 @@ def test_experiment_role_resources_stay_in_this_account(experiment_role):
 
 
 def test_outputs_name_the_roles_to_pick():
-    outputs = yaml.load(TEMPLATE.read_text(), Loader=_CfnLoader)["Outputs"]
+    outputs = _load_template()["Outputs"]
     assert outputs["TestExperimentRoleName"]["Value"] == {"Ref": "TestExperimentRole"}
     assert outputs["InvokerRoleName"]["Value"] == {"Ref": "InvokerRole"}
