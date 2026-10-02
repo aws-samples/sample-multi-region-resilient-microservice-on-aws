@@ -129,13 +129,13 @@ updates:
       - auto-approve
       - auto-merge
     ignore:
-      - dependency-name: amazoncorretto
+      - dependency-name: docker/library/amazoncorretto
         update-types:
           - version-update:semver-major
-      - dependency-name: node
+      - dependency-name: docker/library/node
         update-types:
           - version-update:semver-major
-      - dependency-name: golang
+      - dependency-name: docker/library/golang
   - package-ecosystem: docker
     directory: /source/cart
     schedule:
@@ -150,13 +150,13 @@ updates:
       - auto-approve
       - auto-merge
     ignore:
-      - dependency-name: amazoncorretto
+      - dependency-name: docker/library/amazoncorretto
         update-types:
           - version-update:semver-major
-      - dependency-name: node
+      - dependency-name: docker/library/node
         update-types:
           - version-update:semver-major
-      - dependency-name: golang
+      - dependency-name: docker/library/golang
   - package-ecosystem: docker
     directory: /source/catalog
     schedule:
@@ -171,13 +171,13 @@ updates:
       - auto-approve
       - auto-merge
     ignore:
-      - dependency-name: amazoncorretto
+      - dependency-name: docker/library/amazoncorretto
         update-types:
           - version-update:semver-major
-      - dependency-name: node
+      - dependency-name: docker/library/node
         update-types:
           - version-update:semver-major
-      - dependency-name: golang
+      - dependency-name: docker/library/golang
   - package-ecosystem: docker
     directory: /source/checkout
     schedule:
@@ -192,13 +192,13 @@ updates:
       - auto-approve
       - auto-merge
     ignore:
-      - dependency-name: amazoncorretto
+      - dependency-name: docker/library/amazoncorretto
         update-types:
           - version-update:semver-major
-      - dependency-name: node
+      - dependency-name: docker/library/node
         update-types:
           - version-update:semver-major
-      - dependency-name: golang
+      - dependency-name: docker/library/golang
   - package-ecosystem: docker
     directory: /source/orders
     schedule:
@@ -213,13 +213,13 @@ updates:
       - auto-approve
       - auto-merge
     ignore:
-      - dependency-name: amazoncorretto
+      - dependency-name: docker/library/amazoncorretto
         update-types:
           - version-update:semver-major
-      - dependency-name: node
+      - dependency-name: docker/library/node
         update-types:
           - version-update:semver-major
-      - dependency-name: golang
+      - dependency-name: docker/library/golang
   - package-ecosystem: docker
     directory: /source/ui
     schedule:
@@ -234,10 +234,10 @@ updates:
       - auto-approve
       - auto-merge
     ignore:
-      - dependency-name: amazoncorretto
+      - dependency-name: docker/library/amazoncorretto
         update-types:
           - version-update:semver-major
-      - dependency-name: node
+      - dependency-name: docker/library/node
         update-types:
           - version-update:semver-major
-      - dependency-name: golang
+      - dependency-name: docker/library/golang
