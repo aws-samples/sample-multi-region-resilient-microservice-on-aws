@@ -144,10 +144,15 @@ dep.config.updates.push(
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
+    // Dependabot names an image by its path without the registry host, so
+    // public.ecr.aws/docker/library/amazoncorretto is
+    // "docker/library/amazoncorretto". The bare names used before matched
+    // nothing once the Dockerfiles moved to ECR Public, which let the
+    // 2026-09-30 major bumps (#165, #166, #168, #167) through.
     ignore: [
-      { 'dependency-name': 'amazoncorretto', 'update-types': ['version-update:semver-major'] },
-      { 'dependency-name': 'node', 'update-types': ['version-update:semver-major'] },
-      { 'dependency-name': 'golang' },
+      { 'dependency-name': 'docker/library/amazoncorretto', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'docker/library/node', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'docker/library/golang' },
     ],
   })),
   // GitHub Actions versions are pinned in .projenrc.ts and bumped manually.
