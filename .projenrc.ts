@@ -114,7 +114,15 @@ dep.config.updates.push(
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
     ignore: [
-      { 'dependency-name': 'org.springframework.boot:spring-boot-starter-parent' },
+      // Major and minor Spring Boot bumps have broken the services before and
+      // need a deliberate migration. Patch releases carry the Spring
+      // Framework, Micrometer and Tomcat security fixes trivy gates on, so
+      // they flow through Dependabot and are proven by the e2e like any other
+      // dependency update.
+      {
+        'dependency-name': 'org.springframework.boot:spring-boot-starter-parent',
+        'update-types': ['version-update:semver-major', 'version-update:semver-minor'],
+      },
       { 'dependency-name': 'de.codecentric:chaos-monkey-spring-boot', 'update-types': ['version-update:semver-major'] },
       { 'dependency-name': 'org.springdoc:springdoc-openapi-starter-webmvc-ui', 'update-types': ['version-update:semver-major'] },
     ],
@@ -573,6 +581,16 @@ e2e.addJob('e2e', {
         '  done',
         'done',
         '',
+        '# The Cloud Map namespace ECS Service Connect created for this run is owned by',
+        '# no stack, so the sweep above never touches it, and destroy-all (which deletes',
+        '# it last) stops at its first failing target. Delete it here, now that the ECS',
+        '# stacks are gone; one left behind counts as an incomplete teardown, since at',
+        '# 50 leaked namespaces every later deploy fails on EcsCluster.',
+        'cloudmap_left=""',
+        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        '  ./delete-cloudmap-namespace.sh retail-store-ar${{ env.ENV }} "$region" || cloudmap_left="$cloudmap_left $region/retail-store-ar${{ env.ENV }}"',
+        'done',
+        '',
         '# Say what is left. Every stack of this run carries the ENV suffix, so an',
         '# empty list is the only real proof the estate is gone; the ECS clusters',
         '# and Aurora instances are what bill when it is not.',
@@ -581,8 +599,11 @@ e2e.addJob('e2e', {
         '  names=$(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${{ env.ENV }}\')].StackName" --output text 2>/dev/null || true)',
         '  if [ -n "$names" ]; then left="$left $region: $names"; fi',
         'done',
-        'if [ -n "$left" ]; then',
-        '  echo "::warning::Teardown incomplete, stacks still present:$left"',
+        'incomplete=""',
+        'if [ -n "$left" ]; then incomplete="$incomplete stacks still present:$left;"; fi',
+        'if [ -n "$cloudmap_left" ]; then incomplete="$incomplete Cloud Map namespaces still present:$cloudmap_left;"; fi',
+        'if [ -n "$incomplete" ]; then',
+        '  echo "::warning::Teardown incomplete,$incomplete"',
         'else',
         '  echo "Teardown complete"',
         'fi',
