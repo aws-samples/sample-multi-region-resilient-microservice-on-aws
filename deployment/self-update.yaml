@@ -296,21 +296,50 @@ Resources:
                   for R in $PRIMARY_REGION $STANDBY_REGION; do
                     CURRENT=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query "Stacks[0].Parameters[?ParameterKey=='Tag'].ParameterValue" --output text)
                     if [ "$CURRENT" != "$TAG" ]; then
-                      echo "$R: updating apps${ENV_SUFFIX} Tag $CURRENT -> $TAG"
+                      # Every parameter except Tag keeps its current value, and the
+                      # list of them comes from the live stack, not from this
+                      # buildspec. UpdateStack resets a parameter left off the list
+                      # to its template default (Env would fall back to '' and
+                      # rename every resource), refuses one that has no default,
+                      # and rejects UsePreviousValue for a key the stack does not
+                      # have. The hard-coded list this replaces could not update an
+                      # apps stack deployed from ecs.yaml once it gained VpcId,
+                      # which has no default.
+                      # Read into a variable first, so a failed call fails the build:
+                      # set -e ignores a failed command substitution in a for-loop's
+                      # word list.
+                      KEYS=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query 'Stacks[0].Parameters[].ParameterKey' --output text)
+                      KEEP=""
+                      HAS_TAG=""
+                      for K in $KEYS; do
+                        if [ "$K" = Tag ]; then HAS_TAG=yes; else KEEP="$KEEP $K"; fi
+                      done
+                      # Tag is the one parameter every apps stack has. A list
+                      # without it is not this stack's list, so stop before an
+                      # update that would reset whatever it left out.
+                      if [ -z "$HAS_TAG" ]; then
+                        echo "$R: apps${ENV_SUFFIX} lists no Tag parameter (got: $KEYS); not updating it" >&2
+                        exit 1
+                      fi
+                      PARAMS="ParameterKey=Tag,ParameterValue=$TAG"
+                      for K in $KEEP; do PARAMS="$PARAMS ParameterKey=$K,UsePreviousValue=true"; done
+                      echo "$R: updating apps${ENV_SUFFIX} Tag $CURRENT -> $TAG, keeping$KEEP"
+                      # $PARAMS is unquoted on purpose: one word per parameter.
+                      # Parameter keys are alphanumeric and TAG is a commit hash.
                       aws cloudformation update-stack --region $R --stack-name apps${ENV_SUFFIX} \
                         --use-previous-template \
-                        --parameters ParameterKey=Tag,ParameterValue=$TAG \
-                          ParameterKey=Env,UsePreviousValue=true \
-                          ParameterKey=PrimaryRegion,UsePreviousValue=true \
-                          ParameterKey=StandbyRegion,UsePreviousValue=true \
-                          ParameterKey=KmsKey,UsePreviousValue=true \
+                        --parameters $PARAMS \
                         --capabilities CAPABILITY_NAMED_IAM
                       WAIT_REGIONS="$WAIT_REGIONS $R"
                       CFN_REGIONS="$CFN_REGIONS $R"
                     else
                       echo "$R: same commit - forcing new deployment to pick up rebuilt layers"
                       CL=$(aws ecs list-clusters --region $R --query 'clusterArns[0]' --output text)
-                      for S in $(aws ecs list-services --region $R --cluster $CL --query 'serviceArns[]' --output text); do
+                      # Into a variable for the same reason as KEYS: a failed listing
+                      # in the for-loop's word list would skip every forced
+                      # deployment and still let the build succeed.
+                      SERVICES=$(aws ecs list-services --region $R --cluster $CL --query 'serviceArns[]' --output text)
+                      for S in $SERVICES; do
                         aws ecs update-service --region $R --cluster $CL --service $S --force-new-deployment --query 'service.serviceName' --output text
                       done
                     fi
