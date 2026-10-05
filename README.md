@@ -130,7 +130,13 @@ The `ngrh` stack also creates the two IAM roles a Resilience Hub test run execut
 
 People running tests do not need to create IAM roles. They need `iam:PassRole` on these two roles (passed to `resiliencehub.amazonaws.com` and `fis.amazonaws.com`) and pick them when they create a test.
 
-Faults on ECS tasks (`aws:ecs:task-network-packet-loss`, used by the dependency validation and both multi-Region templates) also require the FIS SSM agent sidecar, `enableFaultInjection` and `pidMode: task` in the task definition ([requirements](https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html#ecs-task-requirements)). This sample's task definitions do not include them yet, so those faults cannot reach the ECS tasks until they do.
+Faults on ECS tasks (`aws:ecs:task-network-packet-loss`, used by the dependency validation and both multi-Region templates) need three things in the task definition ([requirements](https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html#ecs-task-requirements)), and every task definition in this sample has them:
+
+* **An SSM agent sidecar** (`amazon-ssm-agent`, non-essential). It registers the task as an SSM managed instance tagged with the task's ARN, which is how FIS finds the task. The task subnets have no internet route, so the sidecar runs an image mirrored into your account's ECR (`amazon-ssm-agent<ENV>`, built by `deployment/mirror-sidecar-buildspec.yml`) with the commands it and the FIS fault documents run baked in.
+* **`pidMode: task`**, so the sidecar can reach the application's processes.
+* **`enableFaultInjection: true`**, which turns on the ECS fault-injection endpoints that FIS network faults use on Fargate.
+
+Each task role can create the sidecar's SSM activation and pass the managed-instance role to SSM, and nothing else is added to it. ECS Exec stays off, because FIS can't run these actions on a task that has it enabled.
 
 
 ## Pre-requisites
@@ -270,8 +276,8 @@ drops monthly cost by roughly $1,000.
 | Cost Type | Amount (USD) |
 |-----------|-------------|
 | Upfront Cost | $0.00 |
-| Monthly Cost | ~$3,304 |
-| Total 12 Months Cost* | ~$39,650 |
+| Monthly Cost | ~$3,318 |
+| Total 12 Months Cost* | ~$39,800 |
 
 \* Includes upfront cost. Most line items are flat 24/7 — actual cost will
 vary with the canary schedule, log retention, and workload volume.
@@ -282,7 +288,7 @@ vary with the canary schedule, log retention, and workload volume.
 
 | Service | Monthly Cost | Configuration |
 |---------|--------------|----------------|
-| ECS Fargate | $324 | 6 services × 2 tasks on on-demand Fargate: 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 0.5 GB), Linux/x86 24/7. Fargate Spot would cost about $97, but Spot can reclaim tasks in the middle of a failover or a resilience test |
+| ECS Fargate | $331 | 6 services × 2 tasks on on-demand Fargate: 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 1 GB), Linux/x86 24/7. Each task also runs the SSM agent sidecar used for fault injection, which is why the two small services have 1 GB. Fargate Spot would cost about $99, but Spot can reclaim tasks in the middle of a failover or a resilience test |
 | Application Load Balancer | $20 | 1 internal ALB ($16 base + ~$4 LCU) |
 | VPC Interface Endpoints | $329 | 15 endpoints × 3 AZs × $0.01/AZ-hr (S3 + DynamoDB are gateway endpoints, free) |
 | Aurora MySQL Serverless v2 | $175 | 2 instances × 1 ACU minimum × $0.12/ACU-hr (idle) |
@@ -296,7 +302,7 @@ vary with the canary schedule, log retention, and workload volume.
 | Secrets Manager | $20 | ~50 secrets ($0.40 each) |
 | KMS | $1 | 1 multi-Region CMK + light request volume |
 | CloudWatch Logs | ~$30 | ECS task + app logs (varies with traffic) |
-| **Per-Region subtotal** | **~$1,613** | |
+| **Per-Region subtotal** | **~$1,620** | |
 
 ### Shared / Global Costs (charged once, not per Region)
 
@@ -312,10 +318,10 @@ vary with the canary schedule, log retention, and workload volume.
 
 | | Monthly Cost |
 |---|---|
-| US East (N. Virginia) | ~$1,613 |
-| US West (Oregon) | ~$1,613 |
+| US East (N. Virginia) | ~$1,620 |
+| US West (Oregon) | ~$1,620 |
 | Shared / global | ~$78 |
-| **Total** | **~$3,304** |
+| **Total** | **~$3,318** |
 
 ### Cost-reduction levers
 

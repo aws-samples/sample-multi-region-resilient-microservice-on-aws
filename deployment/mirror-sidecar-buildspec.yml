@@ -30,4 +30,31 @@ phases:
             docker push $AWS_ACCOUNT_ID.dkr.ecr.$STANDBY_REGION.amazonaws.com/$REPO:$TAG_VAL
           fi
         done
+      - |
+        # FIS fault-injection sidecar (every task definition in ecs.yaml). The
+        # task subnets have no internet route, so everything the sidecar and
+        # the FIS fault documents run inside a task is baked into this image:
+        #   - the sidecar's start script: jq, ps (procps), aws (awscli), curl
+        #     (curl-minimal) and setsid (util-linux)
+        #   - AWSFIS-Run-Network-Packet-Loss: atd (at), dig (bind-utils), lsof,
+        #     pgrep (procps) and tc (iproute-tc)
+        #   - the agent-install document Resilience Hub runs on the task before
+        #     a test, which needs python3 and python3-requests (observed in a
+        #     July 2026 test run, where installing them at run time failed)
+        set -e
+        REPO=amazon-ssm-agent${ENV_SUFFIX}
+        {
+          echo "FROM public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest"
+          echo "RUN dnf upgrade -y && dnf install -y jq procps awscli curl-minimal util-linux && dnf clean all"
+          echo "RUN dnf install -y at bind-utils lsof iproute iproute-tc && dnf clean all"
+          echo "RUN dnf install -y python3 python3-requests && dnf clean all"
+        } > Dockerfile.ssm-agent
+        docker build -t $REPO:latest -f Dockerfile.ssm-agent .
+        REGIONS=$PRIMARY_REGION
+        if [ "$PRIMARY_ONLY" != "true" ]; then REGIONS="$REGIONS $STANDBY_REGION"; fi
+        for R in $REGIONS; do
+          echo "Pushing $REPO:latest to $R..."
+          docker tag $REPO:latest $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/$REPO:latest
+          docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/$REPO:latest
+        done
       - echo "Sidecar image mirroring completed successfully"
