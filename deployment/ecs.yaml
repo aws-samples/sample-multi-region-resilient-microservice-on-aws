@@ -703,11 +703,50 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Sub ${AWS::Region}
               awslogs-stream-prefix: ecs
+        # Keeps carts serving through the start of a stop. Callers' Service
+        # Connect proxies can still send a stopping task requests for a few
+        # seconds after its application gets the stop signal (up to ~5 s in
+        # test2), and the task's own proxy answers those requests with 503 once
+        # the application has exited. A container dependency reverses at
+        # shutdown: ECS stops a container only after every container that
+        # depends on it has stopped. So carts gets its stop signal when this
+        # container exits, SHUTDOWN_DELAY_SECONDS after the task starts
+        # stopping (15 s, three times the longest window seen). It reuses the
+        # FIS sidecar's image, which every task already pulls, because it needs
+        # only bash and sleep.
+        - Name: shutdown-delay
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/amazon-ssm-agent${Env}:latest'
+          Cpu: 0
+          Essential: false
+          DependsOn:
+            - ContainerName: carts
+              Condition: START
+          # Must exceed SHUTDOWN_DELAY_SECONDS, or ECS kills the delay early.
+          StopTimeout: 30
+          Environment:
+            - Name: SHUTDOWN_DELAY_SECONDS
+              Value: "15"
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              if ! [[ $SHUTDOWN_DELAY_SECONDS =~ ^[0-9]+$ ]]; then echo "SHUTDOWN_DELAY_SECONDS must be a whole number of seconds" 1>&2; exit 1; fi; release() { echo "Stop requested: holding the application for $SHUTDOWN_DELAY_SECONDS seconds"; sleep "$SHUTDOWN_DELAY_SECONDS"; kill "$SLEEPER_PID" 2>/dev/null; echo "Releasing the application"; exit 0; }; trap release SIGTERM SIGINT; sleep infinity & SLEEPER_PID=$!; wait "$SLEEPER_PID"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
         -
           Name: "carts"
+          # The START dependency on the CloudWatch agent also reverses at
+          # shutdown, so the agent outlives carts and its traces and metrics
+          # cover the shutdown delay.
           DependsOn:
             - ContainerName: init
               Condition: SUCCESS
+            - ContainerName: ecs-cwagent
+              Condition: START
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
               ContainerPath: /otel-auto-instrumentation
@@ -965,11 +1004,39 @@ Resources:
             - cp
             - javaagent.jar
             - otel-auto-instrumentation/javaagent.jar
+        # Keeps orders serving through the start of a stop; see the carts
+        # shutdown-delay container.
+        - Name: shutdown-delay
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/amazon-ssm-agent${Env}:latest'
+          Cpu: 0
+          Essential: false
+          DependsOn:
+            - ContainerName: orders
+              Condition: START
+          StopTimeout: 30
+          Environment:
+            - Name: SHUTDOWN_DELAY_SECONDS
+              Value: "15"
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              if ! [[ $SHUTDOWN_DELAY_SECONDS =~ ^[0-9]+$ ]]; then echo "SHUTDOWN_DELAY_SECONDS must be a whole number of seconds" 1>&2; exit 1; fi; release() { echo "Stop requested: holding the application for $SHUTDOWN_DELAY_SECONDS seconds"; sleep "$SHUTDOWN_DELAY_SECONDS"; kill "$SLEEPER_PID" 2>/dev/null; echo "Releasing the application"; exit 0; }; trap release SIGTERM SIGINT; sleep infinity & SLEEPER_PID=$!; wait "$SLEEPER_PID"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
         -
           Name: "orders"
+          # Starting after the CloudWatch agent means stopping before it; see
+          # carts.
           DependsOn:
             - ContainerName: init
               Condition: SUCCESS
+            - ContainerName: ecs-cwagent
+              Condition: START
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
               ContainerPath: /otel-auto-instrumentation
@@ -1149,6 +1216,30 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Sub ${AWS::Region}
               awslogs-stream-prefix: ecs
+        # Keeps assets serving through the start of a stop; see the carts
+        # shutdown-delay container.
+        - Name: shutdown-delay
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/amazon-ssm-agent${Env}:latest'
+          Cpu: 0
+          Essential: false
+          DependsOn:
+            - ContainerName: assets
+              Condition: START
+          StopTimeout: 30
+          Environment:
+            - Name: SHUTDOWN_DELAY_SECONDS
+              Value: "15"
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              if ! [[ $SHUTDOWN_DELAY_SECONDS =~ ^[0-9]+$ ]]; then echo "SHUTDOWN_DELAY_SECONDS must be a whole number of seconds" 1>&2; exit 1; fi; release() { echo "Stop requested: holding the application for $SHUTDOWN_DELAY_SECONDS seconds"; sleep "$SHUTDOWN_DELAY_SECONDS"; kill "$SLEEPER_PID" 2>/dev/null; echo "Releasing the application"; exit 0; }; trap release SIGTERM SIGINT; sleep infinity & SLEEPER_PID=$!; wait "$SLEEPER_PID"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
         -
           Name: "assets"
           PortMappings:
@@ -1304,6 +1395,30 @@ Resources:
           Environment:
             - Name: MANAGED_INSTANCE_ROLE_NAME
               Value: !Ref FisSsmManagedInstanceRole
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
+        # Keeps catalog serving through the start of a stop; see the carts
+        # shutdown-delay container.
+        - Name: shutdown-delay
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/amazon-ssm-agent${Env}:latest'
+          Cpu: 0
+          Essential: false
+          DependsOn:
+            - ContainerName: catalog
+              Condition: START
+          StopTimeout: 30
+          Environment:
+            - Name: SHUTDOWN_DELAY_SECONDS
+              Value: "15"
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              if ! [[ $SHUTDOWN_DELAY_SECONDS =~ ^[0-9]+$ ]]; then echo "SHUTDOWN_DELAY_SECONDS must be a whole number of seconds" 1>&2; exit 1; fi; release() { echo "Stop requested: holding the application for $SHUTDOWN_DELAY_SECONDS seconds"; sleep "$SHUTDOWN_DELAY_SECONDS"; kill "$SLEEPER_PID" 2>/dev/null; echo "Releasing the application"; exit 0; }; trap release SIGTERM SIGINT; sleep infinity & SLEEPER_PID=$!; wait "$SLEEPER_PID"
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -1473,11 +1588,39 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Sub ${AWS::Region}
               awslogs-stream-prefix: ecs
+        # Keeps checkout serving through the start of a stop; see the carts
+        # shutdown-delay container.
+        - Name: shutdown-delay
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/amazon-ssm-agent${Env}:latest'
+          Cpu: 0
+          Essential: false
+          DependsOn:
+            - ContainerName: checkout
+              Condition: START
+          StopTimeout: 30
+          Environment:
+            - Name: SHUTDOWN_DELAY_SECONDS
+              Value: "15"
+          Command:
+            - /bin/bash
+            - -c
+            - >-
+              if ! [[ $SHUTDOWN_DELAY_SECONDS =~ ^[0-9]+$ ]]; then echo "SHUTDOWN_DELAY_SECONDS must be a whole number of seconds" 1>&2; exit 1; fi; release() { echo "Stop requested: holding the application for $SHUTDOWN_DELAY_SECONDS seconds"; sleep "$SHUTDOWN_DELAY_SECONDS"; kill "$SLEEPER_PID" 2>/dev/null; echo "Releasing the application"; exit 0; }; trap release SIGTERM SIGINT; sleep infinity & SLEEPER_PID=$!; wait "$SLEEPER_PID"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Sub ${AWS::Region}
+              awslogs-stream-prefix: ecs
         -
           Name: "checkout"
+          # Starting after the CloudWatch agent means stopping before it; see
+          # carts.
           DependsOn:
             - ContainerName: init
               Condition: SUCCESS
+            - ContainerName: ecs-cwagent
+              Condition: START
           MountPoints:
             - SourceVolume: opentelemetry-auto-instrumentation-node
               ContainerPath: /otel-auto-instrumentation-node

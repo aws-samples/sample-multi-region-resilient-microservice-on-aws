@@ -242,6 +242,10 @@ ui is behind the ALB, whose health check gates its deployments. Each back-end (c
 
 Without them, ECS stopped the old back-end tasks as soon as the new containers started, and every deployment failed the journeys for 4-5 minutes in the Region being deployed: carts took up to 4 minutes to start, and ui calls carts on every page.
 
+Deployments also avoid failing requests while tasks are replaced:
+
+* **Shutdown delay.** Callers' Service Connect proxies can still send a stopping task requests for a few seconds after its application gets the stop signal, and once the application has exited, the task's own proxy answers them with 503. Each back-end task therefore runs a small `shutdown-delay` container that depends on the application. A container dependency reverses at shutdown, so ECS stops the application only after `shutdown-delay` exits, 15 seconds (`SHUTDOWN_DELAY_SECONDS`) after the task starts stopping, and the application keeps serving until then. ui doesn't need one: the ALB stops sending a ui task requests before ECS stops it.
+
 ## Injecting Chaos to simulate failures
 To induce failures into your environment, you can use the `multi-region-scenario.yml` and cause a regional service disruption. This cloudformation template uses AWS Fault Injection Service to simulate disruptions like pausing DynamoDB Global Table replication and disrupting cross region network connectivity from subnets. Running this experiment will also allow you to perform a Regional failover and observe the reconciliation process.
 
