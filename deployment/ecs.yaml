@@ -660,8 +660,14 @@ Resources:
       # fault-injection endpoints that FIS network faults use on Fargate.
       PidMode: task
       EnableFaultInjection: true
-      Cpu: 256
-      # 1024 (was 512): room for the SSM agent sidecar.
+      # 512 (was 256): on 256 units the JVM with the OpenTelemetry agent took
+      # 132-238 s to start, too close to the 300-second cap on a health check's
+      # start period, and AWS recommends 256 units for the Service Connect proxy
+      # on top of the application's own.
+      Cpu: 512
+      # 1024 (was 512): room for the SSM agent sidecar. At 512 MB the containers
+      # used about 400 MB, which left too little page cache: tasks kept re-reading
+      # their files from disk and slowed down until requests timed out.
       Memory: 1024
       RequiresCompatibilities:
         - FARGATE
@@ -714,7 +720,26 @@ Resources:
           Cpu: 0
           MemoryReservation: 50
           Essential: true
+          # During a deployment ECS stops the old tasks only after new ones pass
+          # this check, and it replaces a task that stops answering it. The
+          # readiness group checks no dependencies, so a DynamoDB problem never
+          # makes ECS replace tasks. MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
+          # below creates the endpoint; without it the check gets a 404.
+          HealthCheck:
+            Command:
+              - CMD
+              - wget
+              - -q
+              - -O
+              - /dev/null
+              - http://localhost:8080/actuator/health/readiness
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 240
           Environment:
+            - Name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
+              Value: "true"
             - Name: CARTS_DYNAMODB_TABLENAME
               Value: !Sub '{{resolve:secretsmanager:cartsTable${Env}Secret}}'
             - Name: SPRING_PROFILES_ACTIVE
@@ -957,7 +982,25 @@ Resources:
           Cpu: 0
           MemoryReservation: 50
           Essential: true
+          # Same check as carts. It must use the readiness group: the aggregate
+          # /actuator/health includes the database and RabbitMQ and returns 503
+          # when the broker is unreachable, which would make ECS replace every
+          # orders task during a broker outage.
+          HealthCheck:
+            Command:
+              - CMD
+              - wget
+              - -q
+              - -O
+              - /dev/null
+              - http://localhost:8080/actuator/health/readiness
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 120
           Environment:
+            - Name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
+              Value: "true"
             - Name: SPRING_PROFILES_ACTIVE
               Value: dsql,rabbitmq
             - Name: DSQL_ENDPOINT
@@ -1116,6 +1159,20 @@ Resources:
           Cpu: 0
           MemoryReservation: 50
           Essential: true
+          # See the carts health check. nginx serves health.html from the image;
+          # the Amazon Linux base image provides curl.
+          HealthCheck:
+            Command:
+              - CMD
+              - curl
+              - -fsS
+              - -o
+              - /dev/null
+              - http://localhost:8080/health.html
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -1263,6 +1320,18 @@ Resources:
           Cpu: 0
           MemoryReservation: 50
           Essential: true
+          # See the carts health check. The image is distroless (no shell or
+          # HTTP client), so the catalog binary probes its own /health, which
+          # checks no dependencies (source/catalog/main.go).
+          HealthCheck:
+            Command:
+              - CMD
+              - /manager
+              - healthcheck
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
           Environment:
             -
               Name: "DB_NAME"
@@ -1421,6 +1490,21 @@ Resources:
           Cpu: 0
           MemoryReservation: 50
           Essential: true
+          # See the carts health check. /health runs no dependency checks
+          # (source/checkout/src/app.controller.ts); the Alpine image has
+          # BusyBox wget and no curl.
+          HealthCheck:
+            Command:
+              - CMD
+              - wget
+              - -q
+              - -O
+              - /dev/null
+              - http://localhost:8080/health
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
           Environment:
             - Name: OTEL_RESOURCE_ATTRIBUTES
               Value: !Sub "service.name=checkout${Env},service.namespace=retail-store-ar,aws.log.group.names=${LogGroup}"

@@ -236,6 +236,12 @@ DynamoDB and Aurora Global database.
 
 ![System Dashboard](assets/static/04.system-dashboard.png)
 
+### Container health checks
+
+ui is behind the ALB, whose health check gates its deployments. Each back-end (carts, orders, catalog, checkout, assets) has a container health check instead: during a deployment ECS stops the old tasks only after the new ones pass it, and it replaces a task that stops answering. The checks call endpoints that check no dependencies (Spring's readiness group for carts and orders, `/health` for catalog and checkout, `health.html` for assets), so a database or broker outage never makes ECS replace tasks. Their start periods cover the slowest start seen in testing: 240 seconds for carts, 120 for orders and 60 for the others.
+
+Without them, ECS stopped the old back-end tasks as soon as the new containers started, and every deployment failed the journeys for 4-5 minutes in the Region being deployed: carts took up to 4 minutes to start, and ui calls carts on every page.
+
 ## Injecting Chaos to simulate failures
 To induce failures into your environment, you can use the `multi-region-scenario.yml` and cause a regional service disruption. This cloudformation template uses AWS Fault Injection Service to simulate disruptions like pausing DynamoDB Global Table replication and disrupting cross region network connectivity from subnets. Running this experiment will also allow you to perform a Regional failover and observe the reconciliation process.
 
@@ -276,8 +282,8 @@ drops monthly cost by roughly $1,000.
 | Cost Type | Amount (USD) |
 |-----------|-------------|
 | Upfront Cost | $0.00 |
-| Monthly Cost | ~$3,318 |
-| Total 12 Months Cost* | ~$39,800 |
+| Monthly Cost | ~$3,348 |
+| Total 12 Months Cost* | ~$40,200 |
 
 \* Includes upfront cost. Most line items are flat 24/7 — actual cost will
 vary with the canary schedule, log retention, and workload volume.
@@ -288,7 +294,7 @@ vary with the canary schedule, log retention, and workload volume.
 
 | Service | Monthly Cost | Configuration |
 |---------|--------------|----------------|
-| ECS Fargate | $331 | 6 services × 2 tasks on on-demand Fargate: 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 1 GB), Linux/x86 24/7. Each task also runs the SSM agent sidecar used for fault injection, which is why the two small services have 1 GB. Fargate Spot would cost about $99, but Spot can reclaim tasks in the middle of a failover or a resilience test |
+| ECS Fargate | $346 | 6 services × 2 tasks on on-demand Fargate: 4 × (1 vCPU / 2 GB), carts (0.5 vCPU / 1 GB) and assets (0.25 vCPU / 1 GB), Linux/x86 24/7. Each task also runs the SSM agent sidecar used for fault injection, which is why the two small services have 1 GB. Fargate Spot would cost about $104, but Spot can reclaim tasks in the middle of a failover or a resilience test |
 | Application Load Balancer | $20 | 1 internal ALB ($16 base + ~$4 LCU) |
 | VPC Interface Endpoints | $329 | 15 endpoints × 3 AZs × $0.01/AZ-hr (S3 + DynamoDB are gateway endpoints, free) |
 | Aurora MySQL Serverless v2 | $175 | 2 instances × 1 ACU minimum × $0.12/ACU-hr (idle) |
@@ -302,7 +308,7 @@ vary with the canary schedule, log retention, and workload volume.
 | Secrets Manager | $20 | ~50 secrets ($0.40 each) |
 | KMS | $1 | 1 multi-Region CMK + light request volume |
 | CloudWatch Logs | ~$30 | ECS task + app logs (varies with traffic) |
-| **Per-Region subtotal** | **~$1,620** | |
+| **Per-Region subtotal** | **~$1,635** | |
 
 ### Shared / Global Costs (charged once, not per Region)
 
@@ -318,10 +324,10 @@ vary with the canary schedule, log retention, and workload volume.
 
 | | Monthly Cost |
 |---|---|
-| US East (N. Virginia) | ~$1,620 |
-| US West (Oregon) | ~$1,620 |
+| US East (N. Virginia) | ~$1,635 |
+| US West (Oregon) | ~$1,635 |
 | Shared / global | ~$78 |
-| **Total** | **~$3,318** |
+| **Total** | **~$3,348** |
 
 ### Cost-reduction levers
 
