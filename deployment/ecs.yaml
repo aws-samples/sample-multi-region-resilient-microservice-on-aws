@@ -674,7 +674,7 @@ Resources:
     Properties:
       ServiceName: !Sub carts${Env}
       CapacityProviderStrategy:
-        - CapacityProvider: FARGATE_SPOT
+        - CapacityProvider: FARGATE
           Weight: 1
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
@@ -875,7 +875,7 @@ Resources:
     Properties:
       ServiceName: !Sub orders${Env}
       CapacityProviderStrategy:
-        - CapacityProvider: FARGATE_SPOT
+        - CapacityProvider: FARGATE
           Weight: 1
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
@@ -963,7 +963,7 @@ Resources:
     Properties:
       ServiceName: !Sub assets${Env}
       CapacityProviderStrategy:
-        - CapacityProvider: FARGATE_SPOT
+        - CapacityProvider: FARGATE
           Weight: 1
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
@@ -1093,7 +1093,7 @@ Resources:
     Properties:
       ServiceName: !Sub catalog${Env}
       CapacityProviderStrategy:
-        - CapacityProvider: FARGATE_SPOT
+        - CapacityProvider: FARGATE
           Weight: 1
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
@@ -1256,7 +1256,7 @@ Resources:
     Properties:
       ServiceName: !Sub checkout${Env}
       CapacityProviderStrategy:
-        - CapacityProvider: FARGATE_SPOT
+        - CapacityProvider: FARGATE
           Weight: 1
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
@@ -1440,7 +1440,7 @@ Resources:
           ContainerName: ui 
           ContainerPort: 8080
       CapacityProviderStrategy:
-        - CapacityProvider: FARGATE_SPOT
+        - CapacityProvider: FARGATE
           Weight: 1
       Cluster:  !Ref EcsCluster
       DesiredCount: 2
