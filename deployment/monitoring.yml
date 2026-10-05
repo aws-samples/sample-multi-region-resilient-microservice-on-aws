@@ -45,6 +45,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'aurora-cpu-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
       MetricName: CPUUtilization
       Namespace: AWS/RDS
       Statistic: Average
@@ -64,6 +67,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'aurora-connections-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
       MetricName: DatabaseConnections
       Namespace: AWS/RDS
       Statistic: Average
@@ -83,6 +89,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'aurora-lag-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: catalog
       MetricName: AuroraGlobalDBReplicationLag
       Namespace: AWS/RDS
       Statistic: Average
@@ -106,11 +115,17 @@ Resources:
       AlarmActions:
         - !Ref CriticalAlarmTopic
       AlarmRule: !Sub '(ALARM(${AuroraConnectionsAlarm}) AND (ALARM(${AuroraCPUAlarm}) OR ALARM(${AuroraReplicaLagAlarm})))'
+      Tags:
+        - Key: service
+          Value: catalog
 
   DynamoDBUserErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'dynamodb-user-errors-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: cart
       MetricName: UserErrors
       Namespace: AWS/DynamoDB
       Statistic: Sum
@@ -127,6 +142,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'dynamodb-system-errors-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: cart
       MetricName: SystemErrors
       Namespace: AWS/DynamoDB
       Statistic: Sum
@@ -147,11 +165,17 @@ Resources:
       AlarmActions:
         - !Ref CriticalAlarmTopic
       AlarmRule: !Sub '(ALARM(${DynamoDBUserErrorsAlarm}) OR ALARM(${DynamoDBSystemErrorsAlarm}))'
+      Tags:
+        - Key: service
+          Value: cart
 
   OrdersCreatedAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'orders-created-zero-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: orders
       MetricName: !Sub 'OrdersCreated${Env}'
       Namespace: ecommerce
       Statistic: Sum
@@ -167,6 +191,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub 'canary-success-low-${AWS::Region}${Env}'
+      Tags:
+        - Key: service
+          Value: shared
       MetricName: SuccessPercent
       Namespace: CloudWatchSynthetics
       Statistic: Average
@@ -769,6 +796,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-home-failed${Env}"
+      Tags:
+        - Key: service
+          Value: ui
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -785,6 +815,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-cart-failed${Env}"
+      Tags:
+        - Key: service
+          Value: cart
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -801,6 +834,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-catalog-failed${Env}"
+      Tags:
+        - Key: service
+          Value: catalog
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -817,6 +853,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-rmt-orders-failed${Env}"
+      Tags:
+        - Key: service
+          Value: orders
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -833,6 +872,9 @@ Resources:
     Type: AWS::CloudWatch::Alarm
     Properties:
       AlarmName: !Sub "ngrh-lcl-home-healthy${Env}"
+      Tags:
+        - Key: service
+          Value: ui
       Namespace: CloudWatchSynthetics
       MetricName: SuccessPercent
       Dimensions:
@@ -849,6 +891,9 @@ Resources:
     Type: AWS::CloudWatch::CompositeAlarm
     Properties:
       AlarmName: !Sub "ngrh-region-switch-trigger${Env}"
+      Tags:
+        - Key: service
+          Value: shared
       # LclHomeHealthyAlarm is an inverted-sense alarm: it uses
       # SuccessPercent >= 90, so its ALARM state means the LOCAL region is
       # HEALTHY. The guard below must therefore reference ALARM(), not OK().

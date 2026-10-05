@@ -110,6 +110,9 @@ Resources:
   localSyntheticsCanaryCart:
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: cart
       Name: !Sub lcl-rgnl-cart${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -196,6 +199,9 @@ Resources:
   localSyntheticsCanaryCatalog:
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: catalog
       Name: !Sub lcl-rgnl-catalog${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -275,6 +281,9 @@ Resources:
   localSyntheticsCanaryOrders:
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: orders
       Name: !Sub lcl-rgnl-orders${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -445,6 +454,9 @@ Resources:
     Condition: notPrimaryOnly
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: cart
       Name: !Sub rmt-rgnl-cart${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -532,6 +544,9 @@ Resources:
     Condition: notPrimaryOnly
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: catalog
       Name: !Sub rmt-rgnl-catalog${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -612,6 +627,9 @@ Resources:
     Condition: notPrimaryOnly
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: orders
       Name: !Sub rmt-rgnl-orders${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -782,6 +800,9 @@ Resources:
     Condition: notPrimaryOnly
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: cart
       Name: !Sub global-cart${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -869,6 +890,9 @@ Resources:
     Condition: notPrimaryOnly
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: catalog
       Name: !Sub global-catalog${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:
@@ -949,6 +973,9 @@ Resources:
     Condition: notPrimaryOnly
     Type: 'AWS::Synthetics::Canary'
     Properties:
+      Tags:
+        - Key: service
+          Value: orders
       Name: !Sub global-orders${Env}
       ExecutionRoleArn: !Sub '{{resolve:ssm:canaryRoleArn${Env}}}'
       VPCConfig:

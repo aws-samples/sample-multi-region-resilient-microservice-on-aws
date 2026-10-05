@@ -212,6 +212,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: checkout
   CatalogRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -229,6 +232,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: catalog
   CartsRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -246,6 +252,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: cart
   AssetsRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -263,6 +272,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: assets
   OrdersRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -280,6 +292,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: orders
   UIRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -297,6 +312,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: ui
   CWAgentRepo:
     Type: AWS::ECR::Repository
     Metadata:
