@@ -118,6 +118,20 @@ Resources:
                 # These ECS actions do not support resource-level permissions
                 # and require Resource '*' (see checkov skip CKV_AWS_111 above).
                 Resource: '*'
+              # The apps template tags its task definitions (service=<name>, for
+              # Resilience Hub tag discovery), so every revision CloudFormation
+              # registers during a repave is tagged as it is created, and ECS
+              # authorizes that as ecs:TagResource. Without this grant both
+              # Regions' repave updates rolled back (test2, 2026-10-05). The
+              # condition limits it to tagging at registration.
+              - Effect: Allow
+                Action: ecs:TagResource
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task-definition/apps${Env}-*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task-definition/apps${Env}-*'
+                Condition:
+                  StringEquals:
+                    ecs:CreateAction: RegisterTaskDefinition
               - Effect: Allow
                 Action: iam:PassRole
                 Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*${Env}*'
