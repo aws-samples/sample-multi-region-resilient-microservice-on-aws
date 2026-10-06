@@ -6,6 +6,9 @@ requires (``aws.py``), so the tooling doesn't depend on a boto3 recent enough to
 service it calls.
 
 Commands:
-  replay   how the journey alarms and the failover triggers would have behaved over past
-           canary data (make ngrh-alarm-replay). Read-only.
+  replay        how the journey alarms and the failover triggers would have behaved over past
+                canary data (make ngrh-alarm-replay). Read-only.
+  reconcile     create or update the tests in ngrh-tests.json and make their alarm sources match
+                (make ngrh-tests); --check only says whether they have drifted.
+  delete-tests  delete every test on the ngrh stack's services (make destroy-ngrh runs it first).
 """

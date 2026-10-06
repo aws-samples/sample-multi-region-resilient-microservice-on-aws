@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "tests": [
+    {
+      "name": "orders-broker-dependency",
+      "service": "orders",
+      "template": "aws-dependency-validation:rtdep001",
+      "parameters": {
+        "region": ["primary"],
+        "dependencies": [{"lookup": "mq-broker-host", "region": "primary"}],
+        "duration": ["15"]
+      },
+      "successAlarms": [
+        {"name": "journey-lcl-orders", "region": "primary"},
+        {"name": "journey-global-orders", "region": "primary"}
+      ],
+      "observabilityAlarms": [
+        {"name": "hop-orders-slow", "region": "primary"},
+        {"name": "hop-checkout-errors", "region": "primary"},
+        {"name": "orders-created-zero", "region": "primary"}
+      ],
+      "stopAlarms": [
+        {"name": "region-degraded", "region": "primary"}
+      ],
+      "evidenceAlarms": [
+        {"name": "region-degraded", "region": "standby"},
+        {"group": "hop", "region": "primary"}
+      ],
+      "runChecks": [],
+      "expected": "FAIL"
+    }
+  ]
+}

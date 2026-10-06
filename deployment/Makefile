@@ -919,7 +919,23 @@ ngrh-alarm-replay:
 	@python3 -m ngrh_testing replay --primary-region $(PRIMARY_REGION) --standby-region $(STANDBY_REGION) \
 	--env="$(ENV)" --days $(DAYS)
 
+####
+# NGRH tests (design 5.8 and 5.9): deployment/ngrh-tests.json is the spec, and python3 -m
+# ngrh_testing (standard library only, run from this directory) creates, updates and deletes the
+# tests it describes in Resilience Hub. ENV starts with a dash, so it goes after an =.
+####
+NGRH_TESTING_ARGS = --primary-region $(PRIMARY_REGION) --standby-region $(STANDBY_REGION) --env="$(ENV)"
+
+# Create or update every test in the spec, and make its alarm sources match. Re-runnable: a test that
+# matches is left alone. Run it after `make ngrh`, `make monitoring` and `make deploy`.
+ngrh-tests:
+	@python3 -m ngrh_testing reconcile $(NGRH_TESTING_ARGS)
+
+# Deleting a service that still has tests is not documented to work, so the tests go first. The tool
+# refuses while a test run is active, and does nothing if the ngrh stack is already gone.
 destroy-ngrh:
+	@echo "Deleting the NGRH tests before the stack..."
+	@python3 -m ngrh_testing delete-tests $(NGRH_TESTING_ARGS)
 	@echo "Emptying NGRH bucket before stack delete..."
 	$(eval NGRH_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='NgrhBucketName'].OutputValue" --output text 2>/dev/null))
 	@if [ -n "$(NGRH_BUCKET)" ] && [ "$(NGRH_BUCKET)" != "None" ]; then \
