@@ -907,6 +907,18 @@ ngrh-assess:
 	@echo "Assessments started. View findings per service with:"
 	@echo "  aws resiliencehubv2 list-failure-mode-findings --service-arn <arn> --region $(PRIMARY_REGION)"
 
+####
+# Alarm replay (read-only, design 5.9): how the journey alarms and the failover triggers
+# would have behaved over the last DAYS days of canary data (1-14; CloudWatch keeps
+# one-minute datapoints for 15 days). Run it before arming automatic failover: it exits 3
+# when a trigger's conditions were met, and lists every journey alarm that fired.
+####
+DAYS ?= 14
+
+ngrh-alarm-replay:
+	@python3 -m ngrh_testing replay --primary-region $(PRIMARY_REGION) --standby-region $(STANDBY_REGION) \
+	--env="$(ENV)" --days $(DAYS)
+
 destroy-ngrh:
 	@echo "Emptying NGRH bucket before stack delete..."
 	$(eval NGRH_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='NgrhBucketName'].OutputValue" --output text 2>/dev/null))
