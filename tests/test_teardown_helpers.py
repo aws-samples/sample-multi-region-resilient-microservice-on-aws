@@ -34,6 +34,15 @@ A fourth, found by counting Cloud Map namespaces in the e2e account on 2026-09-3
    deletion for both the Makefile and the guard, exits non-zero on any failure,
    and the role grants the three calls it makes.
 
+A fifth, found reviewing the FIS sidecar change before its first e2e run
+(2026-10-06):
+
+5. regionalBaseInfra.yaml gained the amazon-ssm-agent repository the sidecar
+   image is mirrored into, but neither destroy-ecr-* nor the guard
+   force-deleted it. CloudFormation can't delete a repository that still holds
+   images, so baseInfra would have failed to delete in both Regions. Both lists
+   are now checked against the repositories baseInfra declares.
+
 The stub `aws` below is a tiny state machine over a JSON file: RDS global
 cluster membership with asynchronous removal, CloudFormation stacks with
 asynchronous deletion and an optional first-attempt failure, S3 buckets
@@ -760,3 +769,59 @@ class TestTeardownGuardCloudMap:
         assert "AccessDeniedException" in r.stderr              # the cause is in the log, not swallowed
         final = json.loads(state.read_text())
         assert final["namespaces"][PRIMARY] == _namespace("ns-primary") and final["namespaces"][STANDBY] == []
+
+
+# ---------------------------------------------------------------------------
+# Image repositories: every one baseInfra declares is force-deleted first
+# ---------------------------------------------------------------------------
+
+BASE_INFRA = DEPLOYMENT / "regionalBaseInfra.yaml"
+
+
+def _declared_repositories():
+    """Names, without the Env suffix, of the image repositories baseInfra creates."""
+    names = set()
+    for res in _load_template(BASE_INFRA)["Resources"].values():
+        if res["Type"] != "AWS::ECR::Repository":
+            continue
+        name = res["Properties"]["RepositoryName"]
+        assert name.endswith("${Env}"), f"{name}: repository names carry the Env suffix"
+        names.add(name[: -len("${Env}")])
+    assert names, "regionalBaseInfra.yaml declares no image repositories?"
+    return names
+
+
+def _recipe(target):
+    """A Makefile target's recipe: the tab-indented lines after `target:`."""
+    lines = MAKEFILE.read_text().splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(target + ":"))
+    recipe = []
+    for line in lines[start + 1:]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line)
+    return "\n".join(recipe)
+
+
+class TestImageRepositoryTeardown:
+    """CloudFormation can't delete a repository that still holds images (no
+    EmptyOnDelete), so baseInfra fails to delete unless every repository it
+    declares has been force-deleted first."""
+
+    @pytest.mark.parametrize("target,region", [("destroy-ecr-primary", "$(PRIMARY_REGION)"),
+                                               ("destroy-ecr-standby", "$(STANDBY_REGION)")])
+    def test_destroy_ecr_force_deletes_every_repository(self, target, region):
+        deleted = set(re.findall(
+            r"aws ecr delete-repository --force --repository-name (\S+)\$\{ENV\} --region " + re.escape(region),
+            _recipe(target)))
+        missing = _declared_repositories() - deleted
+        assert not missing, f"{target} does not force-delete {sorted(missing)}"
+
+    def test_the_guard_force_deletes_every_repository(self):
+        loop = re.search(
+            r"for repo in ([^;]+); do\n\s+aws ecr delete-repository --force --repository-name \$\{repo\}"
+            + re.escape(ENV_SUFFIX),
+            _teardown_script())
+        assert loop, "the e2e Teardown no longer loops over the image repositories"
+        missing = _declared_repositories() - set(loop.group(1).split())
+        assert not missing, f"the e2e Teardown does not force-delete {sorted(missing)}"

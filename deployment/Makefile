@@ -687,6 +687,7 @@ destroy-ecr-primary: destroy-apps-primary
 	@aws ecr delete-repository --force --repository-name cloudwatch-agent${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-java${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-node${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
+	@aws ecr delete-repository --force --repository-name amazon-ssm-agent${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
 
 destroy-ecr-standby: destroy-apps-standby
 	@echo "Deleting ECR Repos..."
@@ -699,6 +700,7 @@ destroy-ecr-standby: destroy-apps-standby
 	@aws ecr delete-repository --force --repository-name cloudwatch-agent${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-java${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-node${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
+	@aws ecr delete-repository --force --repository-name amazon-ssm-agent${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
 
 destroy-global_routing: destroy-canaries-standby destroy-canaries-primary destroy-region-switch
 	@echo "Deleting global routing stack..."

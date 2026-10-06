@@ -574,7 +574,7 @@ e2e.addJob('e2e', {
         '',
         '# Delete ECR repos in both regions.',
         'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '  for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node; do',
+        '  for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node amazon-ssm-agent; do',
         '    aws ecr delete-repository --force --repository-name ${repo}${{ env.ENV }} --region "$region" --no-cli-pager 2>/dev/null || true',
         '  done',
         'done',
