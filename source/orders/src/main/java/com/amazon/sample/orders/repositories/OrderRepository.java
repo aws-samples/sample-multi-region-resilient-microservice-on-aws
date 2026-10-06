@@ -22,6 +22,14 @@ import com.amazon.sample.orders.entities.OrderEntity;
 import org.springframework.data.repository.CrudRepository;
 import org.springframework.data.repository.PagingAndSortingRepository;
 
+import java.util.List;
+
 public interface OrderRepository extends CrudRepository<OrderEntity, String>, PagingAndSortingRepository<OrderEntity, String> {
 
+    /**
+     * The 20 newest orders. Unlike findAll(Pageable), which returns a Page, this runs no
+     * count query: that count read the whole table on every list call (1.3 s of a 2.9 s
+     * GET /orders in test2), and the list never used it.
+     */
+    List<OrderEntity> findTop20ByOrderByCreatedOnDesc();
 }
