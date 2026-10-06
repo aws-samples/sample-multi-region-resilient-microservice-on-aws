@@ -931,6 +931,30 @@ NGRH_TESTING_ARGS = --primary-region $(PRIMARY_REGION) --standby-region $(STANDB
 ngrh-tests:
 	@python3 -m ngrh_testing reconcile $(NGRH_TESTING_ARGS)
 
+# make ngrh-test-preflight [TEST=<name>|all] [MODE=live|static]: refuse, with every reason, unless a
+# run can go ahead. static leaves out the checks about what is happening right now (alarm states,
+# active runs, FIS experiments, plan executions): CI runs it right after a deploy. Exits 2 when refused.
+TEST ?=
+MODE ?= live
+RUN ?=
+
+ngrh-test-preflight:
+	@python3 -m ngrh_testing preflight $(NGRH_TESTING_ARGS) --test "$(if $(TEST),$(TEST),all)" --mode "$(MODE)"
+
+# make ngrh-test TEST=<name>: preflight (live), start the test's run, follow it to its end, and write
+# deployment/ngrh-test-reports/<test>-<run>.{json,md}. The run injects a real fault into the deployed
+# estate, so it names one test; exits 3 if the verdict is not the one the spec expects.
+ngrh-test:
+	@python3 -m ngrh_testing run $(NGRH_TESTING_ARGS) --test "$(TEST)"
+
+# make ngrh-test-stop TEST=<name>: stop the test's active run.
+ngrh-test-stop:
+	@python3 -m ngrh_testing stop $(NGRH_TESTING_ARGS) --test "$(TEST)"
+
+# make ngrh-test-report TEST=<name> [RUN=<id>]: collect a run's report (the test's latest run by default).
+ngrh-test-report:
+	@python3 -m ngrh_testing report $(NGRH_TESTING_ARGS) --test "$(TEST)" $(if $(RUN),--run "$(RUN)")
+
 # Deleting a service that still has tests is not documented to work, so the tests go first. The tool
 # refuses while a test run is active, and does nothing if the ngrh stack is already gone.
 destroy-ngrh:

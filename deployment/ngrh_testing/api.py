@@ -5,7 +5,7 @@ function returns every item."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .aws import AwsCli
 from .context import SOURCE_OBSERVABILITY, SOURCE_SUCCESS
@@ -63,8 +63,9 @@ def source_inputs(sources: Sequence[Tuple[str, str]]) -> List[Dict[str, Any]]:
     return [{key[kind]: {"alarmArn": arn}} for kind, arn in sorted(sources)]
 
 
-def list_test_runs(aws: AwsCli, region: str, service_arn: str) -> List[Dict[str, Any]]:
-    return aws.call(SERVICE, "list-test-runs", region, service_arn=service_arn).get("testRuns", [])
+def list_test_runs(aws: AwsCli, region: str, service_arn: str, test_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    params = {"test_id": test_id} if test_id else {}
+    return aws.call(SERVICE, "list-test-runs", region, service_arn=service_arn, **params).get("testRuns", [])
 
 
 def active_runs(aws: AwsCli, region: str, service_arns: Sequence[str]) -> List[Tuple[str, Dict[str, Any]]]:

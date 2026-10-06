@@ -15,54 +15,17 @@ from pathlib import Path
 import pytest
 
 TESTS = Path(__file__).resolve().parent
-DEPLOYMENT = TESTS.parent / "deployment"
-sys.path.insert(0, str(DEPLOYMENT))
 sys.path.insert(0, str(TESTS))
 
+from ngrh_scenario import (  # noqa: E402
+    COMPOSITES, DEPLOYMENT, DESIRED, DESIRED_SOURCES, HOPS, NAME, OBSERVABILITY, SPEC_FILE, SUCCESS, TEMPLATE,
+    deployed_fake, environment, spec_tests,
+)
 from ngrh_fake_aws import (  # noqa: E402
     ACCOUNT, BROKER_HOST, ENV, PRIMARY, STANDBY, FakeAws, alarm_arn, service_arn, template_arn,
 )
 
 from ngrh_testing import cli, context, reconcile, spec  # noqa: E402
-
-SPEC_FILE = DEPLOYMENT / "ngrh-tests.json"
-TEMPLATE = "aws-dependency-validation:rtdep001"
-NAME = "orders-broker-dependency"
-
-SUCCESS = [f"journey-lcl-orders-{PRIMARY}{ENV}", f"journey-global-orders-{PRIMARY}{ENV}"]
-OBSERVABILITY = [f"hop-orders-slow-{PRIMARY}{ENV}", f"hop-checkout-errors-{PRIMARY}{ENV}", f"orders-created-zero-{PRIMARY}{ENV}"]
-HOPS = [f"hop-{s}-{k}-{PRIMARY}{ENV}" for s in ("ui", "catalog", "carts", "checkout", "orders") for k in ("errors", "slow")]
-COMPOSITES = [(f"region-degraded-{PRIMARY}{ENV}", PRIMARY), (f"region-degraded-{STANDBY}{ENV}", STANDBY)]
-
-# What the shipped spec should ask Resilience Hub for, written out independently of the code under test.
-DESIRED = {
-    "service_arn": service_arn("orders"),
-    "test_template_arn": template_arn(TEMPLATE),
-    "parameters": {"region": [PRIMARY], "dependencies": [BROKER_HOST], "duration": ["15"]},
-    "role_name": f"ngrh-test-experiment{ENV}",
-    "logging_configuration": {"cloudWatchLogGroupArn": f"arn:aws:logs:{PRIMARY}:{ACCOUNT}:log-group:/aws/fis/ngrh-tests{ENV}"},
-    "stop_conditions": [{"source": "aws:cloudwatch:alarm", "value": alarm_arn(f"region-degraded-{PRIMARY}{ENV}")}],
-}
-DESIRED_SOURCES = sorted(
-    [("SUCCESS_CRITERIA", alarm_arn(n)) for n in SUCCESS] + [("OBSERVABILITY", alarm_arn(n)) for n in OBSERVABILITY]
-)
-
-
-def deployed_fake():
-    fake = FakeAws()
-    for name in SUCCESS + OBSERVABILITY + HOPS:
-        fake.add_alarm(name)
-    for name, region in COMPOSITES:
-        fake.add_alarm(name, region, kind="CompositeAlarm")
-    return fake
-
-
-def environment(fake):
-    return context.load_environment(fake, PRIMARY, STANDBY, ENV)
-
-
-def spec_tests():
-    return spec.load(str(SPEC_FILE)).select("all")
 
 
 def run_reconcile(fake, write=True):
@@ -402,16 +365,40 @@ REAL_MAKE = shutil.which("make")
 @pytest.mark.skipif(REAL_MAKE is None, reason="make not installed")
 class TestMakefile:
 
-    def _dry_run(self, tmp_path, target):
+    def _dry_run(self, tmp_path, target, *variables):
         # The Makefile shells out to aws while parsing; a stub that answers nothing is enough for -n.
         stub = tmp_path / "aws"
         stub.write_text("#!/bin/sh\nexit 0\n")
         stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
         env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}")
-        r = subprocess.run([REAL_MAKE, "-C", str(DEPLOYMENT), "-n", target, f"ENV={ENV}"], env=env,
+        r = subprocess.run([REAL_MAKE, "-C", str(DEPLOYMENT), "-n", target, f"ENV={ENV}", *variables], env=env,
                            capture_output=True, text=True, timeout=120)
         assert r.returncode == 0, r.stdout + r.stderr
         return r.stdout.splitlines()
+
+    def _tool_line(self, tmp_path, target, *variables):
+        (line,) = [l for l in self._dry_run(tmp_path, target, *variables) if "ngrh_testing" in l]
+        return line
+
+    def test_preflight_checks_everything_live_unless_told_otherwise(self, tmp_path):
+        line = self._tool_line(tmp_path, "ngrh-test-preflight")
+        assert line.startswith("python3 -m ngrh_testing preflight --primary-region ")
+        assert line.endswith('--test "all" --mode "live"')
+        assert self._tool_line(tmp_path, "ngrh-test-preflight", "TEST=orders-broker-dependency", "MODE=static").endswith(
+            '--test "orders-broker-dependency" --mode "static"')
+
+    def test_run_stop_and_report_name_the_test_and_the_env(self, tmp_path):
+        for target, command in (("ngrh-test", "run"), ("ngrh-test-stop", "stop"), ("ngrh-test-report", "report")):
+            line = self._tool_line(tmp_path, target, "TEST=orders-broker-dependency")
+            assert line.startswith(f"python3 -m ngrh_testing {command} --primary-region ")
+            assert f'--env="{ENV}"' in line and '--test "orders-broker-dependency"' in line
+
+    def test_a_run_id_reaches_the_report_only_when_given(self, tmp_path):
+        assert '--run "run-0042"' in self._tool_line(tmp_path, "ngrh-test-report", "TEST=x", "RUN=run-0042")
+        assert "--run" not in self._tool_line(tmp_path, "ngrh-test-report", "TEST=x")
+
+    def test_running_without_naming_a_test_is_refused_by_the_tool_not_run_for_all(self, tmp_path):
+        assert self._tool_line(tmp_path, "ngrh-test").endswith('--test ""')
 
     def test_destroy_ngrh_deletes_the_tests_before_the_stack(self, tmp_path):
         lines = self._dry_run(tmp_path, "destroy-ngrh")

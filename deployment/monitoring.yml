@@ -1298,3 +1298,18 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
+  # Experiment logs of the NGRH tests (design 5.3): a test logs to the group of the Region its fault lands
+  # in, which make ngrh-tests sets on the test. The stack owns the group, so deleting the stack deletes it.
+  FisLogGroup:
+    Type: AWS::Logs::LogGroup
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_158
+            comment: "Experiment logs hold only FIS action records (resource ARNs and states), no customer data."
+    Properties:
+      LogGroupName: !Sub "/aws/fis/ngrh-tests${Env}"
+      RetentionInDays: 30
+      Tags:
+        - Key: service
+          Value: shared

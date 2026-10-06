@@ -11,4 +11,9 @@ Commands:
   reconcile     create or update the tests in ngrh-tests.json and make their alarm sources match
                 (make ngrh-tests); --check only says whether they have drifted.
   delete-tests  delete every test on the ngrh stack's services (make destroy-ngrh runs it first).
+  preflight     refuse a run, with every reason, unless what it needs is in place (make
+                ngrh-test-preflight); live or static.
+  run           preflight, start one test's run, follow it to its end and write its report (make ngrh-test).
+  stop          stop the test's active run (make ngrh-test-stop).
+  report        collect a run's report as JSON and markdown (make ngrh-test-report).
 """

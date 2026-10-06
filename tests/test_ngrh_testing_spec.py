@@ -188,12 +188,15 @@ class TestSchema:
         assert len(group.alarm_names()) == 10 and group.alarm_names()[0] == "hop-ui-errors"
         assert spec.EvidenceRef("standby", name="region-degraded").alarm_names() == ("region-degraded",)
 
-    def test_the_duration_is_known_only_when_it_is_a_plain_number(self):
+    def test_the_duration_is_the_parameter_or_else_the_templates_default(self):
         test = spec.load(str(SPEC_FILE)).tests[0]
         assert test.duration_minutes == 15
         data, t = one(shipped())
         del t["parameters"]["duration"]
-        assert spec.parse(data).tests[0].duration_minutes is None
+        assert spec.parse(data).tests[0].duration_minutes == 30
+        assert {k: v.default_duration for k, v in spec.TEMPLATES.items()} == {
+            "aws-dependency-validation:rtdep001": 30, "aws-multi-region-isolation:rtmr001": 180,
+            "aws-multi-region-recovery:rtmr002": 30}
 
 
 # --- the spec against the templates ---------------------------------------------------------------
@@ -272,3 +275,60 @@ class TestSpecAgainstTemplates:
             assert shape.fault_region in shape.parameters and shape.fault_region in shape.required, template
             assert set(shape.required) <= set(shape.parameters), template
             assert set(shape.multi_valued) <= set(shape.parameters), template
+
+
+# --- the documents and templates around the tool -------------------------------------------------------
+
+ROOT = DEPLOYMENT.parent
+GROUND_TRUTH = ROOT / "docs" / "ngrh-test-ground-truth.md"
+
+
+def _ground_truth():
+    """{test name: expected result} from the '## <name>' sections holding an 'Expected result: X' line."""
+    found = {}
+    name = None
+    for line in GROUND_TRUTH.read_text().splitlines():
+        heading = re.match(r"^## (\S+)$", line)
+        if heading:
+            name = heading.group(1)
+        expected = re.match(r"^Expected result: (PASS|FAIL|UNKNOWN)$", line)
+        if expected:
+            assert name not in found, f"{name} has two expected results"
+            found[name] = expected.group(1)
+    return found
+
+
+class TestDocsAndTemplates:
+
+    def test_the_ground_truth_doc_gives_each_tests_expected_result_as_the_spec_does(self):
+        parsed = spec.load(str(SPEC_FILE))
+        assert _ground_truth() == {t.name: t.expected for t in parsed.tests}
+
+    def test_the_fis_log_group_the_tests_log_to_is_the_one_monitoring_yml_creates(self):
+        group = _template("monitoring.yml")["Resources"]["FisLogGroup"]
+        assert group["Type"] == "AWS::Logs::LogGroup"
+        assert group["Properties"]["LogGroupName"] == {"!Sub": context.FIS_LOG_GROUP + "${Env}"}
+        assert group["Properties"]["RetentionInDays"] == 30
+
+    def test_the_experiment_role_can_set_up_log_delivery_as_cloudwatch_logs_documents(self):
+        role = _template("ngrh.yaml")["Resources"]["TestExperimentRole"]
+        statements = {s["Sid"]: s for p in role["Properties"]["Policies"] for s in p["PolicyDocument"]["Statement"]}
+        create = statements["FisLogDeliveryCreate"]
+        assert (create["Effect"], create["Action"], create["Resource"]) == ("Allow", "logs:CreateLogDelivery", "*")
+        groups = statements["FisLogDeliveryGroups"]
+        assert groups["Effect"] == "Allow"
+        assert sorted(groups["Action"]) == ["logs:DescribeLogGroups", "logs:DescribeResourcePolicies", "logs:PutResourcePolicy"]
+        assert groups["Resource"] == {"!Sub": "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:*"}
+
+    def test_every_make_target_of_the_tool_is_in_the_readme(self):
+        readme = (ROOT / "README.md").read_text()
+        makefile = (DEPLOYMENT / "Makefile").read_text()
+        targets = sorted(re.findall(r"^(ngrh-test[a-z-]*):", makefile, flags=re.M))
+        assert targets == ["ngrh-test", "ngrh-test-preflight", "ngrh-test-report", "ngrh-test-stop", "ngrh-tests"]
+        for target in targets:
+            assert re.search(rf"^\| `make {re.escape(target)}[ `]", readme, flags=re.M), f"the README table does not describe make {target}"
+
+    def test_the_reports_directory_is_the_one_git_ignores(self):
+        from ngrh_testing import report
+        assert Path(report.REPORT_DIR) == DEPLOYMENT / "ngrh-test-reports"
+        assert "deployment/ngrh-test-reports/" in (ROOT / ".gitignore").read_text().splitlines()

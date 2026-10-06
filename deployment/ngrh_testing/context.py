@@ -98,10 +98,10 @@ class Environment:
         return f"arn:{self.partition}:logs:{region}:{self.account_id}:log-group:{self.log_group_name}"
 
 
-def stack_outputs(aws: AwsCli, region: str, env: str) -> Optional[Dict[str, str]]:
-    """The ngrh<ENV> stack's outputs, or None when the stack does not exist."""
+def stack_outputs(aws: AwsCli, region: str, stack_name: str) -> Optional[Dict[str, str]]:
+    """A stack's outputs, or None when the stack does not exist."""
     try:
-        described = aws.call("cloudformation", "describe-stacks", region, stack_name=f"ngrh{env}")
+        described = aws.call("cloudformation", "describe-stacks", region, stack_name=stack_name)
     except AwsCliError as e:
         if "does not exist" in str(e):
             return None
@@ -109,9 +109,14 @@ def stack_outputs(aws: AwsCli, region: str, env: str) -> Optional[Dict[str, str]
     return {o["OutputKey"]: o["OutputValue"] for o in described["Stacks"][0].get("Outputs", [])}
 
 
+def ngrh_outputs(aws: AwsCli, region: str, env: str) -> Optional[Dict[str, str]]:
+    """The ngrh<ENV> stack's outputs, or None when the stack does not exist."""
+    return stack_outputs(aws, region, f"ngrh{env}")
+
+
 def load_environment(aws: AwsCli, primary_region: str, standby_region: str, env: str) -> Environment:
     identity = aws.call("sts", "get-caller-identity")
-    outputs = stack_outputs(aws, primary_region, env)
+    outputs = ngrh_outputs(aws, primary_region, env)
     if outputs is None:
         raise ContextError([f"stack ngrh{env} does not exist in {primary_region}; deploy it first (make ngrh)"])
     return Environment(primary_region, standby_region, env, identity["Account"], identity["Arn"].split(":")[1], outputs)

@@ -329,6 +329,24 @@ Resources:
                   - ssm:ListCommands
                   - tag:GetResources
                 Resource: "*"
+              # Experiment logging to CloudWatch Logs (design 5.3): the permissions the CloudWatch Logs
+              # guide ("Logs sent to CloudWatch Logs") lists for setting up log delivery. Each test logs
+              # to the /aws/fis/ngrh-tests${Env} group monitoring.yml creates in the Region its fault
+              # lands in. CreateLogDelivery accepts no resource ARN. The other three are documented for
+              # log-group:* in the account: the guide says a single named group does not work for them.
+              # Whether FIS reads these from this role or from the invoker role is confirmed by the first
+              # live run: an empty log group means CloudTrail shows which principal was denied.
+              - Sid: FisLogDeliveryCreate
+                Effect: Allow
+                Action: logs:CreateLogDelivery
+                Resource: "*"
+              - Sid: FisLogDeliveryGroups
+                Effect: Allow
+                Action:
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:*"
 
   # -------------------------------------------------------------------------
   # Resiliency policies. One RTO/RPO bar per tier, applied across AZ + Region.

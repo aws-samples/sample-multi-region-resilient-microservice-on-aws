@@ -26,6 +26,10 @@ EXPECTED_VALUES = ("PASS", "FAIL", "UNKNOWN")
 # The NGRH services ngrh.yaml declares, by the name the Outputs use (OrdersServiceArn and so on).
 SERVICES = ("ui", "catalog", "cart", "checkout", "orders", "assets")
 
+# The ECS service that runs each one (ecs.yaml names them <name><Env>). Only cart differs: carts.
+ECS_SERVICE_NAMES = {"ui": "ui", "catalog": "catalog", "cart": "carts", "checkout": "checkout",
+                     "orders": "orders", "assets": "assets"}
+
 # The back-ends behind ui that have hop alarms (monitoring.yml): their Service Connect names.
 HOP_SERVICES = ("ui", "catalog", "carts", "checkout", "orders")
 HOP_KINDS = ("errors", "slow")
@@ -61,12 +65,14 @@ REGION_PARAMETERS = ("region", "isolatedRegion", "destinationRegion", "impairedR
 @dataclass(frozen=True)
 class TemplateShape:
     """What a test template accepts: its parameters (NGRH's names), which are required, which
-    take a list, and which parameter names the Region the fault lands in."""
+    take a list, which parameter names the Region the fault lands in, and the duration NGRH
+    uses when a test gives none."""
 
     parameters: Tuple[str, ...]
     required: Tuple[str, ...]
     multi_valued: Tuple[str, ...]
     fault_region: str
+    default_duration: int
 
 
 # The templates the suite uses (research 01). AZ recovery is not among them: the workload's single
@@ -77,18 +83,21 @@ TEMPLATES: Dict[str, TemplateShape] = {
         required=("region",),
         multi_valued=("dependencies",),
         fault_region="region",
+        default_duration=30,
     ),
     "aws-multi-region-isolation:rtmr001": TemplateShape(
         parameters=("isolatedRegion", "destinationRegion", "dependencies", "duration"),
         required=("isolatedRegion", "destinationRegion"),
         multi_valued=("dependencies",),
         fault_region="isolatedRegion",
+        default_duration=180,
     ),
     "aws-multi-region-recovery:rtmr002": TemplateShape(
         parameters=("impairedRegion", "recoveryRegion", "regionSwitchPlan", "dependencies", "duration"),
         required=("impairedRegion", "recoveryRegion"),
         multi_valued=("dependencies",),
         fault_region="impairedRegion",
+        default_duration=30,
     ),
 }
 
@@ -140,10 +149,12 @@ class Test:
         return TEMPLATES[self.template]
 
     @property
-    def duration_minutes(self) -> Optional[int]:
-        """The duration parameter, when the spec gives one as a plain number."""
+    def duration_minutes(self) -> int:
+        """The duration the test runs for: the parameter, or the template's default when it gives none."""
         values = self.parameters.get("duration", ())
-        return int(values[0]) if len(values) == 1 and isinstance(values[0], str) and values[0].isdigit() else None
+        if len(values) == 1 and isinstance(values[0], str) and values[0].isdigit():
+            return int(values[0])
+        return self.shape.default_duration
 
 
 @dataclass(frozen=True)

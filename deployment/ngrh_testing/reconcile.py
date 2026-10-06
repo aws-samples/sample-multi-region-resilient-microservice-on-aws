@@ -88,37 +88,58 @@ def differences(resolved: ResolvedTest, current: Dict[str, Any]) -> List[str]:
     return out
 
 
-def verify_references(aws: AwsCli, env: Environment, tests: Sequence[ResolvedTest]) -> None:
-    """The template and every alarm a test names must exist. Raises ContextError naming each that doesn't."""
-    problems = []
+def template_problems(aws: AwsCli, env: Environment, tests: Sequence[ResolvedTest]) -> List[str]:
+    """One line for each test whose template this Region's Resilience Hub does not offer."""
     offered = api.list_test_templates(aws, env.ngrh_region)
-    for t in tests:
-        if t.template_arn not in offered:
-            problems.append(f"{t.name}: template {t.test.template} is not offered in {env.ngrh_region}")
+    return [f"{t.name}: template {t.test.template} is not offered in {env.ngrh_region}"
+            for t in tests if t.template_arn not in offered]
+
+
+def wanted_alarms(tests: Sequence[ResolvedTest]) -> Dict[str, Set[str]]:
+    """Every alarm the tests refer to, by Region."""
     wanted: Dict[str, Set[str]] = {}
     for t in tests:
         for region, names in t.alarms_by_region().items():
             wanted.setdefault(region, set()).update(names)
+    return wanted
+
+
+def alarm_problems(aws: AwsCli, tests: Sequence[ResolvedTest]) -> List[str]:
+    """One line for each alarm a test refers to that does not exist."""
+    problems = []
+    wanted = wanted_alarms(tests)
     for region in sorted(wanted):
         existing = api.describe_alarms(aws, region, sorted(wanted[region]))
         problems.extend(f"alarm {name} does not exist in {region}" for name in sorted(wanted[region] - set(existing)))
+    return problems
+
+
+def verify_references(aws: AwsCli, env: Environment, tests: Sequence[ResolvedTest]) -> None:
+    """The template and every alarm a test names must exist. Raises ContextError naming each that doesn't."""
+    problems = template_problems(aws, env, tests) + alarm_problems(aws, tests)
     if problems:
         raise ContextError(problems)
 
 
-def plan_test(aws: AwsCli, env: Environment, resolved: ResolvedTest) -> Plan:
-    region = env.ngrh_region
-    matching = [t for t in api.list_tests(aws, region, resolved.service_arn) if t["testTemplateArn"] == resolved.template_arn]
+def find_test(aws: AwsCli, env: Environment, resolved: ResolvedTest) -> Optional[str]:
+    """The id of the service's test for the template, None if it has none. Two is an error:
+    nothing is deleted automatically, so a person decides which to keep."""
+    matching = [t for t in api.list_tests(aws, env.ngrh_region, resolved.service_arn) if t["testTemplateArn"] == resolved.template_arn]
     if len(matching) > 1:
         ids = ", ".join(sorted(t["testId"] for t in matching))
         raise ReconcileError([
             f"{resolved.name}: service {resolved.test.service} has {len(matching)} tests for {resolved.test.template} ({ids}); "
             "keep one and delete the others by hand, nothing is deleted automatically"
         ])
+    return matching[0]["testId"] if matching else None
+
+
+def plan_test(aws: AwsCli, env: Environment, resolved: ResolvedTest) -> Plan:
+    region = env.ngrh_region
+    test_id = find_test(aws, env, resolved)
     wanted = resolved.sources()
-    if not matching:
+    if test_id is None:
         return Plan(resolved, None, put_sources=sorted(wanted))
-    test_id = matching[0]["testId"]
     current = api.get_test(aws, region, resolved.service_arn, test_id)
     have = api.list_sources(aws, region, resolved.service_arn, test_id)
     return Plan(resolved, test_id, differences(resolved, current), sorted(have - wanted), sorted(wanted - have))
@@ -195,7 +216,7 @@ def _tests_of(aws: AwsCli, region: str, service_arn: str) -> List[Dict[str, Any]
 def delete_tests(aws: AwsCli, primary_region: str, env_suffix: str) -> List[str]:
     """Delete every test on the ngrh stack's services (design 5.11), refusing while any run is
     active, and confirm none remain. A stack that is already gone, or a service that is, has no tests."""
-    outputs = context.stack_outputs(aws, primary_region, env_suffix)
+    outputs = context.ngrh_outputs(aws, primary_region, env_suffix)
     if outputs is None:
         return [f"stack ngrh{env_suffix} does not exist in {primary_region}: no tests to delete"]
     arns = [a for a in outputs.get("ServiceArns", "").split(",") if a]

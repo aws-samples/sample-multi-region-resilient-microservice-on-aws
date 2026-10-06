@@ -138,6 +138,28 @@ Faults on ECS tasks (`aws:ecs:task-network-packet-loss`, used by the dependency 
 
 Each task role can create the sidecar's SSM activation and pass the managed-instance role to SSM, and nothing else is added to it. ECS Exec stays off, because FIS can't run these actions on a task that has it enabled.
 
+### Testing resilience with NGRH
+
+The tests live in [`deployment/ngrh-tests.json`](deployment/ngrh-tests.json), not in CloudFormation: Resilience Hub has no test resource, and creating a test twice is an error, so a small tool (`python3 -m ngrh_testing`, standard library only, run from `deployment/`) reads the file and makes Resilience Hub match it. Each test says which service it faults, which template it uses, what to block, which alarms decide the verdict, and what result the sample is expected to give. [`docs/ngrh-test-ground-truth.md`](docs/ngrh-test-ground-truth.md) explains each expectation. The first test, `orders-broker-dependency`, blocks orders' traffic to its Amazon MQ broker for 15 minutes.
+
+Run them after `make deploy`, `make monitoring` and `make ngrh`:
+
+| Command | What it does |
+|---|---|
+| `make ngrh-tests` | Creates each test that doesn't exist and updates one that differs from the spec, then makes its alarm sources match. Safe to repeat: a test that matches is left alone, and nothing is ever deleted. It stops before writing anything if a reference doesn't resolve, an alarm or template doesn't exist, or a service has two tests for one template. |
+| `make ngrh-test-preflight [TEST=<name>\|all] [MODE=live\|static]` | Lists every reason a run should not go ahead, or says all checks passed. `MODE=static` checks only the configuration (roles, tests, alarms exist, the service can take the fault); the default `live` also checks the alarms are `OK` and that no test run, FIS experiment or plan execution is active. Exits 2 when refused. |
+| `make ngrh-test TEST=<name>` | Runs the live preflight, starts the run, follows it until it ends (the test's duration plus 20 minutes at most), and writes its report. This injects a real fault into the deployed sample. Exits 0 when the verdict is the expected one and 3 when it isn't. |
+| `make ngrh-test-stop TEST=<name>` | Asks the test's active run to stop. |
+| `make ngrh-test-report TEST=<name> [RUN=<id>]` | Collects a run's report again (the latest run by default), for example after a run you did not watch. |
+
+A run cannot start while any Resilience Hub service in the account has an active run, so tests that share resources never overlap, and a tester's own run on another service counts too.
+
+If your terminal drops or you press Ctrl-C, the run carries on in AWS: nothing is stopped for you. The tool prints the two commands to use later, `make ngrh-test-stop` and `make ngrh-test-report`.
+
+**The report** is written to `deployment/ngrh-test-reports/<test>-<run>.md` with the full data beside it as `.json` (the directory is not committed). It starts with the verdict against the expectation, then what Resilience Hub watched and each alarm's outcome, a timeline, the targets the fault reached and the dependencies it blocked. It also shows the state changes of alarms Resilience Hub doesn't watch, laid out by hop: both Regions' `region-degraded`, then ui and each back-end in turn. That layout is how you trace a journey that failed to the service behind ui that caused it. A run that ends `ERROR` carries no message when the invoker role was denied a call: look for `AccessDenied` in CloudTrail around the start time.
+
+`make destroy-ngrh` deletes the tests before the stack, because deleting a service that still has tests is not documented to work. It refuses while a run is active.
+
 
 ## Pre-requisites
 

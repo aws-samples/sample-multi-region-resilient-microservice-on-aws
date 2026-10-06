@@ -32,6 +32,7 @@ project.gitignore.exclude(
   '**/ash_output',
   '**/aggregated_results*',
   'deployment/.build-done/',
+  'deployment/ngrh-test-reports/',
   '.ash/',
   '.claude/',
   '.kiro/',
