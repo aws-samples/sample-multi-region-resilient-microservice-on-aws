@@ -27,10 +27,10 @@ TEMPLATES = (
     "aws-multi-region-isolation:rtmr001",
     "aws-multi-region-recovery:rtmr002",
 )
-BROKER_ID = "b-3d43b3fe-a971-4c26-bab4-5a5cae715f32"
+BROKER_ID = "b-11111111-2222-4333-8444-555555555555"
 BROKER_HOST = f"{BROKER_ID}.mq.{PRIMARY}.on.aws"
-PLAN_ARN = f"arn:aws:arc-region-switch::{ACCOUNT}:plan/mr-rs-plan{ENV}:p8dsyn"
-CLUSTER = f"apps{ENV}-EcsCluster-ejzMCPGCvU8K"
+PLAN_ARN = f"arn:aws:arc-region-switch::{ACCOUNT}:plan/mr-rs-plan{ENV}:abc123"
+CLUSTER = f"apps{ENV}-EcsCluster-AbCdEfGh1234"
 
 # Operations that change something in AWS: a test asserting "nothing was written" checks for these.
 WRITE_OPERATIONS = frozenset({

@@ -14,7 +14,7 @@ sys.path.insert(0, str(TESTS))
 from ngrh_scenario import (  # noqa: E402
     OBSERVABILITY, PEER_DEGRADED, STOP, SUCCESS, TEMPLATE, environment, reconciled_fake, spec_tests,
 )
-from ngrh_fake_aws import ENV, PLAN_ARN, PRIMARY, STANDBY, service_arn  # noqa: E402
+from ngrh_fake_aws import CLUSTER, ENV, PLAN_ARN, PRIMARY, STANDBY, service_arn  # noqa: E402
 
 from ngrh_testing import cli, preflight  # noqa: E402
 
@@ -406,7 +406,7 @@ class TestServiceConfiguration:
         fake = reconciled_fake()
         check(fake)
         describe = fake.calls_of("describe-services")[0]
-        assert describe["cluster"] == f"apps{ENV}-EcsCluster-ejzMCPGCvU8K" and describe["services"] == [f"orders{ENV}"]
+        assert describe["cluster"] == CLUSTER and describe["services"] == [f"orders{ENV}"]
         assert fake.calls_of("describe-task-definition")[0]["task_definition"].endswith(f"apps{ENV}-orders{ENV}:7")
 
     def test_an_error_reading_ecs_is_a_refusal_not_a_crash(self):

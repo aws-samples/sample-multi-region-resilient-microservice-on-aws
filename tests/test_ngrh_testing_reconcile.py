@@ -22,7 +22,7 @@ from ngrh_scenario import (  # noqa: E402
     deployed_fake, environment, spec_tests,
 )
 from ngrh_fake_aws import (  # noqa: E402
-    ACCOUNT, BROKER_HOST, ENV, PRIMARY, STANDBY, FakeAws, alarm_arn, service_arn, template_arn,
+    ACCOUNT, BROKER_HOST, BROKER_ID, ENV, PRIMARY, STANDBY, FakeAws, alarm_arn, service_arn, template_arn,
 )
 
 from ngrh_testing import cli, context, reconcile, spec  # noqa: E402
@@ -60,9 +60,9 @@ class TestCreate:
 
     def test_the_broker_host_comes_from_the_brokers_own_endpoint(self):
         fake = deployed_fake()
-        fake.brokers["b-3d43b3fe-a971-4c26-bab4-5a5cae715f32"] = [
-            "amqps://b-3d43b3fe-a971-4c26-bab4-5a5cae715f32.mq.us-east-1.on.aws:5671",
-            "amqps://b-3d43b3fe-a971-4c26-bab4-5a5cae715f32.mq.us-east-1.on.aws:5671",  # listed twice: one host
+        fake.brokers[BROKER_ID] = [
+            f"amqps://{BROKER_HOST}:5671",
+            f"amqps://{BROKER_HOST}:5671",  # listed twice: one host
         ]
         run_reconcile(fake)
         assert fake.calls_of("create-test")[0]["parameters"]["dependencies"] == [BROKER_HOST]
@@ -105,7 +105,7 @@ class TestReconcileAgain:
 
     def test_parameter_values_in_a_different_order_are_not_drift(self):
         fake = deployed_fake()
-        fake.brokers["b-3d43b3fe-a971-4c26-bab4-5a5cae715f32"] = ["amqps://a.example.com:5671", "amqps://z.example.com:5671"]
+        fake.brokers[BROKER_ID] = ["amqps://a.example.com:5671", "amqps://z.example.com:5671"]
         run_reconcile(fake)
         (test_id,) = fake.tests
         fake.tests[test_id]["parameters"]["dependencies"].reverse()
@@ -179,7 +179,7 @@ class TestNothingIsWrittenWhenSomethingIsWrong:
 
     def test_a_lookup_that_finds_nothing_names_itself(self):
         fake = deployed_fake()
-        fake.brokers["b-3d43b3fe-a971-4c26-bab4-5a5cae715f32"] = []
+        fake.brokers[BROKER_ID] = []
         with pytest.raises(context.ContextError, match="lookup mq-broker-host in us-east-1 returned nothing"):
             run_reconcile(fake)
         assert fake.writes() == []
