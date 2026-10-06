@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from . import api, reconcile
 from .aws import AwsCli
@@ -20,6 +20,7 @@ from .context import Environment, ResolvedTest
 
 GRACE_MINUTES = 20  # how long past the test's duration a run may take before the wait gives up
 DEFAULT_POLL_SECONDS = 30
+ALARM_POLL_SECONDS = 30
 
 
 class RunError(RuntimeError):
@@ -37,6 +38,39 @@ class Outcome:
 
 def budget_seconds(t: ResolvedTest) -> int:
     return (t.test.duration_minutes + GRACE_MINUTES) * 60
+
+
+def wait_for_alarm_data(
+    aws: AwsCli,
+    t: ResolvedTest,
+    minutes: float,
+    poll_seconds: float = ALARM_POLL_SECONDS,
+    progress: Callable[[str], None] = lambda line: None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> List[str]:
+    """Wait up to ``minutes`` for the test's success and stop alarms to have data.
+
+    A new deployment's alarms start in INSUFFICIENT_DATA until the canaries have reported, and preflight
+    refuses a run while a success or stop alarm is anything but OK. CI starts a run soon after a deploy,
+    so it waits here first. Only INSUFFICIENT_DATA is waited out: an alarm in ALARM, or one that does
+    not exist, will not change by waiting, and preflight says so. Returns the alarms still without
+    data when the time is up (none when every alarm has data)."""
+    needed = sorted({(a.region, a.name) for a in list(t.success) + list(t.stop)})
+    began = clock()
+    last: Optional[List[str]] = None
+    while True:
+        waiting: List[str] = []
+        for region in sorted({r for r, _ in needed}):
+            names = [n for r, n in needed if r == region]
+            found = api.describe_alarms(aws, region, names)
+            waiting += [f"{n} ({region})" for n in names if found.get(n, {}).get("state") == "INSUFFICIENT_DATA"]
+        if not waiting or clock() - began >= minutes * 60:
+            return waiting
+        if waiting != last:
+            progress(f"{len(waiting)} alarm(s) have no data yet: {', '.join(waiting)}")
+            last = waiting
+        sleep(poll_seconds)
 
 
 def start(aws: AwsCli, env: Environment, t: ResolvedTest, test_id: str) -> Dict[str, Any]:
@@ -79,8 +113,19 @@ def active_run(aws: AwsCli, env: Environment, t: ResolvedTest, test_id: str) -> 
     return runs[0]
 
 
-def stop(aws: AwsCli, env: Environment, t: ResolvedTest) -> List[str]:
-    """Stop the test's active run. A test with no active run has nothing to stop, and says so."""
+def stop(
+    aws: AwsCli,
+    env: Environment,
+    t: ResolvedTest,
+    wait_minutes: float = 0.0,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> List[str]:
+    """Stop the test's active run. A test with no active run has nothing to stop, and says so.
+
+    With ``wait_minutes`` it then waits that long for the run to end: delete-tests refuses while a run is
+    active, and a run that is still STOPPING counts as active."""
     test_id = reconcile.find_test(aws, env, t)
     if test_id is None:
         return [f"{t.name}: the test does not exist, so it has no run to stop"]
@@ -89,5 +134,21 @@ def stop(aws: AwsCli, env: Environment, t: ResolvedTest) -> List[str]:
     except RunError as e:
         return [str(e)]
     stopped = aws.call(api.SERVICE, "stop-test-run", env.ngrh_region, service_arn=t.service_arn, test_run_id=run["testRunId"])
-    return [f"{t.name}: asked run {stopped['testRunId']} to stop; it is {stopped['status']}. "
-            f"make ngrh-test-report TEST={t.name} RUN={stopped['testRunId']} collects what it recorded"]
+    lines = [f"{t.name}: asked run {stopped['testRunId']} to stop; it is {stopped['status']}. "
+             f"make ngrh-test-report TEST={t.name} RUN={stopped['testRunId']} collects what it recorded"]
+    if wait_minutes > 0:
+        lines.append(_wait_until_ended(aws, env, t, stopped["testRunId"], wait_minutes, poll_seconds, sleep, clock))
+    return lines
+
+
+def _wait_until_ended(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, wait_minutes: float,
+                      poll_seconds: float, sleep: Callable[[float], None], clock: Callable[[], float]) -> str:
+    began = clock()
+    while True:
+        status = aws.call(api.SERVICE, "get-test-run", env.ngrh_region, service_arn=t.service_arn,
+                          test_run_id=run_id)["testRun"]["status"]
+        if status in api.TERMINAL_STATUSES:
+            return f"{t.name}: run {run_id} is {status}"
+        if clock() - began >= wait_minutes * 60:
+            return f"{t.name}: run {run_id} is still {status} after {wait_minutes:g} min"
+        sleep(poll_seconds)

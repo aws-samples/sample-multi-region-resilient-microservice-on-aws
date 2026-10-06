@@ -16,7 +16,15 @@ on:
       - source/**
       - deployment/**
       - .github/workflows/e2e.yml
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      ngrh_test:
+        description: Run this NGRH fault test against the deployment before teardown (none runs no fault). It injects a real fault for up to 15 minutes, then uploads its report.
+        type: choice
+        default: none
+        options:
+          - none
+          - orders-broker-dependency
 concurrency:
   group: e2e-deploy
   cancel-in-progress: false
@@ -30,6 +38,7 @@ jobs:
     env:
       AWS_REGION: us-east-1
       STANDBY_REGION: us-west-2
+      NGRH_TEST: ${{ inputs.ngrh_test || 'none' }}
     if: github.actor != 'dependabot[bot]'
     steps:
       - name: Checkout
@@ -89,6 +98,12 @@ jobs:
             done
           done
           echo "::endgroup::"
+      - name: Reconcile NGRH tests
+        run: make ngrh-tests "ENV=${ENV}"
+        working-directory: deployment
+      - name: Check NGRH tests (static preflight)
+        run: make ngrh-test-preflight TEST=all MODE=static "ENV=${ENV}"
+        working-directory: deployment
       - name: Smoke test
         run: |-
           # The application ALB is internal (only reachable from inside the
@@ -127,6 +142,22 @@ jobs:
             fi
           done
         working-directory: deployment
+      - name: Run NGRH fault test
+        if: env.NGRH_TEST != 'none'
+        run: make ngrh-test "TEST=${NGRH_TEST}" "ENV=${ENV}" ALARM_WAIT=15
+        working-directory: deployment
+      - name: Stop NGRH fault test if still running
+        if: always() && env.NGRH_TEST != 'none'
+        run: make ngrh-test-stop "TEST=${NGRH_TEST}" "ENV=${ENV}" STOP_WAIT=10 || true
+        working-directory: deployment
+      - name: Upload NGRH test reports
+        if: always() && env.NGRH_TEST != 'none'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ngrh-test-reports
+          path: deployment/ngrh-test-reports
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Teardown
         if: always()
         run: |-
@@ -280,4 +311,4 @@ jobs:
             echo "::warning::Log groups of this run could not all be deleted in:$left"
           fi
         working-directory: deployment
-    timeout-minutes: 300
+    timeout-minutes: 360

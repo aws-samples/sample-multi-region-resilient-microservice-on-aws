@@ -2,10 +2,15 @@
 
 A GitHub expression inside a `run:` block is pasted into the script before the shell sees it, so a value
 that is not what the author expected becomes code. The e2e job therefore reads ENV and the Regions from
-the environment, and takes every other value through a step's `env:`.
+the environment, and takes every other value, the manual fault test's name included, through `env:`.
+
+Step 8 of the NGRH tests plan (design 5.12): every run creates the NGRH tests and runs the static
+preflight; a run started by hand can run one fault test and upload its report.
 """
 
+import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,8 +18,23 @@ import yaml
 
 REPO = Path(__file__).resolve().parent.parent
 E2E = REPO / ".github" / "workflows" / "e2e.yml"
+SPEC = REPO / "deployment" / "ngrh-tests.json"
+MAKEFILE = REPO / "deployment" / "Makefile"
 
-JOB_VARIABLES = ("ENV", "AWS_REGION", "STANDBY_REGION")
+sys.path.insert(0, str(REPO / "deployment"))
+from ngrh_testing import report  # noqa: E402
+
+JOB_VARIABLES = ("ENV", "AWS_REGION", "STANDBY_REGION", "NGRH_TEST")
+
+DEPLOY = "Deploy (full multi-region)"
+RECONCILE = "Reconcile NGRH tests"
+PREFLIGHT = "Check NGRH tests (static preflight)"
+SMOKE = "Smoke test"
+FAULT = "Run NGRH fault test"
+STOP = "Stop NGRH fault test if still running"
+UPLOAD = "Upload NGRH test reports"
+TEARDOWN = "Teardown"
+BY_HAND = "env.NGRH_TEST != 'none'"
 
 
 def workflow():
@@ -34,6 +54,15 @@ def step(name):
     return found
 
 
+def position(name):
+    return [s.get("name") for s in steps()].index(name)
+
+
+def dispatch_inputs():
+    triggers = workflow().get("on", workflow().get(True))  # YAML 1.1 reads a bare `on` as true
+    return triggers["workflow_dispatch"]["inputs"]
+
+
 class TestNoExpressionsInRunBlocks:
 
     def test_no_run_block_contains_a_github_expression(self):
@@ -46,8 +75,8 @@ class TestNoExpressionsInRunBlocks:
 
 class TestVariablesTheRunBlocksRead:
 
-    def _reads(self, name):
-        return {v for v in JOB_VARIABLES if re.search(rf"\$\{{?{v}\b", name)}
+    def _reads(self, script):
+        return {v for v in JOB_VARIABLES if re.search(rf"\$\{{?{v}\b", script)}
 
     @pytest.mark.parametrize("variable", JOB_VARIABLES)
     def test_each_variable_is_set_before_the_first_step_that_reads_it(self, variable):
@@ -60,3 +89,83 @@ class TestVariablesTheRunBlocksRead:
         setters = [i for i, s in enumerate(all_steps) if re.search(rf"{variable}=.*>>\s*\"?\$GITHUB_ENV", s.get("run", ""))]
         assert setters, f"{variable} is neither in the job's env nor written to $GITHUB_ENV"
         assert min(setters) < min(readers), f"{variable} is read before it is set"
+
+
+class TestNgrhTestsInEveryRun:
+
+    def test_the_tests_are_reconciled_then_checked_after_the_deploy_and_before_the_smoke_test(self):
+        assert position(DEPLOY) < position(RECONCILE) < position(PREFLIGHT) < position(SMOKE)
+
+    def test_reconcile_and_the_static_preflight_use_the_make_targets_with_this_runs_env(self):
+        assert step(RECONCILE)["run"] == 'make ngrh-tests "ENV=${ENV}"'
+        assert step(PREFLIGHT)["run"] == 'make ngrh-test-preflight TEST=all MODE=static "ENV=${ENV}"'
+
+    @pytest.mark.parametrize("name", [RECONCILE, PREFLIGHT, FAULT, STOP])
+    def test_the_make_steps_run_from_the_deployment_directory(self, name):
+        assert step(name)["working-directory"] == "deployment"
+
+    def test_neither_step_is_conditional_so_every_run_does_both(self):
+        assert "if" not in step(RECONCILE) and "if" not in step(PREFLIGHT)
+
+    def test_every_make_target_the_workflow_calls_exists(self):
+        targets = set(re.findall(r"^([A-Za-z][\w-]*):", MAKEFILE.read_text(), flags=re.M))
+        called = {t for s in steps() for t in re.findall(r"\bmake ([A-Za-z][\w-]*)", s.get("run", ""))}
+        assert {"ngrh-tests", "ngrh-test-preflight", "ngrh-test", "ngrh-test-stop"} <= called
+        assert called <= targets, f"the Makefile has no target {sorted(called - targets)}"
+
+
+class TestTheManualFaultRun:
+
+    def test_the_input_is_a_choice_that_defaults_to_none(self):
+        chosen = dispatch_inputs()["ngrh_test"]
+        assert chosen["type"] == "choice" and chosen["default"] == "none"
+
+    def test_the_choices_are_none_and_each_test_the_spec_defines(self):
+        names = [t["name"] for t in json.loads(SPEC.read_text())["tests"]]
+        assert names, "the spec defines no tests"
+        assert dispatch_inputs()["ngrh_test"]["options"] == ["none", *names]
+
+    def test_the_input_reaches_the_steps_through_the_job_environment_as_none_when_unset(self):
+        assert job()["env"]["NGRH_TEST"] == "${{ inputs.ngrh_test || 'none' }}"
+
+    def test_the_fault_runs_only_when_someone_chose_a_test(self):
+        assert step(FAULT)["if"] == BY_HAND
+
+    def test_the_fault_run_names_the_test_from_the_environment_and_waits_for_the_alarms(self):
+        assert step(FAULT)["run"] == 'make ngrh-test "TEST=${NGRH_TEST}" "ENV=${ENV}" ALARM_WAIT=15'
+
+    def test_it_runs_after_the_smoke_test_and_before_the_teardown(self):
+        assert position(SMOKE) < position(FAULT) < position(STOP) < position(UPLOAD) < position(TEARDOWN)
+
+    @pytest.mark.parametrize("name", [STOP, UPLOAD])
+    def test_a_failed_run_is_still_stopped_and_reported(self, name):
+        assert step(name)["if"] == f"always() && {BY_HAND}"
+
+    def test_a_run_still_going_is_stopped_and_waited_for_without_failing_the_job(self):
+        assert step(STOP)["run"] == 'make ngrh-test-stop "TEST=${NGRH_TEST}" "ENV=${ENV}" STOP_WAIT=10 || true'
+
+    def test_the_report_is_uploaded_from_the_directory_the_tool_writes_to(self):
+        upload = step(UPLOAD)
+        assert upload["uses"].startswith("actions/upload-artifact@")
+        assert (REPO / upload["with"]["path"]).resolve() == Path(report.REPORT_DIR).resolve()
+        assert upload["with"]["if-no-files-found"] == "ignore"      # a run that failed before writing has no report
+
+    def test_the_teardown_still_runs_whatever_happened(self):
+        assert step(TEARDOWN)["if"] == "always()"
+
+    def test_the_job_timeout_leaves_room_for_a_fault_run(self):
+        # about 4h20m for a run, plus up to 15 minutes for alarm data, the fault's 15 and 20 of grace
+        assert job()["timeout-minutes"] >= 360
+
+
+class TestReadme:
+
+    def test_it_explains_the_ci_steps_and_the_manual_input_by_the_names_the_workflow_uses(self):
+        readme = (REPO / "README.md").read_text()
+        for name in (RECONCILE, PREFLIGHT):
+            assert f"`{name}`" in readme, f"the README does not name the step {name}"
+        input_name = next(iter(dispatch_inputs()))
+        assert f"`{input_name}`" in readme
+        assert step(UPLOAD)["with"]["name"] in readme
+        for variable in ("ALARM_WAIT", "STOP_WAIT"):
+            assert variable in readme and variable in step(FAULT)["run"] + step(STOP)["run"]

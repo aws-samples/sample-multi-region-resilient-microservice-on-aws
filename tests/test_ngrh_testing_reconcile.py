@@ -398,7 +398,15 @@ class TestMakefile:
         assert "--run" not in self._tool_line(tmp_path, "ngrh-test-report", "TEST=x")
 
     def test_running_without_naming_a_test_is_refused_by_the_tool_not_run_for_all(self, tmp_path):
-        assert self._tool_line(tmp_path, "ngrh-test").endswith('--test ""')
+        assert '--test ""' in self._tool_line(tmp_path, "ngrh-test")
+
+    def test_a_run_waits_for_no_alarms_unless_asked(self, tmp_path):
+        assert self._tool_line(tmp_path, "ngrh-test", "TEST=x").endswith('--alarm-wait-minutes "0"')
+        assert self._tool_line(tmp_path, "ngrh-test", "TEST=x", "ALARM_WAIT=15").endswith('--alarm-wait-minutes "15"')
+
+    def test_stop_waits_for_the_run_to_end_only_when_asked(self, tmp_path):
+        assert self._tool_line(tmp_path, "ngrh-test-stop", "TEST=x").endswith('--wait-minutes "0"')
+        assert self._tool_line(tmp_path, "ngrh-test-stop", "TEST=x", "STOP_WAIT=10").endswith('--wait-minutes "10"')
 
     def test_destroy_ngrh_deletes_the_tests_before_the_stack(self, tmp_path):
         lines = self._dry_run(tmp_path, "destroy-ngrh")

@@ -3,6 +3,7 @@
 The polling runs against a fake clock, so a run that never ends is a loop over simulated minutes, not a wait.
 """
 
+import dataclasses
 import json
 import sys
 from datetime import datetime, timezone
@@ -13,10 +14,13 @@ import pytest
 TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
 
-from ngrh_scenario import NAME, OBSERVABILITY, PEER_DEGRADED, STOP, SUCCESS, TEMPLATE, deployed_fake, reconciled_fake  # noqa: E402
-from ngrh_fake_aws import ENV, PRIMARY, STANDBY, alarm_arn  # noqa: E402
+from ngrh_scenario import (  # noqa: E402
+    NAME, OBSERVABILITY, PEER_DEGRADED, STOP, SUCCESS, TEMPLATE, deployed_fake, environment, reconciled_fake, spec_tests,
+)
+from ngrh_fake_aws import BROKER_ID, ENV, PRIMARY, STANDBY, alarm_arn  # noqa: E402
 
-from ngrh_testing import cli, report, run  # noqa: E402
+from ngrh_testing import cli, context, report, run  # noqa: E402
+from ngrh_testing.context import ResolvedAlarm  # noqa: E402
 
 ARGS = ["--primary-region", PRIMARY, "--standby-region", STANDBY, f"--env={ENV}"]
 
@@ -67,6 +71,129 @@ def run_cli(fake, tmp_path, *extra, test=NAME, clock=None, reports=True):
     clock = clock or Clock()
     tail = ["--reports-dir", str(tmp_path)] if reports else []
     return cli.main(["run", *ARGS, "--test", test, *tail, *extra], aws=fake, sleep=clock.sleep, clock=clock), clock
+
+
+# --- waiting for alarm data ------------------------------------------------------------------------------
+
+def resolved(fake):
+    return context.resolve_all(fake, environment(fake), spec_tests())[0]
+
+
+class WarmingClock(Clock):
+    """A clock whose sleeps also give alarms their data: each (Region, name) turns OK at the second given."""
+
+    def __init__(self, fake, warm_at):
+        super().__init__()
+        self.fake, self.warm_at = fake, warm_at
+
+    def sleep(self, seconds):
+        super().sleep(seconds)
+        for key, at in self.warm_at.items():
+            if self.now >= at:
+                self.fake.alarms[key]["state"] = "OK"
+
+
+def wait_for(fake, minutes=15, clock=None, lines=None, test=None):
+    clock = clock or Clock()
+    found = run.wait_for_alarm_data(fake, test or resolved(fake), minutes, progress=(lines if lines is not None else []).append,
+                                    sleep=clock.sleep, clock=clock)
+    return found, clock
+
+
+class TestWaitForAlarmData:
+
+    def test_alarms_that_have_data_are_not_waited_for(self):
+        found, clock = wait_for(reconciled_fake())
+        assert found == [] and clock.now == 0
+
+    def test_it_waits_until_the_alarms_have_data_and_says_so_once(self):
+        fake = reconciled_fake()
+        fake.alarms[(PRIMARY, SUCCESS[0])]["state"] = "INSUFFICIENT_DATA"
+        lines = []
+        found, clock = wait_for(fake, clock=WarmingClock(fake, {(PRIMARY, SUCCESS[0]): 100}), lines=lines)
+        assert found == []
+        assert clock.now == 120                                    # polled every 30 s; the data arrived during the fourth sleep
+        assert lines == [f"1 alarm(s) have no data yet: {SUCCESS[0]} ({PRIMARY})"]
+
+    def test_it_gives_up_at_the_time_limit_and_names_what_is_still_without_data(self):
+        fake = reconciled_fake()
+        fake.alarms[(PRIMARY, SUCCESS[1])]["state"] = "INSUFFICIENT_DATA"
+        found, clock = wait_for(fake, minutes=10)
+        assert found == [f"{SUCCESS[1]} ({PRIMARY})"]
+        assert clock.now == 600
+
+    def test_the_stop_alarm_is_waited_for_too(self):
+        fake = reconciled_fake()
+        fake.alarms[(PRIMARY, STOP)]["state"] = "INSUFFICIENT_DATA"
+        found, clock = wait_for(fake, clock=WarmingClock(fake, {(PRIMARY, STOP): 45}))
+        assert found == [] and clock.now == 60
+
+    def test_alarms_in_both_regions_are_looked_at(self):
+        fake = reconciled_fake()
+        t = resolved(fake)
+        t = dataclasses.replace(t, stop=[*t.stop, ResolvedAlarm(PEER_DEGRADED, STANDBY, alarm_arn(PEER_DEGRADED))])
+        fake.alarms[(STANDBY, PEER_DEGRADED)]["state"] = "INSUFFICIENT_DATA"
+        found, _ = wait_for(fake, minutes=1, test=t)
+        assert found == [f"{PEER_DEGRADED} ({STANDBY})"]
+
+    def test_observability_alarms_are_not_waited_for(self):
+        fake = reconciled_fake()
+        fake.alarms[(PRIMARY, OBSERVABILITY[0])]["state"] = "INSUFFICIENT_DATA"
+        found, clock = wait_for(fake)
+        assert found == [] and clock.now == 0
+
+    def test_an_alarm_already_in_alarm_is_not_waited_out(self):
+        fake = reconciled_fake()
+        fake.alarms[(PRIMARY, SUCCESS[0])]["state"] = "ALARM"
+        found, clock = wait_for(fake)
+        assert found == [] and clock.now == 0                      # waiting will not change it; preflight refuses
+
+    def test_an_alarm_that_does_not_exist_is_not_waited_for(self):
+        fake = reconciled_fake()
+        del fake.alarms[(PRIMARY, SUCCESS[0])]
+        found, clock = wait_for(fake)
+        assert found == [] and clock.now == 0                      # preflight says it does not exist
+
+
+class TestWaitBeforeTheRun:
+
+    def test_the_run_waits_for_alarm_data_before_its_preflight(self, tmp_path, capsys):
+        fake = ready_to_run()
+        fake.alarms[(PRIMARY, SUCCESS[0])]["state"] = "INSUFFICIENT_DATA"
+        clock = WarmingClock(fake, {(PRIMARY, SUCCESS[0]): 100})
+        code, clock = run_cli(fake, tmp_path, "--alarm-wait-minutes", "15", clock=clock)
+        out = capsys.readouterr().out
+        assert code == 0
+        assert "Waiting up to 15 min for the success and stop alarms of orders-broker-dependency to have data." in out
+        assert out.index("Waiting up to 15 min") < out.index("Preflight (live)") < out.index("Started run")
+        assert clock.now == 120 + 90                               # the wait, then the three polls of the run
+        assert len(fake.calls_of("start-test-run")) == 1
+
+    def test_alarms_that_never_get_data_leave_the_refusal_to_preflight(self, tmp_path, capsys):
+        fake = ready_to_run()
+        fake.alarms[(PRIMARY, SUCCESS[0])]["state"] = "INSUFFICIENT_DATA"
+        code, clock = run_cli(fake, tmp_path, "--alarm-wait-minutes", "15")
+        out = capsys.readouterr().out
+        assert code == cli.EXIT_REFUSED
+        assert clock.now == 900
+        assert f"After 15 min these alarms still have no data: {SUCCESS[0]} ({PRIMARY})." in out
+        assert f"[4] orders-broker-dependency: success alarm {SUCCESS[0]} is INSUFFICIENT_DATA, not OK, in {PRIMARY}" in out
+        assert fake.calls_of("start-test-run") == []
+
+    def test_without_the_option_nothing_is_waited_for(self, tmp_path, capsys):
+        fake = ready_to_run()
+        fake.alarms[(PRIMARY, SUCCESS[0])]["state"] = "INSUFFICIENT_DATA"
+        code, clock = run_cli(fake, tmp_path)
+        assert code == cli.EXIT_REFUSED and clock.now == 0
+        assert "Waiting up to" not in capsys.readouterr().out
+
+    def test_a_test_that_does_not_resolve_is_left_to_preflight(self, tmp_path, capsys):
+        fake = ready_to_run()
+        fake.brokers[BROKER_ID] = []
+        code, clock = run_cli(fake, tmp_path, "--alarm-wait-minutes", "15")
+        out = capsys.readouterr().out
+        assert code == cli.EXIT_REFUSED and clock.now == 0
+        assert "Waiting up to" not in out and "[10]" in out
 
 
 # --- the run ---------------------------------------------------------------------------------------------
@@ -178,8 +305,46 @@ class TestRun:
 
 # --- stop --------------------------------------------------------------------------------------------------
 
-def stop_cli(fake, test=NAME):
-    return cli.main(["stop", *ARGS, "--test", test], aws=fake)
+def stop_cli(fake, test=NAME, *extra, clock=None):
+    clock = clock or Clock()
+    return cli.main(["stop", *ARGS, "--test", test, *extra], aws=fake, sleep=clock.sleep, clock=clock)
+
+
+class TestStopWaiting:
+
+    def _running(self):
+        fake = reconciled_fake()
+        (test_id,) = fake.tests
+        return fake, fake.add_run("orders", test_id, "RUNNING")
+
+    def test_it_waits_for_the_run_to_end_when_asked(self, capsys):
+        fake, run_id = self._running()
+        fake.stop_script = ["STOPPING", "STOPPING", "STOPPED"]
+        clock = Clock()
+        assert stop_cli(fake, NAME, "--wait-minutes", "5", clock=clock) == 0
+        assert f"{NAME}: run {run_id} is STOPPED" in capsys.readouterr().out
+        assert clock.now == 60                                     # two polls still STOPPING, 30 s apart
+
+    def test_it_says_so_when_the_run_is_still_stopping_at_the_time_limit(self, capsys):
+        fake, run_id = self._running()
+        fake.stop_script = ["STOPPING"]
+        clock = Clock()
+        assert stop_cli(fake, NAME, "--wait-minutes", "2", clock=clock) == 0
+        assert f"{NAME}: run {run_id} is still STOPPING after 2 min" in capsys.readouterr().out
+        assert clock.now == 120
+
+    def test_it_does_not_wait_unless_asked(self):
+        fake, _ = self._running()
+        clock = Clock()
+        assert stop_cli(fake, clock=clock) == 0
+        assert fake.calls_of("get-test-run") == [] and clock.now == 0
+
+    def test_a_test_with_no_active_run_has_nothing_to_wait_for(self, capsys):
+        fake = reconciled_fake()
+        clock = Clock()
+        assert stop_cli(fake, NAME, "--wait-minutes", "10", clock=clock) == 0
+        assert "the test has no active run" in capsys.readouterr().out
+        assert clock.now == 0 and fake.calls_of("get-test-run") == []
 
 
 class TestStop:

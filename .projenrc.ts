@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import { github } from 'projen';
 import { GitHubProject } from 'projen/lib/github';
 
@@ -324,10 +325,25 @@ const e2e = new github.GithubWorkflow(project.github!, 'e2e', {
     cancelInProgress: false,
   },
 });
+// The tests the NGRH spec defines, for the manual fault run's choice input below. Read at synth time, so
+// a test added to the spec appears in the input after `npx projen` (a test checks they agree).
+const NGRH_TEST_NAMES: string[] = JSON.parse(fs.readFileSync('deployment/ngrh-tests.json', 'utf8'))
+  .tests.map((t: { name: string }) => t.name);
+
 e2e.on({
   push: { branches: ['main'], paths: E2E_PATHS },
   pullRequest: { branches: ['main'], paths: E2E_PATHS },
-  workflowDispatch: {},
+  workflowDispatch: {
+    inputs: {
+      ngrh_test: {
+        description: 'Run this NGRH fault test against the deployment before teardown (none runs no fault). ' +
+          'It injects a real fault for up to 15 minutes, then uploads its report.',
+        type: 'choice',
+        default: 'none',
+        options: ['none', ...NGRH_TEST_NAMES],
+      },
+    },
+  },
 });
 e2e.addJob('e2e', {
   name: 'Build, Deploy, Test, Teardown',
@@ -336,7 +352,9 @@ e2e.addJob('e2e', {
   // pull_request events triggered by dependabot[bot]. The same code is
   // validated on push:main after merge.
   if: "github.actor != 'dependabot[bot]'",
-  timeoutMinutes: 300,
+  // A run takes about 4h20m. A manual fault run adds up to 15 minutes for the alarms to have data, the
+  // fault's 15 minutes and 20 minutes of grace, so 300 minutes could cut it off mid-teardown.
+  timeoutMinutes: 360,
   permissions: {
     idToken: github.workflows.JobPermission.WRITE,
     contents: github.workflows.JobPermission.READ,
@@ -344,6 +362,9 @@ e2e.addJob('e2e', {
   env: {
     AWS_REGION: 'us-east-1',
     STANDBY_REGION: 'us-west-2',
+    // The manual fault run's input ('none' when the run was not started by hand). It reaches the run
+    // blocks as $NGRH_TEST and never through an expression inside one.
+    NGRH_TEST: "${{ inputs.ngrh_test || 'none' }}",
     // ENV is set from a short (7-char) git sha in the first step below.
     // Uses PR head SHA (not GITHUB_SHA which is the merge commit for
     // pull_request events -- merge SHAs can collide with prior runs).
@@ -430,6 +451,19 @@ e2e.addJob('e2e', {
       ].join('\n'),
     },
     {
+      // Design 5.12: every run creates the NGRH tests from deployment/ngrh-tests.json, then checks they
+      // could run (roles, templates, alarms, the services' fault readiness). No fault is injected: the
+      // static preflight leaves out the checks about what is happening right now.
+      name: 'Reconcile NGRH tests',
+      workingDirectory: 'deployment',
+      run: 'make ngrh-tests "ENV=${ENV}"',
+    },
+    {
+      name: 'Check NGRH tests (static preflight)',
+      workingDirectory: 'deployment',
+      run: 'make ngrh-test-preflight TEST=all MODE=static "ENV=${ENV}"',
+    },
+    {
       name: 'Smoke test',
       workingDirectory: 'deployment',
       run: [
@@ -469,6 +503,37 @@ e2e.addJob('e2e', {
         '  fi',
         'done',
       ].join('\n'),
+    },
+    {
+      // Only when someone started the workflow by hand and chose a test. The smoke test above has
+      // shown the canaries pass, which is where the test's success alarms start. The alarms of a new
+      // deployment start without data, so the run waits up to 15 minutes for them before its own
+      // preflight. The verdict not being the one the spec expects fails the step (exit 3), and the
+      // report is uploaded either way.
+      name: 'Run NGRH fault test',
+      if: "env.NGRH_TEST != 'none'",
+      workingDirectory: 'deployment',
+      run: 'make ngrh-test "TEST=${NGRH_TEST}" "ENV=${ENV}" ALARM_WAIT=15',
+    },
+    {
+      // A run still going when the job ends (the step above was cancelled, or outlasted its budget)
+      // would make destroy-ngrh refuse to delete the tests, and a run that was asked to stop still
+      // counts as active until it ends. Best effort: this step must not fail the job.
+      name: 'Stop NGRH fault test if still running',
+      if: "always() && env.NGRH_TEST != 'none'",
+      workingDirectory: 'deployment',
+      run: 'make ngrh-test-stop "TEST=${NGRH_TEST}" "ENV=${ENV}" STOP_WAIT=10 || true',
+    },
+    {
+      name: 'Upload NGRH test reports',
+      if: "always() && env.NGRH_TEST != 'none'",
+      uses: 'actions/upload-artifact@v7',
+      with: {
+        'name': 'ngrh-test-reports',
+        'path': 'deployment/ngrh-test-reports',
+        'if-no-files-found': 'ignore',
+        'retention-days': 30,
+      },
     },
     {
       name: 'Teardown',

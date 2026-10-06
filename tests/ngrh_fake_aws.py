@@ -78,6 +78,7 @@ class FakeAws:
         self.sources: Dict[str, List[Tuple[str, str]]] = {}  # test id -> [(kind, alarm ARN)]
         self.runs: Dict[str, Dict[str, Any]] = {}  # run id -> the run (see add_run and _start_test_run)
         self.run_script: List[str] = ["INITIALIZING", "RUNNING", "RUNNING", "FAILED"]  # statuses successive polls see
+        self.stop_script: List[str] = ["STOPPED"]  # what polls of a run that was asked to stop see
         self.run_events: List[Dict[str, Any]] = []
         self.run_source_events: Dict[str, List[Dict[str, Any]]] = {}
         self.resolved_targets: List[Dict[str, Any]] = []
@@ -381,7 +382,7 @@ class FakeAws:
         if run["status"] in TERMINAL:
             raise self._error("resiliencehubv2", "stop-test-run", "ConflictException", "The run has ended.")
         run["status"] = "STOPPING"
-        run["script"] = ["STOPPED"]
+        run["script"] = list(self.stop_script)
         run["polls"] = 0
         return {"testRunId": test_run_id, "status": "STOPPING"}
 

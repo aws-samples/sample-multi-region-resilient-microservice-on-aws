@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT-0
 """Command line for ngrh_testing. The Makefile passes its own variables (PRIMARY_REGION,
-STANDBY_REGION, ENV, DAYS, TEST, MODE, RUN) as arguments; credentials come from the environment, as for
-the Makefile's own aws calls.
+STANDBY_REGION, ENV, DAYS, TEST, MODE, RUN, ALARM_WAIT, STOP_WAIT) as arguments; credentials come from the
+environment, as for the Makefile's own aws calls.
 
 Exit codes: 0 done; 1 the command could not run or failed; 2 preflight refused the run; 3 it ran and
 found something to act on (replay: a failover trigger's conditions were met; reconcile --check: the tests
@@ -70,11 +70,16 @@ def parser() -> argparse.ArgumentParser:
     _add_deployment(u)
     _add_spec(u)
     u.add_argument("--poll-seconds", type=float, default=run.DEFAULT_POLL_SECONDS)
+    u.add_argument("--alarm-wait-minutes", type=float, default=0.0,
+                   help="first wait up to this long for the test's success and stop alarms to have data (a new "
+                        "deployment's alarms start without it); 0, the default, does not wait")
     u.add_argument("--reports-dir", default=report.REPORT_DIR)
 
     s = commands.add_parser("stop", help="stop a test's active run (make ngrh-test-stop)")
     _add_deployment(s)
     _add_spec(s)
+    s.add_argument("--wait-minutes", type=float, default=0.0,
+                   help="after asking, wait up to this long for the run to end (delete-tests refuses while one is active); default 0")
 
     t = commands.add_parser("report", help="collect a run's report (make ngrh-test-report)")
     _add_deployment(t)
@@ -96,11 +101,26 @@ def _one(aws: AwsCli, env: Environment, args: argparse.Namespace) -> ResolvedTes
     return context.resolve_all(aws, env, spec.load(args.spec).select(args.test))[0]
 
 
+def _wait_for_alarm_data(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep: Callable[[float], None],
+                         clock: Callable[[], float]) -> None:
+    """Give a new deployment's alarms time to get data. Whatever is still wrong afterwards, preflight reports."""
+    try:
+        t = _one(aws, env, args)
+    except (spec.SpecError, ContextError):
+        return  # a test that does not resolve is preflight's to report
+    _say(f"Waiting up to {args.alarm_wait_minutes:g} min for the success and stop alarms of {t.name} to have data.")
+    still = run.wait_for_alarm_data(aws, t, args.alarm_wait_minutes, progress=_say, sleep=sleep, clock=clock)
+    if still:
+        _say(f"After {args.alarm_wait_minutes:g} min these alarms still have no data: {', '.join(still)}.")
+
+
 def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep: Callable[[float], None],
                  clock: Callable[[], float]) -> int:
     tests = spec.load(args.spec).select(args.test)
     if args.test == "all":
         raise spec.SpecError(["name one test to run, for example TEST=orders-broker-dependency"])
+    if args.alarm_wait_minutes > 0:
+        _wait_for_alarm_data(aws, env, args, sleep, clock)
     checked = preflight.run_checks(aws, env, tests, preflight.LIVE)
     sys.stdout.write(preflight.render(checked, preflight.LIVE, [t.name for t in tests]))
     if not checked.passed:
@@ -173,7 +193,7 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
         if args.command == "run":
             return _run_command(aws, env, args, sleep, clock)
         if args.command == "stop":
-            for line in run.stop(aws, env, _one(aws, env, args)):
+            for line in run.stop(aws, env, _one(aws, env, args), args.wait_minutes, sleep=sleep, clock=clock):
                 _say(line)
             return EXIT_OK
         if args.command == "report":
