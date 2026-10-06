@@ -43,6 +43,16 @@ A fifth, found reviewing the FIS sidecar change before its first e2e run
    images, so baseInfra would have failed to delete in both Regions. Both lists
    are now checked against the repositories baseInfra declares.
 
+A sixth, from run 37401247653 (2026-10-06), the first run whose destroy-all got
+all the way to its last target:
+
+6. destroy-all deleted both Cloud Map namespaces, the guard ran the helper again
+   33 s later while Cloud Map was still deleting them, and DeleteNamespace
+   answered DuplicateRequest. The helper called that a failure, so a teardown
+   that left nothing behind ended "Teardown incomplete". A delete already in
+   progress now waits for the namespace to disappear, and is a failure only if
+   it is still listed when the wait runs out.
+
 The stub `aws` below is a tiny state machine over a JSON file: RDS global
 cluster membership with asynchronous removal, CloudFormation stacks with
 asynchronous deletion and an optional first-attempt failure, S3 buckets
@@ -237,6 +247,16 @@ if svc == "servicediscovery":
     if region in state.get("cloudmap_denied", []):
         fail("(AccessDeniedException) when calling the %s operation: User: arn:aws:sts::111111111111:assumed-role/github-actions-microservice-e2e/e2e is not authorized to perform: servicediscovery:%s" % (action, action))
     if op == "list-namespaces":
+        # DeleteNamespace is asynchronous. A namespace whose delete is already in
+        # flight carries "deleting": it stays listed for that many further calls,
+        # then it is gone.
+        for n in list(namespaces):
+            if "deleting" in n:
+                if n["deleting"] <= 0:
+                    namespaces.remove(n)
+                else:
+                    n["deleting"] -= 1
+        save()
         m = re.search(r"Name=='([^']+)'", opt("--query") or "")
         hits = [n for n in namespaces if m is None or n["name"] == m.group(1)]
         print(hits[0]["id"] if hits else "None")
@@ -251,6 +271,8 @@ if svc == "servicediscovery":
         ns = next((n for n in namespaces if n["id"] == ns_id), None)
         if ns is None:
             fail("(NamespaceNotFound) when calling the DeleteNamespace operation: Namespace %s not found" % ns_id)
+        if "deleting" in ns:
+            fail("(DuplicateRequest) when calling the DeleteNamespace operation: Another operation of type DeleteNamespace and id op-%s is in progress" % ns_id)
         if ns.get("services"):
             fail("(ResourceInUse) when calling the DeleteNamespace operation: Namespace %s still has services" % ns_id)
         if ns.get("delete_fails"):
@@ -619,6 +641,31 @@ class TestDeleteCloudMapNamespace:
         assert "failed to delete namespace ns-abc1234" in r.stdout
         assert "InternalServiceError" in r.stderr
 
+    def test_a_delete_already_in_progress_waits_for_the_namespace_to_go(self, stub_env):
+        # The defect from run 37401247653: destroy-all deleted the namespace, the
+        # guard ran the helper again 33 s later while Cloud Map was still deleting
+        # it, got DuplicateRequest, and reported a leak that was not there.
+        env, state, log = stub_env
+        env = dict(env, CLOUDMAP_DELETE_WAIT_INTERVAL="0")
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace(deleting=2)}}))
+        r = _run_delete_ns(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "already being deleted" in r.stdout and "gone now" in r.stdout
+        assert "DuplicateRequest" in r.stderr                    # the API answer stays visible
+        assert _sd_ops(log) == ["list-namespaces", "list-services", "delete-namespace",
+                                "list-namespaces", "list-namespaces"]
+        assert json.loads(state.read_text())["namespaces"][PRIMARY] == []
+
+    def test_a_delete_in_progress_that_never_finishes_is_a_failure(self, stub_env):
+        env, state, log = stub_env
+        env = dict(env, CLOUDMAP_DELETE_WAIT_INTERVAL="0", CLOUDMAP_DELETE_WAIT_ATTEMPTS="3")
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace(deleting=50)}}))
+        r = _run_delete_ns(env)
+        assert r.returncode != 0
+        assert "still present" in r.stdout
+        assert _sd_ops(log).count("list-namespaces") == 4      # the first lookup plus three checks
+        assert json.loads(state.read_text())["namespaces"][PRIMARY] != []
+
 
 @pytest.mark.skipif(REAL_MAKE is None, reason="make not installed")
 class TestDestroyCloudMapNamespaceTarget:
@@ -754,7 +801,23 @@ class TestTeardownGuardCloudMap:
         final = json.loads(state.read_text())
         assert final["namespaces"] == {PRIMARY: [], STANDBY: []}
 
-    def test_a_namespace_the_role_cannot_delete_makes_the_teardown_incomplete(self, stub_env, tmp_path):
+    def test_namespaces_destroy_all_is_already_deleting_leave_the_teardown_complete(self, stub_env, tmp_path):
+        # Run 37401247653's sequence: destroy-all reached destroy-cloudmap-namespace
+        # and Cloud Map was still deleting both namespaces when the guard ran.
+        env, state, log = stub_env
+        env = dict(env, CLOUDMAP_DELETE_WAIT_INTERVAL="0")
+        state.write_text(json.dumps({
+            "stacks": {PRIMARY: {}, STANDBY: {}},
+            "members": [], "global_gone": True,
+            "namespaces": {PRIMARY: _namespace("ns-primary", deleting=1),
+                           STANDBY: _namespace("ns-standby", deleting=1)},
+        }))
+        r = _run_teardown(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Teardown complete" in r.stdout, r.stdout
+        assert "Teardown incomplete" not in r.stdout
+        final = json.loads(state.read_text())
+        assert final["namespaces"] == {PRIMARY: [], STANDBY: []}
         env, state, log = stub_env
         state.write_text(json.dumps({
             "stacks": {PRIMARY: {}, STANDBY: {}},

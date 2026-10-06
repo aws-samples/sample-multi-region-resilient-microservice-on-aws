@@ -50,7 +50,34 @@ if [ "$svc_count" != "0" ]; then
     exit 1
 fi
 
-if ! aws servicediscovery delete-namespace --region "$REGION" --id "$ns_id" >/dev/null; then
+if ! err=$(aws servicediscovery delete-namespace --region "$REGION" --id "$ns_id" 2>&1 >/dev/null); then
+    # The API error stays visible on stderr either way.
+    echo "$err" >&2
+    # DeleteNamespace is asynchronous: the namespace stays listed until Cloud Map
+    # finishes, and a second DeleteNamespace meanwhile fails with DuplicateRequest.
+    # destroy-all deletes the namespace and the e2e Teardown guard then runs this
+    # helper again, so on a teardown that removed everything the guard can land
+    # mid-delete (run 37401247653: both namespaces reported as leaked 33 s after
+    # destroy-all had deleted them). Wait for that delete to finish instead of
+    # calling it a leak; a namespace still listed when the wait runs out is one.
+    if [[ "$err" == *DuplicateRequest* ]]; then
+        attempts=${CLOUDMAP_DELETE_WAIT_ATTEMPTS:-24}
+        interval=${CLOUDMAP_DELETE_WAIT_INTERVAL:-5}
+        for ((i = 0; i < attempts; i++)); do
+            if ! still=$(aws servicediscovery list-namespaces --region "$REGION" \
+                    --query "Namespaces[?Name=='$NAME']|[0].Id" --output text); then
+                echo "$REGION: could not list Cloud Map namespaces (see the error above); $NAME may be leaking"
+                exit 1
+            fi
+            if [ -z "$still" ] || [ "$still" = "None" ]; then
+                echo "$REGION: namespace $ns_id ($NAME) was already being deleted; it is gone now"
+                exit 0
+            fi
+            sleep "$interval"
+        done
+        echo "$REGION: namespace $ns_id ($NAME) was already being deleted but is still present after $attempts checks $interval s apart"
+        exit 1
+    fi
     echo "$REGION: failed to delete namespace $ns_id ($NAME)"
     exit 1
 fi
