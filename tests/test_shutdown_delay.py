@@ -13,8 +13,10 @@ reached only through Service Connect, so each of their task definitions has a
 `shutdown-delay` container that depends on the application. A container
 dependency reverses at shutdown (ECS stops a container only after every
 container that depends on it has stopped), so the application gets its stop
-signal only when the delay container exits, SHUTDOWN_DELAY_SECONDS after the
-task starts stopping, and keeps serving until then.
+signal only after the delay container exits, SHUTDOWN_DELAY_SECONDS after ECS
+signals it, and keeps serving until then. In test2 the applications got their
+stop signal ~26 s later than before: the 15 s delay, then ~11 s for ECS to move
+on to the application.
 
 Run with:  pytest tests/test_shutdown_delay.py -v
 """

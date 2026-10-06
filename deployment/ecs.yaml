@@ -709,11 +709,12 @@ Resources:
         # test2), and the task's own proxy answers those requests with 503 once
         # the application has exited. A container dependency reverses at
         # shutdown: ECS stops a container only after every container that
-        # depends on it has stopped. So carts gets its stop signal when this
-        # container exits, SHUTDOWN_DELAY_SECONDS after the task starts
-        # stopping (15 s, three times the longest window seen). It reuses the
-        # FIS sidecar's image, which every task already pulls, because it needs
-        # only bash and sleep.
+        # depends on it has stopped. So carts gets its stop signal only after
+        # this container exits, SHUTDOWN_DELAY_SECONDS after ECS signals it
+        # (15 s, three times the longest window seen). In test2 the application
+        # got its signal ~26 s later than before: ECS took another ~11 s to move
+        # on to it. It reuses the FIS sidecar's image, which every task already
+        # pulls, because it needs only bash and sleep.
         - Name: shutdown-delay
           Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/amazon-ssm-agent${Env}:latest'
           Cpu: 0
