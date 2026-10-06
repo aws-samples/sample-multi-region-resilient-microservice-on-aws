@@ -5,7 +5,10 @@ by changing only its Tag parameter. CloudFormation then registers a new
 revision of every task definition whose image references Tag, and ECS
 authorizes the tags on a new revision as ecs:TagResource. On 2026-10-05 the
 first repave after the task definitions gained `service` tags rolled back in
-both Regions because the repave role lacked that permission.
+both Regions because the repave role lacked that permission. On 2026-10-06 the
+first repave after the task definitions switched to `!GetAtt <Role>.Arn`
+rolled back the same way: CloudFormation reads the role to resolve the ARN,
+with the repave role's permissions, and the role could not iam:GetRole.
 
 Run with:  pytest tests/test_repave_permissions.py -v
 """
@@ -97,3 +100,57 @@ def test_repave_role_can_tag_task_definitions_at_registration():
         "arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task-definition/apps${Env}-*",
     ]), arns
     assert grant.get("Condition") == {"StringEquals": {"ecs:CreateAction": "RegisterTaskDefinition"}}
+
+
+# What the repave role must be allowed to call for CloudFormation to resolve
+# !GetAtt <resource>.<attribute> on a task definition it updates, by the type
+# of the resource read. A task definition that gains a !GetAtt on another type
+# fails test_repave_role_can_resolve_the_get_atts_of_task_definitions until its
+# read is added here and to the role.
+GET_ATT_READS = {
+    "AWS::IAM::Role": ("iam:GetRole", "arn:aws:iam::${AWS::AccountId}:role/apps${Env}-*"),
+}
+
+
+def _get_att_targets(node, out):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("!GetAtt", "Fn::GetAtt"):
+                out.add((value if isinstance(value, str) else ".".join(value)).split(".")[0])
+            else:
+                _get_att_targets(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _get_att_targets(value, out)
+    return out
+
+
+def test_repave_role_can_resolve_the_get_atts_of_task_definitions():
+    """CloudFormation resolves !GetAtt with the caller's permissions by reading the resource.
+
+    On 2026-10-06 the first repave after the task definitions switched from
+    !Ref <Role> (the role name, which needs no call) to !GetAtt <Role>.Arn rolled
+    back in both Regions: the repave role could not iam:GetRole.
+    """
+    resources = _load_template(DEPLOYMENT / "ecs.yaml")["Resources"]
+    statements = [s for s in _repave_role_statements() if s.get("Effect") == "Allow"]
+    checked = 0
+    for lid, res in resources.items():
+        if res["Type"] != "AWS::ECS::TaskDefinition" or not _uses_tag_parameter(res.get("Properties")):
+            continue
+        for target in sorted(_get_att_targets(res.get("Properties"), set())):
+            target_type = resources[target]["Type"]
+            assert target_type in GET_ATT_READS, \
+                f"{lid} reads {target} ({target_type}) by !GetAtt; add the call the repave role needs"
+            action, arn = GET_ATT_READS[target_type]
+            # The pattern only covers names CloudFormation generates from the stack name.
+            name = (resources[target].get("Properties") or {}).get("RoleName")
+            assert name is None or _sub_text(name).startswith("apps${Env}-"), f"{target} is named {name}"
+            grants = [s for s in statements
+                      if action in ([s["Action"]] if isinstance(s["Action"], str) else s["Action"])]
+            arns = {_sub_text(r) for s in grants
+                    for r in (s["Resource"] if isinstance(s["Resource"], list) else [s["Resource"]])}
+            assert arn in arns, f"{lid} reads {target} by !GetAtt, but the repave role cannot {action} on {arn}"
+            assert all("Condition" not in s for s in grants), f"{action} must not be conditional"
+            checked += 1
+    assert checked, "no task definition reads anything by !GetAtt; is the check still needed?"

@@ -138,6 +138,13 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService: ecs-tasks.amazonaws.com
+              # The task definitions name their roles by !GetAtt <Role>.Arn, and
+              # CloudFormation resolves that by reading the role with the CALLER's
+              # permissions. Without this grant both Regions' repave updates
+              # rolled back on every task definition (test2, 2026-10-06).
+              - Effect: Allow
+                Action: iam:GetRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/apps${Env}-*'
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
