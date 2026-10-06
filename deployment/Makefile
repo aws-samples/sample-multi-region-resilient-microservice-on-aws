@@ -482,13 +482,21 @@ monitoring: restore-reconciliation arc-dns-status
 	$(eval _STANDBY_CLUSTER:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id EcsCluster --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _CANARY_BUCKET_PRIMARY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	$(eval _CANARY_BUCKET_STANDBY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
+	# ui's hop alarms use the ALB and target group full names: the part of each ARN after
+	# "loadbalancer/" (app/<name>/<id>) and after the last ":" (targetgroup/<name>/<id>).
+	$(eval _PRIMARY_ALB:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id Alb --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:loadbalancer/||'))
+	$(eval _STANDBY_ALB:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id Alb --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:loadbalancer/||'))
+	$(eval _PRIMARY_UI_TG:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id AlbTargetGroup --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:||'))
+	$(eval _STANDBY_UI_TG:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id AlbTargetGroup --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:||'))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./monitoring.yml \
 	--stack-name monitoring${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides PrimaryRegion=${PRIMARY_REGION} Env=${ENV} SecondaryRegion=${STANDBY_REGION} \
-	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) --s3-bucket $(_CANARY_BUCKET_PRIMARY) \
+	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) \
+	UiLoadBalancerFullName=$(_PRIMARY_ALB) UiTargetGroupFullName=$(_PRIMARY_UI_TG) --s3-bucket $(_CANARY_BUCKET_PRIMARY) \
 	--tags service=shared
 	@aws cloudformation deploy --region ${STANDBY_REGION} --template ./monitoring.yml \
 	--stack-name monitoring${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides PrimaryRegion=${PRIMARY_REGION} Env=${ENV} SecondaryRegion=${STANDBY_REGION} \
-	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) --s3-bucket $(_CANARY_BUCKET_STANDBY) \
+	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) \
+	UiLoadBalancerFullName=$(_STANDBY_ALB) UiTargetGroupFullName=$(_STANDBY_UI_TG) --s3-bucket $(_CANARY_BUCKET_STANDBY) \
 	--tags service=shared
 
 arc-dns-status: region-switch boto3-layer

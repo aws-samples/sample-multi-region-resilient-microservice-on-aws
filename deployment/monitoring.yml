@@ -24,6 +24,14 @@ Parameters:
     Type: String
     Description: ECS cluster name in secondary region (for Application Signals Environment dimension)
     Default: ""
+  UiLoadBalancerFullName:
+    Type: String
+    Description: This Region's ALB full name (app/<name>/<id>), the LoadBalancer dimension of ui's hop alarms
+    AllowedPattern: '^app/[^/]+/[0-9a-f]+$'
+  UiTargetGroupFullName:
+    Type: String
+    Description: ui's target group full name (targetgroup/<name>/<id>), the TargetGroup dimension of ui's hop alarms
+    AllowedPattern: '^targetgroup/[^/]+/[0-9a-f]+$'
 
 Conditions:
   IsPrimaryRegion: !Equals [!Ref AWS::Region, !Ref PrimaryRegion]
@@ -786,128 +794,507 @@ Resources:
         }
 
   # -------------------------------------------------------------------------
-  # Region Switch Auto-Trigger: composite alarm per region.
-  # Each region's alarm watches its rmt-rgnl-* canaries (probing the OTHER
-  # region) AND confirms the LOCAL region is healthy (lcl-rgnl-home passing).
-  # When all remote canaries fail AND local is healthy for 5 min sustained,
-  # the alarm triggers deactivation of the impaired remote region.
+  # Journey alarms (design 5.5). One per canary in this Region: the lcl view
+  # (this Region's canary against this Region's ALB), the rmt view (this
+  # Region's canary against the other Region's ALB) and the global view
+  # (this Region's canary against the Route 53 name). So
+  # journey-rmt-orders-us-west-2 is us-west-2's view of us-east-1's orders
+  # journey. Every canary enters through the ALB and ui (design 4.3), so a
+  # failure in any service on a journey's path fails that journey.
+  # 2 of 3 one-minute datapoints below 50%: one failed run never alarms.
+  # Missing data is breaching, so an observer that stops reporting counts as
+  # failing; the plan's triggers (step 11) require both Regions to agree.
   # -------------------------------------------------------------------------
-  RmtHomeFailedAlarm:
+  JourneyLclHomeAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub "ngrh-rmt-home-failed${Env}"
-      Tags:
-        - Key: service
-          Value: ui
-      Namespace: CloudWatchSynthetics
-      MetricName: SuccessPercent
-      Dimensions:
-        - Name: CanaryName
-          Value: !Sub "rmt-rgnl-home${Env}"
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 50
-      ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
-
-  RmtCartFailedAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "ngrh-rmt-cart-failed${Env}"
-      Tags:
-        - Key: service
-          Value: cart
-      Namespace: CloudWatchSynthetics
-      MetricName: SuccessPercent
-      Dimensions:
-        - Name: CanaryName
-          Value: !Sub "rmt-rgnl-cart${Env}"
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 50
-      ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
-
-  RmtCatalogFailedAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "ngrh-rmt-catalog-failed${Env}"
-      Tags:
-        - Key: service
-          Value: catalog
-      Namespace: CloudWatchSynthetics
-      MetricName: SuccessPercent
-      Dimensions:
-        - Name: CanaryName
-          Value: !Sub "rmt-rgnl-catalog${Env}"
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 50
-      ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
-
-  RmtOrdersFailedAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "ngrh-rmt-orders-failed${Env}"
-      Tags:
-        - Key: service
-          Value: orders
-      Namespace: CloudWatchSynthetics
-      MetricName: SuccessPercent
-      Dimensions:
-        - Name: CanaryName
-          Value: !Sub "rmt-rgnl-orders${Env}"
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 50
-      ComparisonOperator: LessThanThreshold
-      TreatMissingData: breaching
-
-  LclHomeHealthyAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub "ngrh-lcl-home-healthy${Env}"
-      Tags:
-        - Key: service
-          Value: ui
-      Namespace: CloudWatchSynthetics
-      MetricName: SuccessPercent
-      Dimensions:
-        - Name: CanaryName
-          Value: !Sub "lcl-rgnl-home${Env}"
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 90
-      ComparisonOperator: GreaterThanOrEqualToThreshold
-      TreatMissingData: notBreaching
-
-  RegionSwitchTriggerAlarm:
-    Type: AWS::CloudWatch::CompositeAlarm
-    Properties:
-      AlarmName: !Sub "ngrh-region-switch-trigger${Env}"
+      AlarmName: !Sub 'journey-lcl-home-${AWS::Region}${Env}'
+      AlarmDescription: Home journey failing in this Region, seen from this Region (lcl-rgnl-home).
       Tags:
         - Key: service
           Value: shared
-      # LclHomeHealthyAlarm is an inverted-sense alarm: it uses
-      # SuccessPercent >= 90, so its ALARM state means the LOCAL region is
-      # HEALTHY. The guard below must therefore reference ALARM(), not OK().
-      # Using OK() required the local region to be UNHEALTHY before a switch
-      # could fire, which blocked evacuation in exactly the scenario this
-      # alarm exists for.
-      AlarmRule: !Sub >-
-        ALARM(${RmtHomeFailedAlarm})
-        AND ALARM(${RmtCartFailedAlarm})
-        AND ALARM(${RmtCatalogFailedAlarm})
-        AND ALARM(${RmtOrdersFailedAlarm})
-        AND ALARM(${LclHomeHealthyAlarm})
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'lcl-rgnl-home${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
 
-Outputs:
-  RegionSwitchTriggerAlarmArn:
-    Value: !GetAtt RegionSwitchTriggerAlarm.Arn
-    Description: Composite alarm ARN for ARC Region Switch trigger
+  JourneyLclCartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-lcl-cart-${AWS::Region}${Env}'
+      AlarmDescription: Cart journey failing in this Region, seen from this Region (lcl-rgnl-cart).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'lcl-rgnl-cart${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyLclCatalogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-lcl-catalog-${AWS::Region}${Env}'
+      AlarmDescription: Catalog journey failing in this Region, seen from this Region (lcl-rgnl-catalog).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'lcl-rgnl-catalog${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyLclOrdersAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-lcl-orders-${AWS::Region}${Env}'
+      AlarmDescription: Orders journey failing in this Region, seen from this Region (lcl-rgnl-orders).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'lcl-rgnl-orders${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyRmtHomeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-rmt-home-${AWS::Region}${Env}'
+      AlarmDescription: Home journey failing in the other Region, seen from this Region (rmt-rgnl-home).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'rmt-rgnl-home${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyRmtCartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-rmt-cart-${AWS::Region}${Env}'
+      AlarmDescription: Cart journey failing in the other Region, seen from this Region (rmt-rgnl-cart).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'rmt-rgnl-cart${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyRmtCatalogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-rmt-catalog-${AWS::Region}${Env}'
+      AlarmDescription: Catalog journey failing in the other Region, seen from this Region (rmt-rgnl-catalog).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'rmt-rgnl-catalog${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyRmtOrdersAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-rmt-orders-${AWS::Region}${Env}'
+      AlarmDescription: Orders journey failing in the other Region, seen from this Region (rmt-rgnl-orders).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'rmt-rgnl-orders${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyGlobalHomeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-global-home-${AWS::Region}${Env}'
+      AlarmDescription: Home journey failing through the global name, seen from this Region (global-home).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-home${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyGlobalCartAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-global-cart-${AWS::Region}${Env}'
+      AlarmDescription: Cart journey failing through the global name, seen from this Region (global-cart).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-cart${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyGlobalCatalogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-global-catalog-${AWS::Region}${Env}'
+      AlarmDescription: Catalog journey failing through the global name, seen from this Region (global-catalog).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-catalog${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  JourneyGlobalOrdersAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'journey-global-orders-${AWS::Region}${Env}'
+      AlarmDescription: Orders journey failing through the global name, seen from this Region (global-orders).
+      Tags:
+        - Key: service
+          Value: shared
+      Namespace: CloudWatchSynthetics
+      MetricName: SuccessPercent
+      Dimensions:
+        - Name: CanaryName
+          Value: !Sub 'global-orders${Env}'
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 50
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  # Any journey failing in this Region, seen from this Region. A trigger that
+  # fails over Region A requires this alarm OK in B, so an event that hits
+  # both Regions can't move traffic.
+  RegionDegradedAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub 'region-degraded-${AWS::Region}${Env}'
+      AlarmDescription: At least one journey fails in this Region, seen from this Region.
+      Tags:
+        - Key: service
+          Value: shared
+      AlarmRule: !Sub >-
+        ALARM(${JourneyLclHomeAlarm})
+        OR ALARM(${JourneyLclCartAlarm})
+        OR ALARM(${JourneyLclCatalogAlarm})
+        OR ALARM(${JourneyLclOrdersAlarm})
+
+  # -------------------------------------------------------------------------
+  # Hop alarms (design 5.5): which hop failed, since a journey alarm can't
+  # say. ui's come from its ALB target group; the back-ends' from Service
+  # Connect (AWS/ECS by TargetDiscoveryName, summed over every caller in the
+  # Region). Service Connect counts only responses the application sends, so
+  # a back-end that hangs past its 3-second limit shows as slow, while its
+  # caller's errors alarm fires. Missing data is not breaching: no traffic
+  # is not a failure. Tagged with their own service for NGRH discovery.
+  # ALB TargetResponseTime is in seconds, Service Connect's in milliseconds.
+  # -------------------------------------------------------------------------
+  HopUiErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-ui-errors-${AWS::Region}${Env}'
+      AlarmDescription: ui returned 5xx responses to the ALB.
+      Tags:
+        - Key: service
+          Value: ui
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref UiLoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref UiTargetGroupFullName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopUiSlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-ui-slow-${AWS::Region}${Env}'
+      AlarmDescription: ui took longer than 3 seconds to answer the ALB.
+      Tags:
+        - Key: service
+          Value: ui
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref UiLoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref UiTargetGroupFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopCatalogErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-catalog-errors-${AWS::Region}${Env}'
+      AlarmDescription: catalog returned 5xx responses over Service Connect.
+      Tags:
+        - Key: service
+          Value: catalog
+      Namespace: AWS/ECS
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: catalog
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopCatalogSlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-catalog-slow-${AWS::Region}${Env}'
+      AlarmDescription: catalog took longer than its 3-second Service Connect limit.
+      Tags:
+        - Key: service
+          Value: catalog
+      Namespace: AWS/ECS
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: catalog
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopCartsErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-carts-errors-${AWS::Region}${Env}'
+      AlarmDescription: carts returned 5xx responses over Service Connect.
+      Tags:
+        - Key: service
+          Value: cart
+      Namespace: AWS/ECS
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: carts
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopCartsSlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-carts-slow-${AWS::Region}${Env}'
+      AlarmDescription: carts took longer than its 3-second Service Connect limit.
+      Tags:
+        - Key: service
+          Value: cart
+      Namespace: AWS/ECS
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: carts
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopCheckoutErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-checkout-errors-${AWS::Region}${Env}'
+      AlarmDescription: checkout returned 5xx responses over Service Connect.
+      Tags:
+        - Key: service
+          Value: checkout
+      Namespace: AWS/ECS
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: checkout
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopCheckoutSlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-checkout-slow-${AWS::Region}${Env}'
+      AlarmDescription: checkout took longer than its 3-second Service Connect limit.
+      Tags:
+        - Key: service
+          Value: checkout
+      Namespace: AWS/ECS
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: checkout
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopOrdersErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-orders-errors-${AWS::Region}${Env}'
+      AlarmDescription: orders returned 5xx responses over Service Connect (to ui or checkout).
+      Tags:
+        - Key: service
+          Value: orders
+      Namespace: AWS/ECS
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: orders
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  HopOrdersSlowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'hop-orders-slow-${AWS::Region}${Env}'
+      AlarmDescription: orders took longer than its 3-second Service Connect limit.
+      Tags:
+        - Key: service
+          Value: orders
+      Namespace: AWS/ECS
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: TargetDiscoveryName
+          Value: orders
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
