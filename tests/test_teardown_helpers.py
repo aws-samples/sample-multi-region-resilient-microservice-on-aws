@@ -509,11 +509,19 @@ def _teardown_script() -> str:
     wf = yaml.safe_load(E2E_WORKFLOW.read_text())
     job = next(iter(wf["jobs"].values()))
     run = next(s for s in job["steps"] if s.get("name") == "Teardown")["run"]
-    run = (run.replace("${{ env.ENV }}", ENV_SUFFIX)
-              .replace("${{ env.AWS_REGION }}", PRIMARY)
-              .replace("${{ env.STANDBY_REGION }}", STANDBY))
-    assert "${{" not in run, "unsubstituted GitHub expression in Teardown"
+    assert "${{" not in run, "a GitHub expression in the Teardown run block: use the job's environment variables"
     return run
+
+
+def _job_env(env):
+    """The variables the job gives every step: ENV from $GITHUB_ENV, the Regions from the job's env."""
+    return dict(env, ENV=ENV_SUFFIX, AWS_REGION=PRIMARY, STANDBY_REGION=STANDBY)
+
+
+def _expanded(script):
+    """The script with the job's variables filled in, for tests that match on what it would run."""
+    return (script.replace("${ENV}", ENV_SUFFIX).replace("${AWS_REGION}", PRIMARY)
+                  .replace("${STANDBY_REGION}", STANDBY))
 
 
 def _run_teardown(env, tmp_path):
@@ -521,7 +529,7 @@ def _run_teardown(env, tmp_path):
     script.write_text(_teardown_script())
     # GitHub runs `run:` blocks with `bash -e`; mirror that so a failing command
     # inside a function is treated the way the real job would treat it.
-    return subprocess.run(["bash", "-e", str(script)], cwd=DEPLOYMENT, env=env,
+    return subprocess.run(["bash", "-e", str(script)], cwd=DEPLOYMENT, env=_job_env(env),
                           capture_output=True, text=True, timeout=120)
 
 
@@ -814,7 +822,7 @@ class TestCloudMapRoleAndNaming:
         assert "./delete-cloudmap-namespace.sh retail-store-ar${ENV}" in makefile
         assert "2>/dev/null" not in makefile.split("destroy-cloudmap-namespace:")[1].split("\n\n")[0], \
             "the Cloud Map target must not hide its API errors again"
-        assert "./delete-cloudmap-namespace.sh %s" % NAMESPACE in _teardown_script()
+        assert "./delete-cloudmap-namespace.sh %s" % NAMESPACE in _expanded(_teardown_script())
 
 
 # ---------------------------------------------------------------------------
@@ -1023,17 +1031,15 @@ def _log_group_step():
 
 
 def _log_group_script() -> str:
-    run = (_log_group_step()["run"].replace("${{ env.ENV }}", ENV_SUFFIX)
-                                   .replace("${{ env.AWS_REGION }}", PRIMARY)
-                                   .replace("${{ env.STANDBY_REGION }}", STANDBY))
-    assert "${{" not in run, "unsubstituted GitHub expression in the log group step"
+    run = _log_group_step()["run"]
+    assert "${{" not in run, "a GitHub expression in the log group run block: use the job's environment variables"
     return run
 
 
 def _run_log_group_step(env, tmp_path):
     script = tmp_path / "log-groups.sh"
     script.write_text(_log_group_script())
-    return subprocess.run(["bash", "-e", str(script)], cwd=DEPLOYMENT, env=env,
+    return subprocess.run(["bash", "-e", str(script)], cwd=DEPLOYMENT, env=_job_env(env),
                           capture_output=True, text=True, timeout=120)
 
 
@@ -1134,7 +1140,7 @@ class TestImageRepositoryTeardown:
         loop = re.search(
             r"for repo in ([^;]+); do\n\s+aws ecr delete-repository --force --repository-name \$\{repo\}"
             + re.escape(ENV_SUFFIX),
-            _teardown_script())
+            _expanded(_teardown_script()))
         assert loop, "the e2e Teardown no longer loops over the image repositories"
         missing = _declared_repositories() - set(loop.group(1).split())
         assert not missing, f"the e2e Teardown does not force-delete {sorted(missing)}"
