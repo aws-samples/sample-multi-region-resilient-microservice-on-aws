@@ -269,4 +269,15 @@ jobs:
             echo "Teardown complete"
           fi
         working-directory: deployment
+      - name: Delete log groups of this run
+        if: success()
+        run: |-
+          left=""
+          for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do
+            ./delete-run-log-groups.sh "${{ env.ENV }}" "$region" || left="$left $region"
+          done
+          if [ -n "$left" ]; then
+            echo "::warning::Log groups of this run could not all be deleted in:$left"
+          fi
+        working-directory: deployment
     timeout-minutes: 300

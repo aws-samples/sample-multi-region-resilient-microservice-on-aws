@@ -614,6 +614,25 @@ e2e.addJob('e2e', {
         'fi',
       ].join('\n'),
     },
+    {
+      // Lambda (the canaries and the custom resources), CodeBuild, Container Insights, RDS and
+      // the services create log groups outside CloudFormation, so the Teardown above leaves
+      // them, 28 per run, and none of them expires. The step runs only after a passing run:
+      // a failed one keeps its logs for the post-mortem, which is all that is left of it
+      // once its stacks are gone. A region it cannot clean is a warning, like the Teardown's.
+      name: 'Delete log groups of this run',
+      if: 'success()',
+      workingDirectory: 'deployment',
+      run: [
+        'left=""',
+        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        '  ./delete-run-log-groups.sh "${{ env.ENV }}" "$region" || left="$left $region"',
+        'done',
+        'if [ -n "$left" ]; then',
+        '  echo "::warning::Log groups of this run could not all be deleted in:$left"',
+        'fi',
+      ].join('\n'),
+    },
   ],
 });
 

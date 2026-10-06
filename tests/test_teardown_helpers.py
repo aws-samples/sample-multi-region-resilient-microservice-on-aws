@@ -53,11 +53,23 @@ all the way to its last target:
    progress now waits for the namespace to disappear, and is a failure only if
    it is still listed when the wait runs out.
 
+A seventh, found counting what the passing run 37485943263 left in the e2e account
+(2026-10-06):
+
+7. The teardown deleted every stack and still left 28 CloudWatch log groups, 15 in
+   us-east-1 and 13 in us-west-2, exactly as the run before it had. Lambda (the
+   canaries and the custom resources), CodeBuild, Container Insights, RDS and the
+   services create their log groups outside CloudFormation, and none of them
+   expires. delete-run-log-groups.sh now deletes a passing run's own groups, in a
+   step of their own that a failed run skips, so its logs survive for the
+   post-mortem.
+
 The stub `aws` below is a tiny state machine over a JSON file: RDS global
 cluster membership with asynchronous removal, CloudFormation stacks with
 asynchronous deletion and an optional first-attempt failure, S3 buckets
 whose objects can "land" between an empty and CloudFormation's DeleteBucket,
-and Cloud Map namespaces with a per-region AccessDenied switch.
+Cloud Map namespaces with a per-region AccessDenied switch, and CloudWatch log
+groups answering the service's substring name pattern a page per line.
 Every invocation is appended to a log so the tests can assert ORDER, not just
 end state.
 
@@ -280,6 +292,33 @@ if svc == "servicediscovery":
         namespaces.remove(ns)
         save()
         print(json.dumps({"OperationId": "op-" + ns_id}))
+        sys.exit(0)
+
+if svc == "logs":
+    region = opt("--region")
+    groups = state.setdefault("log_groups", {}).setdefault(region, [])
+    action = "".join(p.title() for p in op.split("-"))
+    if region in state.get("logs_denied", []):
+        fail("(AccessDeniedException) when calling the %s operation: User: arn:aws:sts::111111111111:assumed-role/github-actions-microservice-e2e/e2e is not authorized to perform: logs:%s" % (action, action))
+    if op == "describe-log-groups":
+        # --log-group-name-pattern is a case-sensitive substring match done by the
+        # service. The text output has one page per line, names tab-separated.
+        pattern = opt("--log-group-name-pattern")
+        hits = [g for g in groups + state.get("ghosts", []) if pattern is None or pattern in g]
+        page = state.get("page_size", 3)
+        for i in range(0, len(hits), page):
+            print("\t".join(hits[i:i + page]))
+        if not hits and state.get("empty_as_none"):
+            print("None")
+        sys.exit(0)
+    if op == "delete-log-group":
+        name = opt("--log-group-name")
+        if name in state.get("delete_denied", []):
+            fail("(AccessDeniedException) when calling the DeleteLogGroup operation: User: arn:aws:sts::111111111111:assumed-role/github-actions-microservice-e2e/e2e is not authorized to perform: logs:DeleteLogGroup on resource: " + name)
+        if name not in groups:
+            fail("(ResourceNotFoundException) when calling the DeleteLogGroup operation: The specified log group does not exist.")
+        groups.remove(name)
+        save()
         sys.exit(0)
 
 # ecr delete-repository, secretsmanager delete-secret, anything else: accepted, no output.
@@ -832,6 +871,217 @@ class TestTeardownGuardCloudMap:
         assert "AccessDeniedException" in r.stderr              # the cause is in the log, not swallowed
         final = json.loads(state.read_text())
         assert final["namespaces"][PRIMARY] == _namespace("ns-primary") and final["namespaces"][STANDBY] == []
+
+
+# ---------------------------------------------------------------------------
+# delete-run-log-groups.sh, and the step that runs it after a passing run
+# ---------------------------------------------------------------------------
+
+DELETE_LOG_GROUPS = DEPLOYMENT / "delete-run-log-groups.sh"
+LOG_GROUP_STEP = "Delete log groups of this run"
+
+# What a run leaves behind, as seen in the e2e account after run 37485943263 (the sha and the
+# random parts replaced).
+RUN_LOG_GROUPS = [
+    "/aws/codebuild/mr-app-docker-build-abc1234",
+    "/aws/ecs/containerinsights/apps-abc1234-EcsCluster-EOkrwQEtbODb/performance",
+    "/aws/lambda/app-dns-status-abc1234",
+    "/aws/lambda/catalog-db-stack-abc1234-UpdateSecretFunction-SH45SbX6dagH",
+    "/aws/lambda/cwsyn-global-cart-abc1234-dfa5cfb8-2214-486d-b09a-af94de038317",
+    "/aws/rds/cluster/catalog-dbcluster-01-us-east-1-abc1234/error",
+    "/aws/service-events/carts-abc1234",
+]
+# Not this run's: another run's, no suffix at all, a -dev environment's, an unrelated service's.
+OTHER_LOG_GROUPS = [
+    "/aws/lambda/app-dns-status-def5678",
+    "/aws/lambda/app-dns-status",
+    "/aws/ecs/containerinsights/apps-dev-EcsCluster-X/performance",
+    "/aws/apigateway/welcome",
+]
+# The service's substring pattern returns these two for -abc1234, but they are not this run's
+# to delete: the suffix is only the start of a longer token, or no deletable prefix leads the name.
+LOOKALIKES = [
+    "/aws/lambda/app-dns-status-abc12345",
+    "/custom/thing-abc1234",
+]
+
+
+def _log_group_state(groups, **extra):
+    return json.dumps({"log_groups": {PRIMARY: list(groups), STANDBY: list(groups)}, **extra})
+
+
+def _run_delete_log_groups(env, suffix=ENV_SUFFIX, region=PRIMARY):
+    return subprocess.run([str(DELETE_LOG_GROUPS), suffix, region], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def _log_ops(log: Path):
+    return [c[1] for c in _calls(log) if c[0] == "logs"]
+
+
+def _groups_left(state: Path):
+    return json.loads(state.read_text())["log_groups"]
+
+
+class TestDeleteRunLogGroups:
+
+    def test_only_this_runs_groups_are_deleted(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + OTHER_LOG_GROUPS + LOOKALIKES))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 7 of 7 log groups of -abc1234" in r.stdout
+        left = _groups_left(state)
+        assert left[PRIMARY] == OTHER_LOG_GROUPS + LOOKALIKES
+        assert left[STANDBY] == RUN_LOG_GROUPS + OTHER_LOG_GROUPS + LOOKALIKES   # the other region is not touched
+        for name in LOOKALIKES:
+            assert "left alone, outside the prefixes this helper deletes under: " + name in r.stdout
+        assert "def5678" not in r.stdout                   # another run's groups are never even returned
+
+    def test_the_service_filters_by_name_so_the_account_is_never_listed(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS))
+        _run_delete_log_groups(env)
+        describes = [c for c in _calls(log) if c[:2] == ["logs", "describe-log-groups"]]
+        assert len(describes) == 1
+        assert describes[0][describes[0].index("--log-group-name-pattern") + 1] == ENV_SUFFIX
+        assert "--log-group-name-prefix" not in describes[0]
+
+    @pytest.mark.parametrize("bad", ["-dev", "abc1234", "-ABC1234", "-abc123", "-abc1234x", "-abc1234/", "-", "-*", ""])
+    def test_anything_but_a_commit_sha_suffix_is_refused_before_any_call(self, stub_env, bad):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS))
+        r = _run_delete_log_groups(env, suffix=bad)
+        assert r.returncode != 0
+        assert _calls(log) == []
+        assert _groups_left(state)[PRIMARY] == RUN_LOG_GROUPS
+
+    def test_access_denied_on_the_listing_is_a_failure_with_the_api_error_left_visible(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS, logs_denied=[PRIMARY]))
+        r = _run_delete_log_groups(env)
+        assert r.returncode != 0
+        assert "AccessDeniedException" in r.stderr and "logs:DescribeLogGroups" in r.stderr
+        assert "may be leaking" in r.stdout
+        assert "no log groups" not in r.stdout
+        assert "delete-log-group" not in _log_ops(log)
+        assert _groups_left(state)[PRIMARY] == RUN_LOG_GROUPS
+
+    def test_a_group_that_cannot_be_deleted_is_reported_and_the_others_still_go(self, stub_env):
+        env, state, log = stub_env
+        stuck = RUN_LOG_GROUPS[3]
+        state.write_text(_log_group_state(RUN_LOG_GROUPS, delete_denied=[stuck]))
+        r = _run_delete_log_groups(env)
+        assert r.returncode != 0
+        assert "failed to delete log group " + stuck in r.stdout
+        assert "AccessDeniedException" in r.stderr and "logs:DeleteLogGroup" in r.stderr
+        assert "deleted 6 of 7 log groups" in r.stdout
+        assert _groups_left(state)[PRIMARY] == [stuck]
+
+    def test_a_group_gone_before_its_delete_is_not_a_failure(self, stub_env):
+        env, state, log = stub_env
+        ghost = "/aws/lambda/cwsyn-rmt-rgnl-home-abc1234-5e329f43-be83-4863-a979-18390aaa8977"
+        state.write_text(_log_group_state(RUN_LOG_GROUPS, ghosts=[ghost]))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert ghost + " was already gone" in r.stdout
+        assert "deleted 7 of 8 log groups" in r.stdout
+
+    @pytest.mark.parametrize("empty_as_none", [False, True])
+    def test_nothing_to_delete_is_a_clean_exit(self, stub_env, empty_as_none):
+        # The CLI's text output for an empty result has been seen as nothing and as "None".
+        env, state, log = stub_env
+        state.write_text(_log_group_state(OTHER_LOG_GROUPS, empty_as_none=empty_as_none))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "no log groups of -abc1234 to delete" in r.stdout
+        assert _log_ops(log) == ["describe-log-groups"]
+
+    def test_every_page_of_names_is_read(self, stub_env):
+        env, state, log = stub_env
+        many = ["/aws/lambda/fn%02d-abc1234" % i for i in range(11)]       # three to a page, the last page two
+        state.write_text(_log_group_state(many, page_size=3))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 11 of 11 log groups" in r.stdout
+        assert _groups_left(state)[PRIMARY] == []
+
+
+def _log_helper_api_calls():
+    ops = set(re.findall(r"aws logs ([a-z-]+)", DELETE_LOG_GROUPS.read_text()))
+    assert ops, "delete-run-log-groups.sh makes no logs calls?"
+    return {"logs:" + "".join(p.title() for p in op.split("-")) for op in ops}
+
+
+def _e2e_steps():
+    wf = yaml.safe_load(E2E_WORKFLOW.read_text())
+    return next(iter(wf["jobs"].values()))["steps"]
+
+
+def _log_group_step():
+    return next(s for s in _e2e_steps() if s.get("name") == LOG_GROUP_STEP)
+
+
+def _log_group_script() -> str:
+    run = (_log_group_step()["run"].replace("${{ env.ENV }}", ENV_SUFFIX)
+                                   .replace("${{ env.AWS_REGION }}", PRIMARY)
+                                   .replace("${{ env.STANDBY_REGION }}", STANDBY))
+    assert "${{" not in run, "unsubstituted GitHub expression in the log group step"
+    return run
+
+
+def _run_log_group_step(env, tmp_path):
+    script = tmp_path / "log-groups.sh"
+    script.write_text(_log_group_script())
+    return subprocess.run(["bash", "-e", str(script)], cwd=DEPLOYMENT, env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+class TestLogGroupStep:
+
+    def test_the_e2e_role_grants_every_call_the_helper_makes(self):
+        # Derived from the script, so a call added there without a grant fails here
+        # rather than in the next teardown.
+        needed = _log_helper_api_calls()
+        assert needed == {"logs:DescribeLogGroups", "logs:DeleteLogGroup"}
+        allowed = _role_allows_everywhere()
+        missing = {a for a in needed if a not in allowed and "logs:*" not in allowed}
+        assert not missing, f"github-oidc-role.yaml does not grant {sorted(missing)}"
+
+    def test_it_runs_right_after_the_teardown_and_only_when_the_run_has_passed(self):
+        names = [s.get("name") for s in _e2e_steps()]
+        assert names.index(LOG_GROUP_STEP) == names.index("Teardown") + 1
+        step = _log_group_step()
+        # The Teardown step is `always()`: a failed run still tears down, but it keeps its
+        # logs for the post-mortem, which is all that is left of it once the stacks are gone.
+        assert step["if"] == "success()"
+        assert step["working-directory"] == "deployment"
+
+    def test_the_rendered_step_parses(self, tmp_path):
+        script = tmp_path / "t.sh"
+        script.write_text(_log_group_script())
+        r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+
+    def test_it_deletes_the_runs_groups_in_both_regions(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + OTHER_LOG_GROUPS + LOOKALIKES))
+        r = _run_log_group_step(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.stdout.count("deleted 7 of 7 log groups of -abc1234") == 2
+        assert "::warning::" not in r.stdout
+        left = _groups_left(state)
+        assert left == {PRIMARY: OTHER_LOG_GROUPS + LOOKALIKES, STANDBY: OTHER_LOG_GROUPS + LOOKALIKES}
+
+    def test_a_region_it_cannot_clean_is_a_warning_and_the_other_region_still_is(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS, logs_denied=[PRIMARY]))
+        r = _run_log_group_step(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr          # the teardown's verdict is not this step's
+        assert "::warning::Log groups of this run could not all be deleted in: %s" % PRIMARY in r.stdout
+        assert "AccessDeniedException" in r.stderr              # the cause is in the log, not swallowed
+        left = _groups_left(state)
+        assert left[PRIMARY] == RUN_LOG_GROUPS and left[STANDBY] == []
 
 
 # ---------------------------------------------------------------------------
