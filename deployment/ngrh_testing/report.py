@@ -42,6 +42,26 @@ def observed(status: str) -> str:
     return {"PASSED": PASS, "FAILED": FAIL}.get(status, INCONCLUSIVE)
 
 
+def fault_problem(run: Dict[str, Any], experiments: List[Dict[str, Any]], events: List[Dict[str, Any]]) -> Optional[str]:
+    """Why the fault never ran, or None when nothing says it failed to.
+
+    Resilience Hub ends a run FAILED when the sample failed the test and also when the fault could not be
+    injected at all. On 2026-10-07 FIS refused the ECS packet-loss action with InvalidTarget because no task
+    of orders was registered with SSM (the sidecar image had been overwritten): nothing was blocked, no
+    alarm moved, and the run still ended FAILED, which the report took for the expected FAIL. A run whose
+    fault did not run says nothing about the application, so it is not a verdict.
+
+    The marks of it are a FIS experiment that ended ``failed`` (an experiment the stop condition ended is
+    ``stopped``) and an ``action_failed`` event. The explanation comes from the run's own error message
+    first, as it names the action, then from FIS, then from the event."""
+    failed = [x for x in experiments if (((x.get("experiment") or {}).get("state") or {}).get("status")) == "failed"]
+    actions = [e for e in events if str(e.get("eventType", "")).lower() == "action_failed"]
+    if not failed and not actions:
+        return None
+    reasons = [run.get("errorMessage")] + [x["experiment"]["state"].get("reason") for x in failed] + [e.get("message") for e in actions]
+    return next((r for r in reasons if r), "FIS reported the experiment failed without saying why")
+
+
 def matches(expected: str, seen: str) -> bool:
     """UNKNOWN expects nothing in particular: any run that reached a verdict is recorded as expected."""
     return seen == expected or (expected == "UNKNOWN" and seen != INCONCLUSIVE)
@@ -139,11 +159,15 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
                  "transitions": read(f"history of {a.name}", lambda a=a: _transitions(aws, a, start, end), [])}
                 for a in sorted(t.evidence, key=_hop_order)]
     seen = observed(run["status"])
+    events = read("events", lambda: hub("list-test-run-events", "events"), [])
+    problem = fault_problem(run, experiments, events)
+    if problem:
+        seen = INCONCLUSIVE
     return {
         "test": t.name, "service": t.test.service, "template": t.test.template, "testRunId": run_id,
         "expected": t.test.expected, "observed": seen, "matches": matches(t.test.expected, seen),
-        "generatedAt": _iso(now), "testRun": run,
-        "events": read("events", lambda: hub("list-test-run-events", "events"), []),
+        "faultNotRun": problem, "generatedAt": _iso(now), "testRun": run,
+        "events": events,
         "sources": sources, "sourceEvents": source_events,
         "resolvedTargets": read("resolved targets", lambda: hub("list-resolved-test-run-target-resources", "resolvedTargetResources"), []),
         "dependencies": read("blocked dependencies", lambda: hub("list-test-run-dependencies", "dependencies"), []),
@@ -193,8 +217,9 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
     started = parse_time(run["startedAt"])
     minutes = f"{(parse_time(run['endedAt']) - started).total_seconds() / 60:.1f} min" if run.get("endedAt") else "not ended"
     verdict = ("as expected" if data["matches"] else "NOT as expected")
+    problem = data.get("faultNotRun")
     lines = [
-        f"# {data['test']}: {run['status']}",
+        f"# {data['test']}: " + ("INCONCLUSIVE, the fault did not run" if problem else run["status"]),
         "",
         f"Expected {data['expected']}, observed {data['observed']}: {verdict}.",
         "",
@@ -204,9 +229,16 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
         f"- Role {run.get('roleName', '-')}, stop conditions: "
         + (", ".join(c["value"].rsplit(":", 1)[-1] for c in run.get("stopConditions", []) if c["source"] != "none") or "none"),
     ]
-    if run.get("errorMessage"):
+    if problem:
+        lines += ["", f"Resilience Hub ended the run {run['status']}, but the fault never ran, so nothing was done to the application and "
+                      f"this says nothing about it: {problem}"]
+        if "SSM managed instance" in problem:
+            lines += ["", "FIS finds an ECS task through the SSM managed instance its amazon-ssm-agent sidecar registers. Look at the "
+                          "sidecar of each task of the service (it should be RUNNING; its log shows why it stopped) and at "
+                          "`aws ssm describe-instance-information` in the Region."]
+    if run.get("errorMessage") and run["errorMessage"] != problem:
         lines += ["", f"The run reported an error: {run['errorMessage']}"]
-    if run["status"] in ("ERROR", "FAILED") and not run.get("errorMessage"):
+    if run["status"] in ("ERROR", "FAILED") and not run.get("errorMessage") and not problem:
         who = f" by role {invoker_role}" if invoker_role else " by the invoker role"
         lines += ["", f"No error message came with the run. Calls denied{who} carry none, so look for AccessDenied events in CloudTrail "
                       "around the start time."]

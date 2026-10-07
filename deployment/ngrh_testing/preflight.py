@@ -4,9 +4,9 @@
 ``run_checks`` returns a ``Result``: the ``Refusal``s (empty when the run may go ahead) and notes about
 checks that had nothing to look at. Each refusal carries the number of the check in design 5.9 it
 belongs to. ``live`` does all of them; ``static`` leaves out the checks about what is happening right
-now (alarm states, active runs, FIS experiments, plan executions), which is what CI wants right after
-a deploy. A check that cannot run because an AWS call failed is a refusal too: a preflight that cannot
-see is not a pass.
+now (alarm states, active runs, FIS experiments, plan executions, and whether the service's running
+tasks are registered with SSM), which is what CI wants right after a deploy. A check that cannot run
+because an AWS call failed is a refusal too: a preflight that cannot see is not a pass.
 
 The sentinel (check 1) is the credential lookup every command starts with. Check 8, which only the
 recovery test needs (triggers present, 60 minutes since the last execution, capacity headroom), arrives
@@ -28,6 +28,7 @@ MODES = (LIVE, STATIC)
 
 TESTING_POLICY = "AWSResilienceHubResilienceTestingPolicy"
 SIDECAR = "amazon-ssm-agent"  # the FIS SSM agent sidecar container in every task definition (ecs.yaml)
+SSM_TASK_TAG = "ECS_TASK_ARN"  # the tag the sidecar puts on the managed instance it registers, which FIS finds a task by
 
 ACTIVE_FIS = ("pending", "initiating", "running", "stopping")
 # ARC Region Switch execution states (ListPlanExecutions): a plan still working, and one that is done.
@@ -231,13 +232,17 @@ def check_plan_executions(aws: AwsCli, env: Environment, notes: List[str]) -> Li
 
 # --- 9: the service under test -------------------------------------------------------------------
 
+def _ecs_cluster(aws: AwsCli, env: Environment, region: str) -> str:
+    return aws.call("cloudformation", "describe-stack-resource", region, stack_name=f"apps{env.env}",
+                    logical_resource_id="EcsCluster")["StackResourceDetail"]["PhysicalResourceId"]
+
+
 def check_service_configuration(aws: AwsCli, env: Environment, t: ResolvedTest) -> List[Refusal]:
     """The faulted Region's ECS service must be able to take the fault: its current task definition has
     the FIS sidecar, PidMode task and EnableFaultInjection, the service runs on on-demand Fargate only
     (a reclaimed Spot task fails a run), and ECS Exec is off."""
     region = t.fault_region
-    cluster = aws.call("cloudformation", "describe-stack-resource", region, stack_name=f"apps{env.env}",
-                       logical_resource_id="EcsCluster")["StackResourceDetail"]["PhysicalResourceId"]
+    cluster = _ecs_cluster(aws, env, region)
     name = spec.ECS_SERVICE_NAMES[t.test.service] + env.env
     services = aws.call("ecs", "describe-services", region, cluster=cluster, services=[name]).get("services", [])
     if not services or services[0].get("status") == "INACTIVE":
@@ -261,6 +266,48 @@ def check_service_configuration(aws: AwsCli, env: Environment, t: ResolvedTest) 
     return [Refusal(9, p, t.name) for p in problems]
 
 
+def check_tasks_registered(aws: AwsCli, env: Environment, t: ResolvedTest) -> List[Refusal]:
+    """FIS reaches an ECS task through the SSM managed instance its sidecar registers, tagged with the
+    task's ARN. A task definition that has the sidecar (the check above) is not enough: on 2026-10-06 the
+    repave replaced the sidecar's image with the bare SSM agent, which exits at once for want of ``aws`` and
+    ``ps``, and from then on no new task registered. This check passed, the run started, and FIS refused the
+    fault with "At least one ECS Task is not registered as a SSM managed instance", having done nothing.
+    Every running task of the service must have its sidecar running and an Online instance behind it.
+    Only a live preflight can ask: tasks come and go."""
+    region = t.fault_region
+    name = spec.ECS_SERVICE_NAMES[t.test.service] + env.env
+    where = f"{name} in {region}"
+    cluster = _ecs_cluster(aws, env, region)
+    arns = aws.call("ecs", "list-tasks", region, cluster=cluster, service_name=name, desired_status="RUNNING").get("taskArns", [])
+    tasks = [x for x in (aws.call("ecs", "describe-tasks", region, cluster=cluster, tasks=arns).get("tasks", []) if arns else [])
+             if x.get("lastStatus") == "RUNNING"]
+    if not tasks:
+        return [Refusal(9, f"{where} has no running task, so the fault would have nothing to reach", t.name)]
+    unregistered = []
+    for task in sorted(tasks, key=lambda x: x["taskArn"]):
+        found = aws.call("ssm", "describe-instance-information", region,
+                         filters=[{"Key": f"tag:{SSM_TASK_TAG}", "Values": [task["taskArn"]]}]).get("InstanceInformationList", [])
+        if any(i.get("PingStatus") == "Online" for i in found):
+            continue
+        sidecar = next((c for c in task.get("containers", []) if c.get("name") == SIDECAR), None)
+        if sidecar is None:
+            why = "its task definition has no sidecar container"
+        elif sidecar.get("lastStatus") != "RUNNING":
+            why = f"its sidecar is {sidecar.get('lastStatus')}" + (f" (exit code {sidecar['exitCode']})" if "exitCode" in sidecar else "")
+        elif found:
+            why = f"its SSM instance is {found[0].get('PingStatus')}"
+        else:
+            why = "its sidecar is running but nothing is registered with SSM for it"
+        unregistered.append(f"task {task['taskArn'].rsplit('/', 1)[-1][:8]}: {why}")
+    if not unregistered:
+        return []
+    return [Refusal(9, f"{len(unregistered)} of {len(tasks)} running tasks of {where} are not registered with SSM, so FIS cannot target them "
+                       f"and the fault would be refused without being injected ({'; '.join(unregistered)}). The sidecar's log, in the "
+                       f"service's log group under ecs/{SIDECAR}/<task id>, says why. If it ends with \"aws: command not found\", the "
+                       f"image {SIDECAR}{env.env}:latest in ECR is the bare SSM agent: rebuild it (make mirror-sidecar-images, or the "
+                       f"weekly repave) and replace the service's tasks", t.name)]
+
+
 # --- all of them -----------------------------------------------------------------------------------
 
 def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: str = LIVE) -> Result:
@@ -282,6 +329,8 @@ def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: 
         for t in resolved:
             refusals.extend(_seeing(9, "the service's configuration", lambda t=t: check_service_configuration(aws, env, t), t.name))
     if mode == LIVE:
+        for t in resolved:
+            refusals.extend(_seeing(9, "whether the service's tasks are registered with SSM", lambda t=t: check_tasks_registered(aws, env, t), t.name))
         refusals.extend(_seeing(5, "the active test runs", lambda: check_no_active_runs(aws, env)))
         refusals.extend(_seeing(6, "the FIS experiments", lambda: check_no_fis_experiments(aws, env)))
         refusals.extend(_seeing(7, "the plan executions", lambda: check_plan_executions(aws, env, result.notes)))

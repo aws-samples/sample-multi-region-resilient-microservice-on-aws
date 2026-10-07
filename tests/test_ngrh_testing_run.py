@@ -533,3 +533,140 @@ class TestVerdicts:
         assert report.parse_time("2026-10-06T12:00:00-04:00") == datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)
         assert report.parse_time("2026-10-06T16:00:00") == datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)
         assert report.parse_time(1791302400) == datetime(2026, 10, 6, 16, 0, tzinfo=timezone.utc)
+
+
+# --- a fault that never ran ------------------------------------------------------------------------------
+#
+# 2026-10-07, run f3ecf7f7 of this test in test2: the report said "FAILED. Expected FAIL, observed FAIL: as
+# expected." although FIS had refused the ECS packet-loss action (no task of orders was registered with SSM) and
+# nothing was blocked. Resilience Hub ends a run FAILED in that case too. These are the shapes that run returned.
+
+SSM_FIS_REASON = ("At least one ECS Task is not registered as a SSM managed instance. SSM Agent must be running as a "
+                  "sidecar in the task, and the task must be registered within Systems Manager as a managed instance.")
+SSM_RUN_ERROR = "The targeted resources could not be used for the aws:ecs:task-network-packet-loss action. " + SSM_FIS_REASON
+ACTION = "aws:ecs:task-network-packet-loss"
+
+
+def action_event(kind, status, count="0", at="2026-10-06T16:00:30+00:00"):
+    return {"eventId": f"{kind}-{status}", "eventType": kind, "message": f"The {ACTION} action status is '{status}'.", "timestamp": at,
+            "attributes": {"actionId": "block-ecs-dependency-traffic", "actionName": ACTION, "status": status, "targetCount": count}}
+
+
+def fault_refused(fake, run_error=SSM_RUN_ERROR, experiment=True, event=True):
+    """The fault could not be injected: FIS ended the experiment `failed` with InvalidTarget, the action failed with no
+    target, and Resilience Hub ended the run with an error message. Each mark can be left out."""
+    if experiment:
+        fake.fis[PRIMARY][0]["state"] = {"status": "failed", "reason": SSM_FIS_REASON,
+                                         "error": {"code": "InvalidTarget", "location": "actions.block-ecs-dependency-traffic"}}
+    fake.run_events = [action_event("action_scheduled", "scheduled")]
+    if event:
+        fake.run_events.append(action_event("action_failed", "failed", at="2026-10-06T16:00:57+00:00"))
+    fake.run_events.append({"eventId": "end", "eventType": "test_run_ended", "message": "Test run completed with result: failure",
+                            "timestamp": "2026-10-06T16:01:00+00:00", "attributes": {"result": "failure", "status": "failed"}})
+    fake.run_error = run_error
+    return fake
+
+
+class TestAFaultThatNeverRan:
+
+    @pytest.mark.parametrize("status", ["FAILED", "PASSED"])
+    def test_a_run_whose_fault_was_refused_is_not_a_verdict_whatever_status_it_ended_in(self, status):
+        data = collected(fault_refused(ready_to_run()), status)
+        assert data["observed"] == "INCONCLUSIVE" and data["matches"] is False
+        assert data["faultNotRun"] == SSM_RUN_ERROR
+
+    def test_the_explanation_is_the_runs_own_message_then_fis_s_then_the_events(self):
+        assert collected(fault_refused(ready_to_run()))["faultNotRun"] == SSM_RUN_ERROR
+        assert collected(fault_refused(ready_to_run(), run_error=None))["faultNotRun"] == SSM_FIS_REASON
+        only_the_event = fault_refused(ready_to_run(), run_error=None, experiment=False)
+        assert collected(only_the_event)["faultNotRun"] == f"The {ACTION} action status is 'failed'."
+
+    @pytest.mark.parametrize("marks", [{"experiment": True, "event": False}, {"experiment": False, "event": True}])
+    def test_either_mark_alone_is_enough(self, marks):
+        data = collected(fault_refused(ready_to_run(), run_error=None, **marks))
+        assert data["observed"] == "INCONCLUSIVE" and data["faultNotRun"]
+
+    def test_an_experiment_with_no_reason_still_counts(self):
+        fake = fault_refused(ready_to_run(), run_error=None, event=False)
+        fake.fis[PRIMARY][0]["state"] = {"status": "failed"}
+        assert collected(fake)["faultNotRun"] == "FIS reported the experiment failed without saying why"
+
+    def test_event_types_are_matched_in_any_case(self):
+        fake = ready_to_run()
+        fake.run_events = [action_event("ACTION_FAILED", "failed")]
+        assert collected(fake)["observed"] == "INCONCLUSIVE"
+
+    def test_a_fault_that_ran_and_was_stopped_by_the_stop_condition_is_still_a_verdict(self):
+        fake = ready_to_run()
+        fake.fis[PRIMARY][0]["state"] = {"status": "stopped", "reason": "Stop condition triggered"}
+        data = collected(fake)
+        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("FAIL", True, None)
+
+    def test_a_run_the_sample_failed_keeps_its_verdict(self):
+        fake = ready_to_run()
+        fake.run_events = [action_event("action_scheduled", "scheduled", "2"), action_event("action_completed", "completed", "2"),
+                           {"eventId": "end", "eventType": "test_run_ended", "message": "Test run completed with result: failure",
+                            "timestamp": "2026-10-06T16:04:00+00:00", "attributes": {"result": "failure", "status": "failed"}}]
+        data = collected(fake)
+        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("FAIL", True, None)
+
+    @pytest.mark.parametrize("status", ["ERROR", "STOPPED"])
+    def test_a_run_that_did_not_finish_stays_inconclusive_for_its_own_reason(self, status):
+        data = collected(ready_to_run(), status)
+        assert (data["observed"], data["faultNotRun"]) == ("INCONCLUSIVE", None)
+
+    def test_the_markdown_says_the_fault_did_not_run_before_anything_else(self):
+        text = report.render(collected(fault_refused(ready_to_run())), "ngrh-invoker-t")
+        lines = text.splitlines()
+        assert lines[0] == "# orders-broker-dependency: INCONCLUSIVE, the fault did not run"
+        assert lines[2] == "Expected FAIL, observed INCONCLUSIVE: NOT as expected."
+        assert f"Resilience Hub ended the run FAILED, but the fault never ran, so nothing was done to the application and this says nothing about it: {SSM_RUN_ERROR}" in text
+        assert "amazon-ssm-agent sidecar registers" in text and "aws ssm describe-instance-information" in text
+        assert "The run reported an error" not in text and "No error message came" not in text
+        assert f"- EXP111: failed ({SSM_FIS_REASON})" in text
+
+    def test_an_explanation_from_fis_alone_needs_no_hunt_through_cloudtrail(self):
+        text = report.render(collected(fault_refused(ready_to_run(), run_error=None)), "ngrh-invoker-t")
+        assert f"this says nothing about it: {SSM_FIS_REASON}" in text
+        assert "No error message came" not in text and "CloudTrail" not in text
+
+    def test_another_reason_gets_no_sidecar_advice(self):
+        fake = fault_refused(ready_to_run(), run_error="The experiment role cannot be assumed")
+        fake.fis[PRIMARY][0]["state"] = {"status": "failed", "reason": "role"}
+        text = report.render(collected(fake))
+        assert "this says nothing about it: The experiment role cannot be assumed" in text
+        assert "sidecar" not in text
+
+    def test_a_run_error_that_is_not_the_explanation_is_still_shown(self):
+        fake = fault_refused(ready_to_run(), run_error="Insufficient permissions to write the report")
+        fake.run_events = [action_event("action_failed", "failed")]
+        text = report.render(collected(fake))
+        assert "this says nothing about it: Insufficient permissions to write the report" in text
+        assert "The run reported an error" not in text   # it is the explanation, said once
+
+    def test_an_ordinary_failed_run_is_headed_by_its_status_as_before(self):
+        text = report.render(collected(ready_to_run()))
+        assert text.splitlines()[0] == "# orders-broker-dependency: FAILED" and "never ran" not in text
+
+    def test_the_run_command_says_so_and_exits_3(self, tmp_path, capsys):
+        fake = fault_refused(ready_to_run())
+        code, _ = run_cli(fake, tmp_path)
+        out = capsys.readouterr().out
+        assert code == cli.EXIT_FOUND
+        assert "orders-broker-dependency: FAILED. Expected FAIL, observed INCONCLUSIVE: NOT as expected." in out
+        assert f"The fault did not run, so this is not a verdict on the application: {SSM_RUN_ERROR}" in out
+        data = json.loads(next(tmp_path.glob("*.json")).read_text())
+        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("INCONCLUSIVE", False, SSM_RUN_ERROR)
+
+    def test_the_run_command_says_nothing_extra_when_the_fault_ran(self, tmp_path, capsys):
+        run_cli(ready_to_run(), tmp_path)
+        assert "did not run" not in capsys.readouterr().out
+
+    def test_the_report_command_applies_the_same_rule_to_a_run_collected_later(self, tmp_path, capsys):
+        fake = fault_refused(ready_to_run())
+        (test_id,) = fake.tests
+        fake.add_run("orders", test_id, "FAILED")
+        assert report_cli(fake, tmp_path) == 0
+        data = json.loads(next(tmp_path.glob("*.json")).read_text())
+        assert data["observed"] == "INCONCLUSIVE" and data["faultNotRun"] == SSM_RUN_ERROR
+        assert next(tmp_path.glob("*.md")).read_text().startswith("# orders-broker-dependency: INCONCLUSIVE, the fault did not run")

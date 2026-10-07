@@ -147,6 +147,8 @@ def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep:
     json_path, md_path = report.write(data, args.reports_dir, env.invoker_role_name)
     _say(f"{t.name}: {outcome.status}. Expected {data['expected']}, observed {data['observed']}: "
          + ("as expected." if data["matches"] else "NOT as expected."))
+    if data["faultNotRun"]:
+        _say(f"The fault did not run, so this is not a verdict on the application: {data['faultNotRun']}")
     _say(f"Report: {md_path}\nData: {json_path}")
     if outcome.timed_out:
         sys.stderr.write(f"ngrh_testing run: gave up waiting after {int(outcome.waited_seconds // 60)} min; the run is still "

@@ -102,6 +102,8 @@ class FakeAws:
         self.fis: Dict[str, List[Dict[str, Any]]] = {PRIMARY: [], STANDBY: []}  # Region -> experiment summaries
         self.plan_executions: Dict[str, List[Dict[str, Any]]] = {PRIMARY: [], STANDBY: []}  # Region endpoint -> executions
         self.ecs_services: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (region, service name) -> service
+        self.ecs_tasks: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, service name) -> running tasks
+        self.ssm_instances: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, task ARN) -> instances tagged with it
         self.task_definitions: Dict[str, Dict[str, Any]] = {}
         self._next = 0
         self._handlers: Dict[Tuple[str, str], Callable[..., Dict[str, Any]]] = {
@@ -118,6 +120,9 @@ class FakeAws:
             ("fis", "get-experiment"): self._get_experiment,
             ("arc-region-switch", "list-plan-executions"): self._list_plan_executions,
             ("ecs", "describe-services"): self._describe_services,
+            ("ecs", "list-tasks"): self._list_tasks,
+            ("ecs", "describe-tasks"): self._describe_tasks,
+            ("ssm", "describe-instance-information"): self._describe_instance_information,
             ("ecs", "describe-task-definition"): self._describe_task_definition,
             ("resiliencehubv2", "list-test-templates"): self._list_test_templates,
             ("resiliencehubv2", "list-services"): self._list_services,
@@ -169,8 +174,9 @@ class FakeAws:
 
     def add_ecs_service(self, service: str, region: str = PRIMARY, sidecar: bool = True, pid_mode: Optional[str] = "task",
                         fault_injection: bool = True, providers: Tuple[str, ...] = ("FARGATE",), exec_on: bool = False,
-                        status: str = "ACTIVE") -> None:
-        """An ECS service running a task definition that is (or is not) ready for the fault."""
+                        status: str = "ACTIVE", tasks: int = 2) -> None:
+        """An ECS service running a task definition that is (or is not) ready for the fault, with ``tasks``
+        running tasks, each registered with SSM when the task definition has the sidecar."""
         name = ("carts" if service == "cart" else service) + self.env
         arn = task_definition_arn(name, region)
         containers = [{"name": service}] + ([{"name": "amazon-ssm-agent"}] if sidecar else [])
@@ -180,6 +186,29 @@ class FakeAws:
         self.ecs_services[(region, name)] = {"serviceName": name, "status": status, "taskDefinition": arn,
                                              "capacityProviderStrategy": [{"capacityProvider": p, "weight": 1} for p in providers],
                                              "enableExecuteCommand": exec_on}
+        for old in self.ecs_tasks.get((region, name), []):   # replacing a service replaces its tasks and what they registered
+            self.ssm_instances.pop((region, old["taskArn"]), None)
+        self.ecs_tasks[(region, name)] = []
+        for number in range(tasks):
+            self.add_task(service, region, sidecar_running=sidecar, registered=sidecar, number=number)
+
+    def add_task(self, service: str, region: str = PRIMARY, sidecar_running: bool = True, registered: bool = True,
+                 number: int = 0, ping: str = "Online", last_status: str = "RUNNING") -> str:
+        """A task of an ECS service. By default its sidecar is running and an Online SSM managed instance is
+        registered for it, tagged with the task's ARN as the real sidecar tags it. Returns the task ARN."""
+        name = ("carts" if service == "cart" else service) + self.env
+        task_id = f"{name}{number:02d}".ljust(32, "0")[:32]
+        task_arn = f"arn:aws:ecs:{region}:{ACCOUNT}:task/{CLUSTER}/{task_id}"
+        containers = [{"name": service, "lastStatus": "RUNNING"}]
+        if (region, name) in self.ecs_services and any(c["name"] == "amazon-ssm-agent"
+                                                       for c in self.task_definitions[self.ecs_services[(region, name)]["taskDefinition"]]["containerDefinitions"]):
+            containers.append({"name": "amazon-ssm-agent", "lastStatus": "RUNNING" if sidecar_running else "STOPPED",
+                               **({} if sidecar_running else {"exitCode": 127})})
+        self.ecs_tasks.setdefault((region, name), []).append({"taskArn": task_arn, "lastStatus": last_status, "containers": containers})
+        self.ssm_instances.pop((region, task_arn), None)
+        if registered:
+            self.ssm_instances.setdefault((region, task_arn), []).append({"InstanceId": f"mi-{task_id[:17]}", "PingStatus": ping})
+        return task_arn
 
     def fail_on(self, service: str, operation: str, message: str, times: int = 1) -> None:
         self._errors.setdefault((service, operation), []).extend([message] * times)
@@ -298,6 +327,19 @@ class FakeAws:
 
     def _describe_task_definition(self, region: Optional[str], task_definition: str) -> Dict[str, Any]:
         return {"taskDefinition": self.task_definitions[task_definition]}
+
+    def _list_tasks(self, region: Optional[str], cluster: str, service_name: str, desired_status: str = "RUNNING") -> Dict[str, Any]:
+        assert desired_status == "RUNNING", "the tool asks for running tasks only"
+        return {"taskArns": [t["taskArn"] for t in self.ecs_tasks.get((region, service_name), [])]}
+
+    def _describe_tasks(self, region: Optional[str], cluster: str, tasks: List[str]) -> Dict[str, Any]:
+        known = {t["taskArn"]: t for ts in self.ecs_tasks.values() for t in ts}
+        return {"tasks": [known[a] for a in tasks if a in known], "failures": []}
+
+    def _describe_instance_information(self, region: Optional[str], filters: List[Dict[str, Any]]) -> Dict[str, Any]:
+        (only,) = filters   # the tool asks for one task's instances at a time, by the tag FIS uses
+        assert only["Key"] == "tag:ECS_TASK_ARN", only
+        return {"InstanceInformationList": [i for arn in only["Values"] for i in self.ssm_instances.get((region, arn), [])]}
 
     def _list_test_templates(self, region: Optional[str]) -> Dict[str, Any]:
         return {"testTemplates": [{"testTemplateArn": a, "name": a.rsplit("/", 1)[-1], "description": "d"} for a in sorted(self.templates)]}

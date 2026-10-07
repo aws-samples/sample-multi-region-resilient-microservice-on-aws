@@ -470,8 +470,9 @@ class TestServiceConfiguration:
     def test_each_thing_the_fault_needs_is_checked_in_both_modes(self, kwargs, message, mode):
         fake = reconciled_fake()
         fake.add_ecs_service("orders", **kwargs)
-        (reason,) = reasons(check(fake, mode), 9)
-        assert message in reason and f"orders{ENV} in {PRIMARY}" in reason
+        # A task definition with no sidecar leaves its tasks unregistered too, which a live preflight says as well.
+        (reason,) = [r for r in reasons(check(fake, mode), 9) if message in r]
+        assert f"orders{ENV} in {PRIMARY}" in reason
 
     def test_a_service_that_is_not_there(self):
         fake = reconciled_fake()
@@ -507,3 +508,95 @@ class TestServiceConfiguration:
         fake.fail_on("ecs", "describe-services", "An error occurred (AccessDeniedException): no")
         (reason,) = reasons(check(fake), 9)
         assert reason.startswith("could not check the service's configuration") and "AccessDeniedException" in reason
+
+
+# --- 9: every running task of the service is registered with SSM -----------------------------------------------------
+#
+# 2026-10-07: orders' task definition had the sidecar, PidMode and fault injection, so check 9 passed, the run started,
+# and FIS refused the fault ("At least one ECS Task is not registered as a SSM managed instance"). Nothing had been
+# registered since the repave of 2026-10-06 replaced the sidecar's image with the bare SSM agent, whose script exits
+# at once with "aws: command not found" (exit code 127).
+
+class TestTasksAreRegisteredWithSsm:
+
+    def tasks(self, fake):
+        return [t["taskArn"] for t in fake.ecs_tasks[(PRIMARY, f"orders{ENV}")]]
+
+    def test_a_service_whose_tasks_are_all_registered_passes(self):
+        fake = reconciled_fake()
+        assert len(self.tasks(fake)) == 2 and check(fake).passed
+
+    def test_tasks_are_found_by_the_tag_fis_uses_one_task_at_a_time(self):
+        fake = reconciled_fake()
+        check(fake)
+        asked = [c[3]["filters"] for c in fake.calls if c[1] == "describe-instance-information"]
+        assert asked == [[{"Key": "tag:ECS_TASK_ARN", "Values": [arn]}] for arn in sorted(self.tasks(fake))]
+        (listing,) = fake.calls_of("list-tasks")
+        assert listing["service_name"] == f"orders{ENV}" and listing["desired_status"] == "RUNNING" and listing["cluster"] == CLUSTER
+
+    def test_a_sidecar_that_stopped_is_named_with_its_exit_code(self):
+        fake = reconciled_fake()
+        fake.add_ecs_service("orders", tasks=0)
+        for number in range(2):
+            fake.add_task("orders", sidecar_running=False, registered=False, number=number)
+        (reason,) = [r for r in reasons(check(fake), 9) if "registered with SSM" in r]
+        assert reason.startswith(f"2 of 2 running tasks of orders{ENV} in {PRIMARY} are not registered with SSM, so FIS cannot target them")
+        assert reason.count("its sidecar is STOPPED (exit code 127)") == 2
+        assert "(make mirror-sidecar-images, or the weekly repave)" in reason and f"amazon-ssm-agent{ENV}:latest" in reason
+        assert "aws: command not found" in reason
+
+    def test_one_task_in_two_is_enough_to_refuse(self):
+        fake = reconciled_fake()
+        fake.add_task("orders", registered=False, number=9, last_status="PROVISIONING")   # listed, not running: not counted
+        stranded = self.tasks(fake)[0]
+        del fake.ssm_instances[(PRIMARY, stranded)]
+        (reason,) = [r for r in reasons(check(fake), 9) if "registered with SSM" in r]
+        assert reason.startswith(f"1 of 2 running tasks of orders{ENV} in {PRIMARY}")
+        assert f"task {stranded.rsplit('/', 1)[-1][:8]}: its sidecar is running but nothing is registered with SSM for it" in reason
+
+    def test_an_instance_that_lost_its_connection_is_not_a_target(self):
+        fake = reconciled_fake()
+        stranded = self.tasks(fake)[1]
+        fake.ssm_instances[(PRIMARY, stranded)][0]["PingStatus"] = "ConnectionLost"
+        (reason,) = [r for r in reasons(check(fake), 9) if "registered with SSM" in r]
+        assert "its SSM instance is ConnectionLost" in reason
+
+    def test_a_task_of_an_older_task_definition_without_a_sidecar_is_named(self):
+        fake = reconciled_fake()
+        fake.add_task("orders", registered=False, number=7)
+        stranded = fake.ecs_tasks[(PRIMARY, f"orders{ENV}")][-1]
+        stranded["containers"] = [c for c in stranded["containers"] if c["name"] != "amazon-ssm-agent"]
+        (reason,) = [r for r in reasons(check(fake), 9) if "registered with SSM" in r]
+        assert reason.startswith(f"1 of 3 running tasks") and "its task definition has no sidecar container" in reason
+
+    def test_a_task_that_is_not_running_yet_is_not_counted(self):
+        fake = reconciled_fake()
+        fake.add_task("orders", registered=False, number=9, last_status="PROVISIONING")
+        assert check(fake).passed
+
+    def test_a_service_with_no_running_task_is_refused(self):
+        fake = reconciled_fake()
+        fake.ecs_tasks[(PRIMARY, f"orders{ENV}")] = []
+        assert f"orders{ENV} in {PRIMARY} has no running task, so the fault would have nothing to reach" in reasons(check(fake), 9)
+        assert fake.calls_of("describe-tasks") == []
+
+    def test_a_static_preflight_does_not_ask_about_tasks(self):
+        fake = reconciled_fake()
+        for arn in self.tasks(fake):
+            del fake.ssm_instances[(PRIMARY, arn)]
+        result = check(fake, STATIC)
+        assert result.passed
+        assert not [c for c in fake.calls if c[0] in ("ssm",) or c[1] in ("list-tasks", "describe-tasks")]
+
+    @pytest.mark.parametrize("service,operation", [("ecs", "list-tasks"), ("ecs", "describe-tasks"), ("ssm", "describe-instance-information")])
+    def test_a_call_that_fails_is_a_refusal_not_a_pass(self, service, operation):
+        fake = reconciled_fake()
+        fake.fail_on(service, operation, "An error occurred (AccessDeniedException): no")
+        (reason,) = [r for r in reasons(check(fake), 9) if "AccessDeniedException" in r]
+        assert reason.startswith("could not check whether the service's tasks are registered with SSM")
+
+    def test_the_refusal_names_the_test_and_the_command_prints_it(self, capsys):
+        fake = reconciled_fake()
+        del fake.ssm_instances[(PRIMARY, self.tasks(fake)[0])]
+        assert cli.main(["preflight", *ARGS, "--test", "orders-broker-dependency"], aws=fake) == cli.EXIT_REFUSED
+        assert "[9] orders-broker-dependency: 1 of 2 running tasks of orders" in capsys.readouterr().out

@@ -15,6 +15,12 @@ How to read a result:
 
 A run that ends `ERROR` or `STOPPED` is neither: the test did not finish, and the report says why.
 
+A run that ends `FAILED` or `PASSED` can also be **INCONCLUSIVE**: when FIS could not inject the fault (an
+experiment that ended `failed`, or an `action_failed` event), nothing was done to the sample, so what the run
+says about it is nothing. Resilience Hub still ends such a run `FAILED`. The report heads it "INCONCLUSIVE, the
+fault did not run", gives the reason, and `make ngrh-test` exits 3 as for any verdict that isn't the expected
+one.
+
 ## orders-broker-dependency
 
 **Test:** the orders service, dependency validation. For 15 minutes FIS drops orders' traffic to its Amazon MQ
@@ -51,4 +57,16 @@ PASS. Step 9 changes the spec and this page in one commit.
 
 ## Runs
 
-No run has been recorded yet.
+No run has reached a verdict yet. Three attempts, on the first deployment this ran on:
+
+- **2026-10-06 and 2026-10-07, `orders-broker-dependency`: refused twice before it started.** `StartTestRun`
+  answered "alarms not discovered for this service". A source alarm, `hop-checkout-errors`, is tagged checkout,
+  and Resilience Hub discovers only the alarms tagged for the service. A fresh assessment of orders did not
+  change that (tried 2026-10-07). The alarm moved to the evidence alarms, and preflight now checks the tags.
+- **2026-10-07, `orders-broker-dependency`: the run started and ended `FAILED` after 33 seconds with no fault
+  injected.** FIS refused the ECS packet-loss action: "At least one ECS Task is not registered as a SSM managed
+  instance". The weekly repave had replaced the sidecar's image with the bare SSM agent, so the sidecar of every
+  task started afterwards exited at once (`aws: command not found`) and nothing registered. The first version
+  of the report called this the expected FAIL. It is INCONCLUSIVE now, preflight refuses a run whose service has
+  a running task that is not registered with SSM, and the repave rebuilds the sidecar image and checks its tools
+  before it replaces the one the tasks pull.
