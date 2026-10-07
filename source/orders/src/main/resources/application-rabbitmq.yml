@@ -1,2 +1,7 @@
 spring.autoconfigure.exclude:
   - org.springframework.boot.autoconfigure.jms.activemq.ActiveMQAutoConfiguration
+
+# How long a publish thread waits to open a connection to a broker it can't reach. The client
+# library's default is 60 seconds. OrdersEventHandler publishes off the request path, so this
+# bounds how long one of its threads is held, not how long an order takes.
+spring.rabbitmq.connection-timeout: 2s
