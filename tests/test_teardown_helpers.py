@@ -64,12 +64,26 @@ A seventh, found counting what the passing run 37485943263 left in the e2e accou
    step of their own that a failed run skips, so its logs survive for the
    post-mortem.
 
+An eighth, found counting what the passing run 37533695833 left in the e2e account
+(2026-10-07):
+
+8. The log group step found 15 and 13 of a run's 23 and 21 groups. Two kinds of
+   name don't carry the commit sha as a whole token. Synthetics builds a canary's
+   Lambda function as cwsyn-<canary name cut to 21 characters>-<uuid>, which cuts
+   the sha out of five of the twelve names (cwsyn-lcl-rgnl-catalog-3988-<uuid> for
+   the run -398824f). And a RabbitMQ broker's three groups are named by the
+   broker's id, under /aws/amazonmq/broker/, with the broker already deleted by the
+   time the step runs. The helper now lists each canary's exact cut name, and takes
+   the broker ids from a file that the step "Record the message brokers of this
+   run" writes before the Teardown.
+
 The stub `aws` below is a tiny state machine over a JSON file: RDS global
 cluster membership with asynchronous removal, CloudFormation stacks with
 asynchronous deletion and an optional first-attempt failure, S3 buckets
 whose objects can "land" between an empty and CloudFormation's DeleteBucket,
-Cloud Map namespaces with a per-region AccessDenied switch, and CloudWatch log
-groups answering the service's substring name pattern a page per line.
+Cloud Map namespaces with a per-region AccessDenied switch, CloudWatch log
+groups answering the service's substring pattern and prefix filters (never
+both at once) a page per line, and Amazon MQ brokers listed by name.
 Every invocation is appended to a log so the tests can assert ORDER, not just
 end state.
 
@@ -301,10 +315,18 @@ if svc == "logs":
     if region in state.get("logs_denied", []):
         fail("(AccessDeniedException) when calling the %s operation: User: arn:aws:sts::111111111111:assumed-role/github-actions-microservice-e2e/e2e is not authorized to perform: logs:%s" % (action, action))
     if op == "describe-log-groups":
-        # --log-group-name-pattern is a case-sensitive substring match done by the
-        # service. The text output has one page per line, names tab-separated.
-        pattern = opt("--log-group-name-pattern")
-        hits = [g for g in groups + state.get("ghosts", []) if pattern is None or pattern in g]
+        # --log-group-name-pattern is a case-sensitive substring match and
+        # --log-group-name-prefix a case-sensitive prefix match, both done by the
+        # service, and the two can't be combined. The text output has one page per
+        # line, names tab-separated.
+        pattern, prefix = opt("--log-group-name-pattern"), opt("--log-group-name-prefix")
+        if pattern is not None and prefix is not None:
+            fail("(InvalidParameterException) when calling the DescribeLogGroups operation: LogGroup name prefix and LogGroup name pattern are mutually exclusive parameters.")
+        for bad in state.get("describe_fails_for_prefix", []):
+            if prefix is not None and prefix.startswith(bad):
+                fail("(ThrottlingException) when calling the DescribeLogGroups operation: Rate exceeded", 255)
+        hits = [g for g in groups + state.get("ghosts", [])
+                if (pattern is None or pattern in g) and (prefix is None or g.startswith(prefix))]
         page = state.get("page_size", 3)
         for i in range(0, len(hits), page):
             print("\t".join(hits[i:i + page]))
@@ -319,6 +341,22 @@ if svc == "logs":
             fail("(ResourceNotFoundException) when calling the DeleteLogGroup operation: The specified log group does not exist.")
         groups.remove(name)
         save()
+        sys.exit(0)
+
+if svc == "mq":
+    region = opt("--region")
+    action = "".join(p.title() for p in op.split("-"))
+    if region in state.get("mq_denied", []):
+        fail("(ForbiddenException) when calling the %s operation: User: arn:aws:sts::111111111111:assumed-role/github-actions-microservice-e2e/e2e is not authorized to perform: mq:%s" % (action, action))
+    if op == "list-brokers":
+        # Only the name filter of the query is modelled: BrokerName=='<name>'. The text
+        # output is the ids, tab-separated, and "None" when the CLI finds nothing.
+        m = re.search(r"BrokerName=='([^']+)'", opt("--query") or "")
+        hits = [b["id"] for b in state.setdefault("brokers", {}).get(region, []) if m is None or b["name"] == m.group(1)]
+        if hits or not state.get("empty_as_none"):
+            print("\t".join(hits))
+        else:
+            print("None")
         sys.exit(0)
 
 # ecr delete-repository, secretsmanager delete-secret, anything else: accepted, no output.
@@ -344,9 +382,11 @@ def stub_env(tmp_path):
     state = tmp_path / "state.json"
     log = tmp_path / "calls.log"
     log.write_text("")
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
     env = dict(os.environ)
     env.update(PATH=f"{bindir}:{env['PATH']}", STUB_STATE=str(state), STUB_LOG=str(log),
-               POLL_ATTEMPTS="20", POLL_SLEEP="0")
+               POLL_ATTEMPTS="20", POLL_SLEEP="0", RUNNER_TEMP=str(runner_temp))
     return env, state, log
 
 
@@ -913,14 +953,67 @@ LOOKALIKES = [
     "/custom/thing-abc1234",
 ]
 
+CANARIES_TEMPLATE = DEPLOYMENT / "canaries.yaml"
+# Lambda allows 64 characters in a function name. Synthetics builds a canary's as
+# cwsyn-<canary name cut to 21 characters>-<uuid>, so 64 - 6 - 1 - 36 = 21 characters of
+# "<scope>-<page>${Env}" survive, and for a long name that is part of the commit sha.
+CANARY_NAME_KEPT = 21
+CANARY_UUIDS = ["%08x-0000-4000-8000-%012x" % (n, n) for n in range(1, 40)]
 
-def _log_group_state(groups, **extra):
-    return json.dumps({"log_groups": {PRIMARY: list(groups), STANDBY: list(groups)}, **extra})
+
+def _canary_names():
+    """The canary names canaries.yaml declares, without their Env suffix."""
+    names = []
+    for res in _load_template(CANARIES_TEMPLATE)["Resources"].values():
+        if res["Type"] != "AWS::Synthetics::Canary":
+            continue
+        name = res["Properties"]["Name"]
+        assert name.endswith("${Env}"), f"{name}: canary names carry the Env suffix"
+        names.append(name[: -len("${Env}")])
+    assert names, "canaries.yaml declares no canaries?"
+    return names
 
 
-def _run_delete_log_groups(env, suffix=ENV_SUFFIX, region=PRIMARY):
-    return subprocess.run([str(DELETE_LOG_GROUPS), suffix, region], env=env,
-                          capture_output=True, text=True, timeout=60)
+def _canary_group(base, suffix=ENV_SUFFIX, n=1):
+    """The log group of a canary's function, as Synthetics names it."""
+    return "/aws/lambda/cwsyn-%s-%s" % ((base + suffix)[:CANARY_NAME_KEPT], CANARY_UUIDS[n])
+
+
+# The five of the twelve names Synthetics cut for the run -398824f, as the e2e account listed them
+# after run 37533695833 (the uuids here are made up).
+CUT_CANARY_GROUPS_SEEN = [
+    "/aws/lambda/cwsyn-lcl-rgnl-catalog-3988-" + CANARY_UUIDS[1],
+    "/aws/lambda/cwsyn-lcl-rgnl-orders-39882-" + CANARY_UUIDS[2],
+    "/aws/lambda/cwsyn-rmt-rgnl-catalog-3988-" + CANARY_UUIDS[3],
+    "/aws/lambda/cwsyn-rmt-rgnl-orders-39882-" + CANARY_UUIDS[4],
+    "/aws/lambda/cwsyn-global-catalog-398824-" + CANARY_UUIDS[5],
+]
+
+# Amazon MQ names a RabbitMQ broker's three log groups by the broker's id.
+BROKER_RUN = "b-3d43b3fe-0000-4000-8000-000000000001"
+BROKER_RUN_STANDBY = "b-3d43b3fe-0000-4000-8000-000000000002"
+BROKER_OTHER = "b-9c1d4a77-0000-4000-8000-000000000003"
+BROKER_LOGS = ("general", "federation", "connection")
+
+
+def _broker_groups(broker_id):
+    return ["/aws/amazonmq/broker/%s/%s" % (broker_id, log) for log in BROKER_LOGS]
+
+
+def _log_group_state(groups, standby=None, **extra):
+    return json.dumps({"log_groups": {PRIMARY: list(groups), STANDBY: list(groups if standby is None else standby)},
+                       **extra})
+
+
+def _run_delete_log_groups(env, suffix=ENV_SUFFIX, region=PRIMARY, broker_file=None):
+    cmd = [str(DELETE_LOG_GROUPS), suffix, region] + ([str(broker_file)] if broker_file is not None else [])
+    return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=60)
+
+
+def _broker_file(tmp_path, text, name="brokers.txt"):
+    path = tmp_path / name
+    path.write_text(text)
+    return path
 
 
 def _log_ops(log: Path):
@@ -946,14 +1039,172 @@ class TestDeleteRunLogGroups:
             assert "left alone, outside the prefixes this helper deletes under: " + name in r.stdout
         assert "def5678" not in r.stdout                   # another run's groups are never even returned
 
-    def test_the_service_filters_by_name_so_the_account_is_never_listed(self, stub_env):
+    def test_the_service_filters_every_listing_so_the_account_is_never_listed(self, stub_env):
         env, state, log = stub_env
         state.write_text(_log_group_state(RUN_LOG_GROUPS))
         _run_delete_log_groups(env)
         describes = [c for c in _calls(log) if c[:2] == ["logs", "describe-log-groups"]]
-        assert len(describes) == 1
-        assert describes[0][describes[0].index("--log-group-name-pattern") + 1] == ENV_SUFFIX
-        assert "--log-group-name-prefix" not in describes[0]
+        patterns = [c for c in describes if "--log-group-name-pattern" in c]
+        prefixes = [c[c.index("--log-group-name-prefix") + 1] for c in describes if "--log-group-name-prefix" in c]
+        # One substring listing for the suffix, then one prefix listing per canary; the service
+        # rejects a request that carries both filters, so no call does.
+        assert len(patterns) == 1 and patterns[0][patterns[0].index("--log-group-name-pattern") + 1] == ENV_SUFFIX
+        assert len(describes) == len(patterns) + len(prefixes)
+        assert "--log-group-name-prefix" not in patterns[0]
+        assert all(p.startswith("/aws/lambda/cwsyn-") and len(p) > len("/aws/lambda/cwsyn-") for p in prefixes)
+
+    def test_each_canary_is_listed_under_the_exact_name_synthetics_gives_its_function(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS))
+        _run_delete_log_groups(env)
+        prefixes = sorted(c[c.index("--log-group-name-prefix") + 1] for c in _calls(log)
+                          if c[:2] == ["logs", "describe-log-groups"] and "--log-group-name-prefix" in c)
+        assert prefixes == sorted("/aws/lambda/cwsyn-%s-" % (name + ENV_SUFFIX)[:CANARY_NAME_KEPT]
+                                  for name in _canary_names())
+        assert any(ENV_SUFFIX not in p for p in prefixes), "no canary name is cut; the premise of this rule is gone"
+
+    def test_a_canary_group_is_deleted_whether_or_not_synthetics_cut_the_suffix_out_of_its_name(self, stub_env):
+        env, state, log = stub_env
+        canary_groups = [_canary_group(name, n=i + 1) for i, name in enumerate(_canary_names())]
+        cut = [g for g in canary_groups if ENV_SUFFIX not in g]
+        assert cut and len(cut) < len(canary_groups)        # a mix, so both paths are exercised
+        state.write_text(_log_group_state(canary_groups + OTHER_LOG_GROUPS))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted %d of %d log groups of -abc1234" % (len(canary_groups), len(canary_groups)) in r.stdout
+        assert _groups_left(state)[PRIMARY] == OTHER_LOG_GROUPS
+
+    def test_the_cut_names_seen_in_the_e2e_account_are_deleted(self, stub_env):
+        # Run 37533695833 (-398824f) left exactly these five of its twelve canary groups behind.
+        env, state, log = stub_env
+        whole = "/aws/lambda/cwsyn-lcl-rgnl-home-398824f-" + CANARY_UUIDS[6]
+        state.write_text(_log_group_state(CUT_CANARY_GROUPS_SEEN + [whole] + OTHER_LOG_GROUPS))
+        r = _run_delete_log_groups(env, suffix="-398824f")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 6 of 6 log groups of -398824f" in r.stdout
+        assert _groups_left(state)[PRIMARY] == OTHER_LOG_GROUPS
+
+    def test_a_canary_group_that_is_not_this_runs_is_left_alone(self, stub_env):
+        env, state, log = stub_env
+        mine = _canary_group("lcl-rgnl-catalog")
+        prefix = mine[: -len(CANARY_UUIDS[1])]
+        others = [
+            _canary_group("lcl-rgnl-catalog", suffix="-abd1234", n=2),    # another run, differing within the kept part
+            prefix + "not-a-uuid",
+            prefix + CANARY_UUIDS[3] + "-extra",
+            prefix + CANARY_UUIDS[9].upper(),                              # the uuid has letters in it, unlike n=3
+        ]
+        state.write_text(_log_group_state([mine] + others))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 1 of 1 log groups of -abc1234" in r.stdout
+        assert _groups_left(state)[PRIMARY] == others
+        for name in others[1:]:
+            assert "left alone, outside the prefixes this helper deletes under: " + name in r.stdout
+
+    def test_a_name_one_rule_refuses_and_another_takes_is_deleted_and_not_reported_as_left_alone(self, stub_env):
+        # The suffix stands as a whole token in it, so the first rule takes it; it has no uuid, so the
+        # canary rule refuses it when it lists the canary's prefix.
+        name = "/aws/lambda/cwsyn-global-home-abc1234-not-a-uuid"
+        env, state, log = stub_env
+        state.write_text(_log_group_state([name]))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 1 of 1 log groups of -abc1234" in r.stdout
+        assert "left alone" not in r.stdout
+        assert _groups_left(state)[PRIMARY] == []
+
+    @pytest.mark.parametrize("content", [
+        "{a}\n{b}\n", "{a} {b}", "\n\n{a}\n  {b}  \n\n", "{a}\n{b}",
+    ])
+    def test_the_message_broker_groups_of_the_recorded_brokers_are_deleted(self, stub_env, tmp_path, content):
+        env, state, log = stub_env
+        recorded = [BROKER_RUN, BROKER_RUN_STANDBY]
+        state.write_text(_log_group_state(
+            RUN_LOG_GROUPS + [g for b in recorded + [BROKER_OTHER] for g in _broker_groups(b)] + OTHER_LOG_GROUPS))
+        brokers = _broker_file(tmp_path, content.format(a=recorded[0], b=recorded[1]))
+        r = _run_delete_log_groups(env, broker_file=brokers)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 13 of 13 log groups of -abc1234" in r.stdout            # 7 by the suffix, 3 per broker
+        assert _groups_left(state)[PRIMARY] == _broker_groups(BROKER_OTHER) + OTHER_LOG_GROUPS
+
+    def test_without_a_broker_file_every_message_broker_group_is_left_alone(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + _broker_groups(BROKER_RUN)))
+        r = _run_delete_log_groups(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 7 of 7" in r.stdout
+        assert _groups_left(state)[PRIMARY] == _broker_groups(BROKER_RUN)
+        assert not any("amazonmq" in " ".join(c) for c in _calls(log))
+
+    def test_an_empty_broker_file_is_a_clean_run_with_a_note(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + _broker_groups(BROKER_OTHER)))
+        r = _run_delete_log_groups(env, broker_file=_broker_file(tmp_path, "\n"))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "no Amazon MQ brokers were recorded for -abc1234" in r.stdout
+        assert _groups_left(state)[PRIMARY] == _broker_groups(BROKER_OTHER)
+
+    @pytest.mark.parametrize("bad", [
+        "*", "None", "b-123", "b-3d43b3fe", BROKER_RUN + "/general", "/" + BROKER_RUN, BROKER_RUN.upper(),
+        "x" + BROKER_RUN, BROKER_RUN + "0", "An error occurred (AccessDenied) when calling the ListBrokers operation",
+    ])
+    def test_a_broker_file_holding_anything_but_broker_ids_is_refused_before_any_call(self, stub_env, tmp_path, bad):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + _broker_groups(BROKER_RUN)))
+        r = _run_delete_log_groups(env, broker_file=_broker_file(tmp_path, BROKER_RUN + "\n" + bad + "\n"))
+        assert r.returncode == 2
+        assert "is not an Amazon MQ broker id" in r.stderr
+        assert _calls(log) == []
+        assert _groups_left(state)[PRIMARY] == RUN_LOG_GROUPS + _broker_groups(BROKER_RUN)
+
+    def test_a_missing_broker_file_is_a_failure_and_the_rest_is_still_deleted(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + _broker_groups(BROKER_RUN)))
+        r = _run_delete_log_groups(env, broker_file=tmp_path / "never-written.txt")
+        assert r.returncode != 0
+        assert "never-written.txt does not exist" in r.stdout and "may be leaking" in r.stdout
+        assert "deleted 7 of 7 log groups" in r.stdout
+        assert _groups_left(state)[PRIMARY] == _broker_groups(BROKER_RUN)
+
+    def test_only_a_recorded_brokers_log_groups_are_taken_under_its_prefix(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        nested = "/aws/amazonmq/broker/%s/nested/log" % BROKER_RUN
+        state.write_text(_log_group_state(_broker_groups(BROKER_RUN) + [nested]))
+        r = _run_delete_log_groups(env, broker_file=_broker_file(tmp_path, BROKER_RUN))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted 3 of 3 log groups" in r.stdout
+        assert "left alone, outside the prefixes this helper deletes under: " + nested in r.stdout
+        assert _groups_left(state)[PRIMARY] == [nested]
+
+    def test_a_listing_that_fails_part_way_stops_listing_but_deletes_what_was_found(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS + _broker_groups(BROKER_RUN),
+                                          describe_fails_for_prefix=["/aws/lambda/cwsyn-lcl-rgnl-orders"]))
+        r = _run_delete_log_groups(env, broker_file=_broker_file(tmp_path, BROKER_RUN))
+        assert r.returncode != 0
+        assert "ThrottlingException" in r.stderr                       # the cause is in the log
+        assert "could not list the log groups of canary lcl-rgnl-orders" in r.stdout and "may be leaking" in r.stdout
+        assert "deleted 7 of 7 log groups" in r.stdout                  # the suffix listing had already found these
+        prefixes = [c[c.index("--log-group-name-prefix") + 1] for c in _calls(log)
+                    if c[:2] == ["logs", "describe-log-groups"] and "--log-group-name-prefix" in c]
+        assert prefixes[-1].startswith("/aws/lambda/cwsyn-lcl-rgnl-orders")     # nothing was listed after it
+        assert _groups_left(state)[PRIMARY] == _broker_groups(BROKER_RUN)
+
+    def test_the_helper_knows_exactly_the_canaries_the_template_declares(self):
+        # A canary added or renamed in canaries.yaml without this list changing would leave its
+        # groups behind again, one run after another.
+        block = re.search(r"CANARY_NAMES=\(([^)]*)\)", DELETE_LOG_GROUPS.read_text())
+        assert block, "delete-run-log-groups.sh no longer lists the canaries"
+        assert sorted(block.group(1).split()) == sorted(_canary_names())
+
+    def test_every_canary_name_keeps_enough_of_the_suffix_to_tell_one_run_from_another(self):
+        # The cut name is "<canary name>-<sha>" cut to 21 characters. Below the dash and three hex
+        # digits, a prefix would also match the groups of a great many other runs.
+        for name in _canary_names():
+            assert CANARY_NAME_KEPT - len(name) >= 4, (
+                f"canary '{name}' is {len(name)} characters, which leaves {CANARY_NAME_KEPT - len(name)} of the "
+                f"suffix in its function name; shorten it or identify its groups another way")
 
     @pytest.mark.parametrize("bad", ["-dev", "abc1234", "-ABC1234", "-abc123", "-abc1234x", "-abc1234/", "-", "-*", ""])
     def test_anything_but_a_commit_sha_suffix_is_refused_before_any_call(self, stub_env, bad):
@@ -1003,7 +1254,7 @@ class TestDeleteRunLogGroups:
         r = _run_delete_log_groups(env)
         assert r.returncode == 0, r.stdout + r.stderr
         assert "no log groups of -abc1234 to delete" in r.stdout
-        assert _log_ops(log) == ["describe-log-groups"]
+        assert set(_log_ops(log)) == {"describe-log-groups"}            # listed, nothing deleted
 
     def test_every_page_of_names_is_read(self, stub_env):
         env, state, log = stub_env
@@ -1036,11 +1287,48 @@ def _log_group_script() -> str:
     return run
 
 
-def _run_log_group_step(env, tmp_path):
+def _broker_list_path(env, region):
+    """Where the record step leaves a Region's broker ids for the log group step."""
+    return Path(env["RUNNER_TEMP"]) / f"mq-brokers-{region}.txt"
+
+
+def _run_log_group_step(env, tmp_path, recorded=(PRIMARY, STANDBY)):
+    """The step as GitHub runs it, after the record step left an (empty) list in each of `recorded`."""
+    for region in recorded:
+        _broker_list_path(env, region).write_text("")
     script = tmp_path / "log-groups.sh"
     script.write_text(_log_group_script())
     return subprocess.run(["bash", "-e", str(script)], cwd=DEPLOYMENT, env=_job_env(env),
                           capture_output=True, text=True, timeout=120)
+
+
+RECORD_STEP = "Record the message brokers of this run"
+
+
+def _record_step():
+    return next(s for s in _e2e_steps() if s.get("name") == RECORD_STEP)
+
+
+def _record_script() -> str:
+    run = _record_step()["run"]
+    assert "${{" not in run, "a GitHub expression in the record step: use the job's environment variables"
+    return run
+
+
+def _run_record_step(env, tmp_path):
+    script = tmp_path / "record.sh"
+    script.write_text(_record_script())
+    return subprocess.run(["bash", "-e", str(script)], env=_job_env(env),
+                          capture_output=True, text=True, timeout=120)
+
+
+def _brokers_state(standby_name="retail-store-ar-ordersmq" + ENV_SUFFIX, **extra):
+    """Each Region has this run's broker; the primary has another run's as well."""
+    return {"brokers": {
+        PRIMARY: [{"name": "retail-store-ar-ordersmq" + ENV_SUFFIX, "id": BROKER_RUN},
+                  {"name": "retail-store-ar-ordersmq-def5678", "id": BROKER_OTHER}],
+        STANDBY: [{"name": standby_name, "id": BROKER_RUN_STANDBY}],
+    }, **extra}
 
 
 class TestLogGroupStep:
@@ -1088,6 +1376,118 @@ class TestLogGroupStep:
         assert "AccessDeniedException" in r.stderr              # the cause is in the log, not swallowed
         left = _groups_left(state)
         assert left[PRIMARY] == RUN_LOG_GROUPS and left[STANDBY] == []
+
+    def test_it_hands_each_region_the_broker_list_the_record_step_wrote_for_it(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(_broker_groups(BROKER_RUN) + _broker_groups(BROKER_OTHER),
+                                          standby=_broker_groups(BROKER_RUN_STANDBY) + _broker_groups(BROKER_OTHER)))
+        _broker_list_path(env, PRIMARY).write_text(BROKER_RUN + "\n")
+        _broker_list_path(env, STANDBY).write_text(BROKER_RUN_STANDBY + "\n")
+        r = _run_log_group_step(env, tmp_path, recorded=())
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "::warning::" not in r.stdout
+        assert _groups_left(state) == {PRIMARY: _broker_groups(BROKER_OTHER), STANDBY: _broker_groups(BROKER_OTHER)}
+
+    def test_a_region_whose_broker_list_was_never_recorded_is_a_warning(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS))
+        r = _run_log_group_step(env, tmp_path, recorded=(STANDBY,))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "::warning::Log groups of this run could not all be deleted in: %s" % PRIMARY in r.stdout
+        assert "mq-brokers-%s.txt does not exist" % PRIMARY in r.stdout
+        assert _groups_left(state) == {PRIMARY: [], STANDBY: []}          # the rest of the run's groups still went
+
+
+class TestBrokerRecordStep:
+    """An Amazon MQ broker's log groups are named by its id, and the broker is gone by the
+    time the log group step runs, so this step writes the ids down before the Teardown."""
+
+    def test_it_runs_right_before_the_teardown_whatever_the_outcome_of_the_run(self):
+        names = [s.get("name") for s in _e2e_steps()]
+        assert names.index(RECORD_STEP) == names.index("Teardown") - 1
+        # A failed run still tears down its brokers, and the ids in the log tell whoever
+        # cleans up its log groups by hand which ones are its.
+        assert _record_step()["if"] == "always()"
+
+    def test_the_rendered_step_parses(self, tmp_path):
+        script = tmp_path / "t.sh"
+        script.write_text(_record_script())
+        r = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+
+    def test_it_records_this_runs_brokers_in_both_regions_and_nobody_elses(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(json.dumps(_brokers_state()))
+        r = _run_record_step(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _broker_list_path(env, PRIMARY).read_text().split() == [BROKER_RUN]
+        assert _broker_list_path(env, STANDBY).read_text().split() == [BROKER_RUN_STANDBY]
+        assert BROKER_RUN in r.stdout and BROKER_RUN_STANDBY in r.stdout and BROKER_OTHER not in r.stdout
+        assert "::warning::" not in r.stdout
+
+    def test_every_broker_of_the_run_is_recorded_one_per_line(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        name = "retail-store-ar-ordersmq" + ENV_SUFFIX
+        state.write_text(json.dumps({"brokers": {PRIMARY: [{"name": name, "id": BROKER_RUN},
+                                                           {"name": name, "id": BROKER_OTHER}], STANDBY: []}}))
+        r = _run_record_step(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _broker_list_path(env, PRIMARY).read_text().splitlines() == [BROKER_RUN, BROKER_OTHER]
+
+    @pytest.mark.parametrize("empty_as_none", [False, True])
+    def test_a_region_without_a_broker_gets_an_empty_list_not_the_word_none(self, stub_env, tmp_path, empty_as_none):
+        env, state, log = stub_env
+        state.write_text(json.dumps({"brokers": {}, "empty_as_none": empty_as_none}))
+        r = _run_record_step(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _broker_list_path(env, PRIMARY).read_text().strip() == ""
+        assert _broker_list_path(env, STANDBY).read_text().strip() == ""
+        assert "::warning::" not in r.stdout
+
+    def test_a_region_whose_brokers_cannot_be_listed_is_a_warning_and_an_empty_list(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        state.write_text(json.dumps(_brokers_state(mq_denied=[PRIMARY])))
+        r = _run_record_step(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr          # the run's verdict is not this step's
+        assert "::warning::" in r.stdout and PRIMARY in r.stdout.split("::warning::")[1]
+        assert "mq:ListBrokers" in r.stderr                      # the cause is in the log, not swallowed
+        assert _broker_list_path(env, PRIMARY).read_text().strip() == ""      # present, so the next step can read it
+        assert _broker_list_path(env, STANDBY).read_text().split() == [BROKER_RUN_STANDBY]
+
+    def test_it_looks_for_the_broker_ecs_yaml_names(self):
+        brokers = [r for r in _load_template(ECS_TEMPLATE)["Resources"].values() if r["Type"] == "AWS::AmazonMQ::Broker"]
+        assert len(brokers) == 1
+        name = brokers[0]["Properties"]["BrokerName"]
+        assert name == "retail-store-ar-ordersmq${Env}"
+        assert "BrokerName=='%s'" % name.replace("${Env}", "${ENV}") in _record_script()
+
+    def test_the_e2e_role_grants_every_call_the_step_makes(self):
+        needed = {"mq:" + "".join(p.title() for p in op.split("-")) for op in re.findall(r"aws mq ([a-z-]+)", _record_script())}
+        assert needed == {"mq:ListBrokers"}
+        allowed = _role_allows_everywhere()
+        missing = {a for a in needed if a not in allowed and "mq:*" not in allowed}
+        assert not missing, f"github-oidc-role.yaml does not grant {sorted(missing)}"
+
+    def test_this_step_and_the_log_group_step_use_the_same_file_for_each_region(self):
+        file_name = r"\$\{RUNNER_TEMP\}/(mq-brokers-\$\{region\}\.txt)"
+        written, read = set(re.findall(file_name, _record_script())), set(re.findall(file_name, _log_group_script()))
+        assert written and written == read
+
+    def test_the_brokers_and_the_cut_canaries_of_a_run_are_cleaned_up_end_to_end(self, stub_env, tmp_path):
+        env, state, log = stub_env
+        canary_groups = [_canary_group(name, n=i + 1) for i, name in enumerate(_canary_names())]
+        primary = (RUN_LOG_GROUPS + canary_groups + _broker_groups(BROKER_RUN) + _broker_groups(BROKER_OTHER)
+                   + OTHER_LOG_GROUPS)
+        standby = RUN_LOG_GROUPS + canary_groups + _broker_groups(BROKER_RUN_STANDBY) + OTHER_LOG_GROUPS
+        state.write_text(_log_group_state(primary, standby=standby, **_brokers_state()))
+        assert _run_record_step(env, tmp_path).returncode == 0
+        r = _run_log_group_step(env, tmp_path, recorded=())
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "::warning::" not in r.stdout
+        # Another broker's groups (the primary has one more, from another run) and the groups that
+        # are not the run's at all stay.
+        assert _groups_left(state) == {PRIMARY: _broker_groups(BROKER_OTHER) + OTHER_LOG_GROUPS,
+                                       STANDBY: OTHER_LOG_GROUPS}
 
 
 # ---------------------------------------------------------------------------

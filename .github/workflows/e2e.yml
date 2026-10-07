@@ -158,6 +158,22 @@ jobs:
           path: deployment/ngrh-test-reports
           if-no-files-found: ignore
           retention-days: 30
+      - name: Record the message brokers of this run
+        if: always()
+        run: |-
+          for region in ${AWS_REGION} ${STANDBY_REGION}; do
+            list="${RUNNER_TEMP}/mq-brokers-${region}.txt"
+            : > "$list"
+            found=""
+            if ids=$(aws mq list-brokers --region "$region" --query "BrokerSummaries[?BrokerName=='retail-store-ar-ordersmq${ENV}'].BrokerId" --output text); then
+              for id in $ids; do
+                if [ "$id" != None ]; then echo "$id" >> "$list"; found="$found $id"; fi
+              done
+              echo "$region: message brokers of this run:${found:- none}"
+            else
+              echo "::warning::Could not list the message brokers in $region, so their log groups will not be deleted"
+            fi
+          done
       - name: Teardown
         if: always()
         run: |-
@@ -305,7 +321,7 @@ jobs:
         run: |-
           left=""
           for region in ${AWS_REGION} ${STANDBY_REGION}; do
-            ./delete-run-log-groups.sh "${ENV}" "$region" || left="$left $region"
+            ./delete-run-log-groups.sh "${ENV}" "$region" "${RUNNER_TEMP}/mq-brokers-${region}.txt" || left="$left $region"
           done
           if [ -n "$left" ]; then
             echo "::warning::Log groups of this run could not all be deleted in:$left"

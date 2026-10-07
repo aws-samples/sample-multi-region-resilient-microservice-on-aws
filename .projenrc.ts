@@ -536,6 +536,30 @@ e2e.addJob('e2e', {
       },
     },
     {
+      // An Amazon MQ broker's three log groups are named by its id and nothing of the run, and the
+      // broker is gone by the time the log group step runs, so the ids are written down here, while
+      // it still exists. It runs after a failed run too: the ids in the log tell whoever cleans up
+      // that run's log groups by hand which ones are its. A Region it can't list is a warning, since
+      // the run's verdict is not this step's, and its list is left empty so the next step can read it.
+      name: 'Record the message brokers of this run',
+      if: 'always()',
+      run: [
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  list="${RUNNER_TEMP}/mq-brokers-${region}.txt"',
+        '  : > "$list"',
+        '  found=""',
+        '  if ids=$(aws mq list-brokers --region "$region" --query "BrokerSummaries[?BrokerName==\'retail-store-ar-ordersmq${ENV}\'].BrokerId" --output text); then',
+        '    for id in $ids; do',
+        '      if [ "$id" != None ]; then echo "$id" >> "$list"; found="$found $id"; fi',
+        '    done',
+        '    echo "$region: message brokers of this run:${found:- none}"',
+        '  else',
+        '    echo "::warning::Could not list the message brokers in $region, so their log groups will not be deleted"',
+        '  fi',
+        'done',
+      ].join('\n'),
+    },
+    {
       name: 'Teardown',
       if: 'always()',
       workingDirectory: 'deployment',
@@ -683,16 +707,17 @@ e2e.addJob('e2e', {
     {
       // Lambda (the canaries and the custom resources), CodeBuild, Container Insights, RDS and
       // the services create log groups outside CloudFormation, so the Teardown above leaves
-      // them, 28 per run, and none of them expires. The step runs only after a passing run:
-      // a failed one keeps its logs for the post-mortem, which is all that is left of it
-      // once its stacks are gone. A region it cannot clean is a warning, like the Teardown's.
+      // them, 44 per run across the two Regions, and none of them expires. The step runs only
+      // after a passing run: a failed one keeps its logs for the post-mortem, which is all that
+      // is left of it once its stacks are gone. A region it cannot clean is a warning, like the
+      // Teardown's. Each Region's broker ids come from the step that recorded them.
       name: 'Delete log groups of this run',
       if: 'success()',
       workingDirectory: 'deployment',
       run: [
         'left=""',
         'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
-        '  ./delete-run-log-groups.sh "${ENV}" "$region" || left="$left $region"',
+        '  ./delete-run-log-groups.sh "${ENV}" "$region" "${RUNNER_TEMP}/mq-brokers-${region}.txt" || left="$left $region"',
         'done',
         'if [ -n "$left" ]; then',
         '  echo "::warning::Log groups of this run could not all be deleted in:$left"',
