@@ -6,7 +6,7 @@ The polling runs against a fake clock, so a run that never ends is a loop over s
 import dataclasses
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -68,9 +68,12 @@ def ready_to_run():
 
 
 def run_cli(fake, tmp_path, *extra, test=NAME, clock=None, reports=True):
+    """Run the `run` command on a fake clock. The wait for the report's evidence window is off unless a test asks for
+    it (--settle-minutes), so the clock counts the run itself."""
     clock = clock or Clock()
     tail = ["--reports-dir", str(tmp_path)] if reports else []
-    return cli.main(["run", *ARGS, "--test", test, *tail, *extra], aws=fake, sleep=clock.sleep, clock=clock), clock
+    settle = [] if "--settle-minutes" in extra else ["--settle-minutes", "0"]
+    return cli.main(["run", *ARGS, "--test", test, *tail, *settle, *extra], aws=fake, sleep=clock.sleep, clock=clock), clock
 
 
 # --- waiting for alarm data ------------------------------------------------------------------------------
@@ -670,3 +673,146 @@ class TestAFaultThatNeverRan:
         data = json.loads(next(tmp_path.glob("*.json")).read_text())
         assert data["observed"] == "INCONCLUSIVE" and data["faultNotRun"] == SSM_RUN_ERROR
         assert next(tmp_path.glob("*.md")).read_text().startswith("# orders-broker-dependency: INCONCLUSIVE, the fault did not run")
+
+
+# --- the report waits for the evidence window ------------------------------------------------------------
+#
+# 2026-10-07, run bea5d9f4: the report was written 17 seconds after the run ended and said the ui, orders and checkout hop
+# alarms had not changed. They changed one to three minutes later, and had all recovered by 18:03. The report reads alarm
+# history up to ten minutes past the end of the run so the recovery shows, so `run` waits that long before writing it, and
+# a report written earlier says so. The run in the fake ends at 16:20:00Z, so its window closes at 16:30:00Z.
+
+ENDED = datetime(2026, 10, 6, 16, 20, tzinfo=timezone.utc)
+
+
+def collected_at(fake, now, status="FAILED"):
+    (test_id,) = fake.tests
+    run_id = fake.add_run("orders", test_id, status)
+    from ngrh_scenario import environment, spec_tests
+    (resolved,) = context.resolve_all(fake, environment(fake), spec_tests())
+    return report.collect(fake, environment(fake), resolved, run_id, now)
+
+
+class TestTheEvidenceWindow:
+
+    def test_the_window_is_ten_minutes_after_the_end_of_the_run(self):
+        data = collected_at(ready_to_run(), ENDED + timedelta(minutes=3))
+        assert data["evidenceUntil"] == "2026-10-06T16:30:00Z" and data["evidenceComplete"] is False
+
+    def test_a_report_written_after_the_window_is_complete(self):
+        assert collected_at(ready_to_run(), ENDED + timedelta(minutes=10))["evidenceComplete"] is True
+        assert collected_at(ready_to_run(), ENDED + timedelta(minutes=9, seconds=59))["evidenceComplete"] is False
+
+    def test_a_run_that_has_not_ended_has_no_complete_window(self):
+        data = collected_at(ready_to_run(), datetime(2026, 10, 6, 17, 0, tzinfo=timezone.utc), "RUNNING")
+        assert data["evidenceComplete"] is False
+
+    def test_an_early_report_says_so_before_anything_else(self):
+        text = report.render(collected_at(ready_to_run(), ENDED + timedelta(seconds=17)))
+        lines = text.splitlines()
+        assert lines[0] == "# orders-broker-dependency: FAILED" and lines[2] == "Expected FAIL, observed FAIL: as expected."
+        notice = next(l for l in lines if l.startswith("**This report is early.**"))
+        assert "read until 2026-10-06T16:30:00Z" in notice and "written at 2026-10-06T16:20:17Z" in notice
+        assert f"make ngrh-test-report TEST={NAME} RUN=run-0002" in notice
+        assert text.index("This report is early") < text.index("## What Resilience Hub watched")
+
+    def test_a_complete_report_has_no_such_notice(self):
+        assert "This report is early" not in report.render(collected_at(ready_to_run(), ENDED + timedelta(minutes=11)))
+
+    def test_the_source_alarms_show_what_cloudwatch_says_they_did(self):
+        fake = ready_to_run()
+        fake.alarm_history[(PRIMARY, SUCCESS[0])] = [history("OK", "ALARM", "2026-10-06T16:03:30+00:00")]
+        text = report.render(collected_at(fake, ENDED + timedelta(minutes=11)))
+        assert "| Alarm | Kind | Outcome | Reason | State changes (CloudWatch, UTC) |" in text
+        assert f"| {SUCCESS[0]} | success | FAILED | alarm went to ALARM | OK -> ALARM 16:03:30 |" in text
+        assert f"| {OBSERVABILITY[0]} | observability | - |  | OK -> ALARM 16:02:10; ALARM -> OK 16:12:10 |" in text
+        assert f"| {OBSERVABILITY[1]} | observability | - |  | no change |" in text
+
+    def test_an_alarm_that_is_both_source_and_evidence_is_read_once(self):
+        fake = ready_to_run()
+        collected_at(fake, ENDED + timedelta(minutes=11))
+        names = [c["alarm_name"] for c in fake.calls_of("describe-alarm-history")]
+        assert OBSERVABILITY[0] in names and len(names) == len(set(names))
+
+    def test_a_history_that_cannot_be_read_is_not_reported_as_no_change(self):
+        fake = ready_to_run()
+        fake.fail_on("cloudwatch", "describe-alarm-history", "An error occurred (AccessDeniedException): no", times=100)
+        data = collected_at(fake, ENDED + timedelta(minutes=11))
+        text = report.render(data)
+        assert data["gaps"] and all(row["transitions"] is None for row in data["evidence"])
+        assert "no state change" not in text and "no change |" not in text
+        assert "- hop-ui-errors-us-east-1-t: history could not be read (see Not collected)" in text
+        assert f"| {OBSERVABILITY[1]} | observability | - |  | could not be read |" in text
+        assert "## Not collected" in text
+
+    def test_an_alarm_that_did_not_change_is_still_said_to_have_not_changed(self):
+        text = report.render(collected_at(ready_to_run(), ENDED + timedelta(minutes=11)))
+        assert "- hop-ui-errors-us-east-1-t: no state change" in text
+
+    # run waits, in poll-sized steps
+
+    def test_settle_sleeps_in_poll_sized_steps_and_the_last_one_is_short(self):
+        slept = []
+        assert run.settle(1.25, 30, slept.append) == 75
+        assert slept == [30, 30, 15]
+
+    @pytest.mark.parametrize("minutes", [0, -3])
+    def test_settle_with_nothing_to_wait_for_does_not_sleep(self, minutes):
+        slept = []
+        assert run.settle(minutes, 30, slept.append) == 0 and slept == []
+
+    def test_the_run_waits_ten_minutes_after_its_end_by_default(self, tmp_path, capsys):
+        assert cli.parser().parse_args(["run", *ARGS, "--test", NAME]).settle_minutes == 10.0
+        fake = ready_to_run()
+        code, clock = run_cli(fake, tmp_path, "--settle-minutes", "10")
+        out = capsys.readouterr().out
+        assert code == 0 and clock.now == 90 + 600                          # three polls, then the window
+        assert "The run ended. Waiting 10 min for the alarms' recovery to show before the report is written" in out
+        assert out.index("FAILED after") < out.index("Waiting 10 min") < out.index("Expected FAIL, observed FAIL")
+
+    def test_the_report_is_collected_after_the_wait_not_before(self, tmp_path, monkeypatch):
+        fake = ready_to_run()
+        clock = Clock()
+        seen = []
+        original = report.collect
+
+        def collect(*args, **kwargs):
+            seen.append(clock.now)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(report, "collect", collect)
+        cli.main(["run", *ARGS, "--test", NAME, "--reports-dir", str(tmp_path), "--settle-minutes", "10"],
+                 aws=fake, sleep=clock.sleep, clock=clock)
+        assert seen == [90 + 600]
+
+    def test_settling_can_be_switched_off_and_the_report_is_then_early(self, tmp_path, capsys):
+        fake = ready_to_run()
+        code, clock = run_cli(fake, tmp_path, "--settle-minutes", "0")
+        out = capsys.readouterr().out
+        assert code == 0 and clock.now == 90 and "Waiting" not in out.split("Started run")[1]
+
+    def test_a_run_that_did_not_finish_is_not_settled(self, tmp_path, capsys):
+        fake = ready_to_run()
+        fake.run_script = ["RUNNING"]
+        code, clock = run_cli(fake, tmp_path, "--settle-minutes", "10")
+        assert code == cli.EXIT_ERROR and clock.now == 35 * 60
+        assert "Waiting 10 min" not in capsys.readouterr().out
+
+    def test_ctrl_c_while_settling_says_the_run_has_ended_and_stops_nothing(self, tmp_path, capsys):
+        fake = ready_to_run()
+        clock = Clock()
+
+        def sleep(seconds):
+            if clock.now >= 90:                                              # the run ended; this is the settle wait
+                raise KeyboardInterrupt
+            clock.sleep(seconds)
+
+        try:
+            code = cli.main(["run", *ARGS, "--test", NAME, "--reports-dir", str(tmp_path), "--settle-minutes", "10"], aws=fake, sleep=sleep, clock=clock)
+        except KeyboardInterrupt:
+            pytest.fail("Ctrl-C while settling reached the caller instead of being handled")
+        out = capsys.readouterr().out
+        assert code == cli.EXIT_INTERRUPTED
+        assert "Interrupted. The run has ended." in out and f"make ngrh-test-report TEST={NAME} RUN=run-0002" in out
+        assert "The run goes on in AWS" not in out and "make ngrh-test-stop" not in out
+        assert fake.calls_of("stop-test-run") == [] and list(tmp_path.iterdir()) == []

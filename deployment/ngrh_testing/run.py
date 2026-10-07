@@ -105,6 +105,25 @@ def wait(
         sleep(poll_seconds)
 
 
+def settle(
+    minutes: float,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> float:
+    """Wait ``minutes`` after a run has ended, in poll-sized steps (so Ctrl-C is heard within one), before its
+    report is written. The report reads the evidence alarms' history up to ten minutes past the end of the run,
+    so the recovery shows; a report written at once misses the alarms that change in the minutes after the fault
+    stops (on 2026-10-07 the ui and orders hop alarms fired one to three minutes after the run ended, and the
+    report written 17 seconds after it said they had not changed). Returns the seconds waited."""
+    total = max(0.0, minutes) * 60
+    waited = 0.0
+    while waited < total:
+        step = min(poll_seconds, total - waited)
+        sleep(step)
+        waited += step
+    return waited
+
+
 def active_run(aws: AwsCli, env: Environment, t: ResolvedTest, test_id: str) -> Dict[str, Any]:
     """The test's active run. Resilience Hub allows one per service."""
     runs = [r for r in api.list_test_runs(aws, env.ngrh_region, t.service_arn, test_id) if r["status"] in api.ACTIVE_STATUSES]

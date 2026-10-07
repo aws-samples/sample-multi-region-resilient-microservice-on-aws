@@ -404,6 +404,11 @@ class TestMakefile:
         assert self._tool_line(tmp_path, "ngrh-test", "TEST=x").endswith('--alarm-wait-minutes "0"')
         assert self._tool_line(tmp_path, "ngrh-test", "TEST=x", "ALARM_WAIT=15").endswith('--alarm-wait-minutes "15"')
 
+    def test_a_run_settles_for_the_evidence_window_unless_told_how_long(self, tmp_path):
+        assert "--settle-minutes" not in self._tool_line(tmp_path, "ngrh-test", "TEST=x")          # the tool's own default, ten minutes
+        line = self._tool_line(tmp_path, "ngrh-test", "TEST=x", "ALARM_WAIT=15", "SETTLE_WAIT=3")
+        assert line.endswith('--alarm-wait-minutes "15" --settle-minutes "3"')
+
     def test_stop_waits_for_the_run_to_end_only_when_asked(self, tmp_path):
         assert self._tool_line(tmp_path, "ngrh-test-stop", "TEST=x").endswith('--wait-minutes "0"')
         assert self._tool_line(tmp_path, "ngrh-test-stop", "TEST=x", "STOP_WAIT=10").endswith('--wait-minutes "10"')

@@ -941,15 +941,18 @@ RUN ?=
 ngrh-test-preflight:
 	@python3 -m ngrh_testing preflight $(NGRH_TESTING_ARGS) --test "$(if $(TEST),$(TEST),all)" --mode "$(MODE)"
 
-# make ngrh-test TEST=<name> [ALARM_WAIT=<minutes>]: preflight (live), start the test's run, follow it to
-# its end, and write deployment/ngrh-test-reports/<test>-<run>.{json,md}. The run injects a real fault
-# into the deployed estate, so it names one test; exits 3 if the verdict is not the one the spec expects.
+# make ngrh-test TEST=<name> [ALARM_WAIT=<minutes>] [SETTLE_WAIT=<minutes>]: preflight (live), start the test's
+# run, follow it to its end, and write deployment/ngrh-test-reports/<test>-<run>.{json,md}. The run injects a
+# real fault into the deployed estate, so it names one test; exits 3 if the verdict is not the one the spec expects.
 # ALARM_WAIT first waits up to that long for the test's success and stop alarms to have data: a new
 # deployment's alarms start without it, and preflight refuses a run while one is not OK (CI passes 15).
+# SETTLE_WAIT is how long to wait after the run ends before the report is written (default 10, the length of
+# the evidence window): the hop alarms often change one to three minutes after the fault stops.
 ALARM_WAIT ?= 0
+SETTLE_WAIT ?=
 
 ngrh-test:
-	@python3 -m ngrh_testing run $(NGRH_TESTING_ARGS) --test "$(TEST)" --alarm-wait-minutes "$(ALARM_WAIT)"
+	@python3 -m ngrh_testing run $(NGRH_TESTING_ARGS) --test "$(TEST)" --alarm-wait-minutes "$(ALARM_WAIT)"$(if $(SETTLE_WAIT), --settle-minutes "$(SETTLE_WAIT)")
 
 # make ngrh-test-stop TEST=<name> [STOP_WAIT=<minutes>]: stop the test's active run, and with STOP_WAIT wait
 # up to that long for it to end (destroy-ngrh refuses while a run is active; CI passes 10).

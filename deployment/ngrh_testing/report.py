@@ -156,8 +156,16 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
     start = parse_time(run["startedAt"]) - BEFORE
     end = (parse_time(run["endedAt"]) if run.get("endedAt") else now) + AFTER
     evidence = [{"alarm": a.name, "region": a.region, "hop": _hop(a),
-                 "transitions": read(f"history of {a.name}", lambda a=a: _transitions(aws, a, start, end), [])}
+                 "transitions": read(f"history of {a.name}", lambda a=a: _transitions(aws, a, start, end), None)}
                 for a in sorted(t.evidence, key=_hop_order)]
+    # What the success and observability alarms did, from CloudWatch: Resilience Hub's own events for a source alarm
+    # can lag a minute or miss a change (the run of 2026-10-07 recorded only "Initial state" for an alarm that had
+    # gone to ALARM half a minute before the run ended), and it returns no outcome for them at all. An alarm that is
+    # also evidence is not read twice, and one that cannot be read is None, which the report says rather than "no change".
+    read_already = {row["alarm"]: row["transitions"] for row in evidence}
+    watched = {(a.region, a.name): a for a in list(t.success) + list(t.observability)}
+    source_history = {name: read_already[name] if name in read_already else read(f"history of {name}", lambda a=a: _transitions(aws, a, start, end), None)
+                      for (_, name), a in sorted(watched.items(), key=lambda kv: kv[0][1])}
     seen = observed(run["status"])
     events = read("events", lambda: hub("list-test-run-events", "events"), [])
     problem = fault_problem(run, experiments, events)
@@ -167,6 +175,11 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
         "test": t.name, "service": t.test.service, "template": t.test.template, "testRunId": run_id,
         "expected": t.test.expected, "observed": seen, "matches": matches(t.test.expected, seen),
         "faultNotRun": problem, "generatedAt": _iso(now), "testRun": run,
+        # Alarm history is read up to ten minutes after the run ended, so the recovery shows. A report written
+        # sooner than that is missing whatever the alarms do in the meantime, and says so. A run that has not ended
+        # has its window end ten minutes from now, so its report is never complete.
+        "evidenceUntil": _iso(end), "evidenceComplete": now >= end,
+        "sourceHistory": source_history,
         "events": events,
         "sources": sources, "sourceEvents": source_events,
         "resolvedTargets": read("resolved targets", lambda: hub("list-resolved-test-run-target-resources", "resolvedTargetResources"), []),
@@ -176,10 +189,15 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
 
 
 def _source_rows(data: Dict[str, Any]) -> List[str]:
+    """One row per success or observability alarm: what Resilience Hub says about it (the API returns no outcome
+    for them in some runs) and what CloudWatch's history says it did."""
     rows = []
+    history = data.get("sourceHistory", {})
     for source in data["sources"]:
         kind, alarm = ("success", source["successCriteriaAlarm"]) if "successCriteriaAlarm" in source else ("observability", source["observabilityAlarm"])
-        rows.append(f"| {alarm['alarmName']} | {kind} | {alarm.get('outcome', '-')} | {alarm.get('outcomeReason', '')} |")
+        changes = ("could not be read" if history.get(alarm["alarmName"]) is None and alarm["alarmName"] in history else
+                   "; ".join(f"{tr['from']} -> {tr['to']} {_clock(tr['time'])}" for tr in history.get(alarm["alarmName"], [])) or "no change")
+        rows.append(f"| {alarm['alarmName']} | {kind} | {alarm.get('outcome', '-')} | {alarm.get('outcomeReason', '')} | {changes} |")
     return rows
 
 
@@ -205,6 +223,9 @@ def _evidence_lines(data: Dict[str, Any]) -> List[str]:
         if group != heading:
             lines += ["", f"### {group}"]
             heading = group
+        if row["transitions"] is None:
+            lines.append(f"- {row['alarm']}: history could not be read (see Not collected)")
+            continue
         if not row["transitions"]:
             lines.append(f"- {row['alarm']}: no state change")
         for tr in row["transitions"]:
@@ -229,6 +250,10 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
         f"- Role {run.get('roleName', '-')}, stop conditions: "
         + (", ".join(c["value"].rsplit(":", 1)[-1] for c in run.get("stopConditions", []) if c["source"] != "none") or "none"),
     ]
+    if data.get("evidenceComplete") is False:
+        lines += ["", f"**This report is early.** The evidence alarms are read until {data['evidenceUntil']}, ten minutes after the run ends, so "
+                      f"their recovery shows, and it was written at {data['generatedAt']}: alarms that change in between are missing. "
+                      f"Collect it again after that time with `make ngrh-test-report TEST={data['test']} RUN={data['testRunId']}`."]
     if problem:
         lines += ["", f"Resilience Hub ended the run {run['status']}, but the fault never ran, so nothing was done to the application and "
                       f"this says nothing about it: {problem}"]
@@ -242,7 +267,7 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
         who = f" by role {invoker_role}" if invoker_role else " by the invoker role"
         lines += ["", f"No error message came with the run. Calls denied{who} carry none, so look for AccessDenied events in CloudTrail "
                       "around the start time."]
-    lines += ["", "## What Resilience Hub watched", "", "| Alarm | Kind | Outcome | Reason |", "|---|---|---|---|", *_source_rows(data)]
+    lines += ["", "## What Resilience Hub watched", "", "| Alarm | Kind | Outcome | Reason | State changes (CloudWatch, UTC) |", "|---|---|---|---|---|", *_source_rows(data)]
     lines += ["", "## Timeline (UTC)", "", *(_timeline(data) or ["- nothing recorded"])]
     lines += ["", "## Evidence alarms, by hop", *(_evidence_lines(data) or ["", "- none configured"])]
     targets = data["resolvedTargets"]

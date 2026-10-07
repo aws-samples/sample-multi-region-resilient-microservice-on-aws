@@ -73,6 +73,10 @@ def parser() -> argparse.ArgumentParser:
     u.add_argument("--alarm-wait-minutes", type=float, default=0.0,
                    help="first wait up to this long for the test's success and stop alarms to have data (a new "
                         "deployment's alarms start without it); 0, the default, does not wait")
+    u.add_argument("--settle-minutes", type=float, default=report.AFTER.total_seconds() / 60,
+                   help="after the run ends, wait this long before writing the report, so the alarms' recovery is in it "
+                        f"(default {report.AFTER.total_seconds() / 60:g}, the length of the evidence window); 0 writes it at once, "
+                        "and the report then says it is early")
     u.add_argument("--reports-dir", default=report.REPORT_DIR)
 
     s = commands.add_parser("stop", help="stop a test's active run (make ngrh-test-stop)")
@@ -143,6 +147,16 @@ def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep:
     except AwsCliError as e:
         sys.stderr.write(f"ngrh_testing run: lost contact with AWS while waiting: {e}\n{later}\n")
         return EXIT_ERROR
+    if outcome.finished and args.settle_minutes > 0:
+        _say(f"The run ended. Waiting {args.settle_minutes:g} min for the alarms' recovery to show before the report is written "
+             "(--settle-minutes 0 writes it now, and the report then says it is early).")
+        try:
+            run.settle(args.settle_minutes, args.poll_seconds, sleep)
+        except KeyboardInterrupt:
+            # The run is over: nothing needs stopping, and the report can be collected whenever the window has closed.
+            _say(f"\nInterrupted. The run has ended. Collect its report, once ten minutes have passed since it ended, with: "
+                 f"make ngrh-test-report TEST={t.name} RUN={run_id}")
+            return EXIT_INTERRUPTED
     data = report.collect(aws, env, t, run_id)
     json_path, md_path = report.write(data, args.reports_dir, env.invoker_role_name)
     _say(f"{t.name}: {outcome.status}. Expected {data['expected']}, observed {data['observed']}: "
