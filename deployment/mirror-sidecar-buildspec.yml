@@ -33,14 +33,12 @@ phases:
       - |
         # FIS fault-injection sidecar (every task definition in ecs.yaml). The
         # task subnets have no internet route, so everything the sidecar and
-        # the FIS fault documents run inside a task is baked into this image:
-        #   - the sidecar's start script: jq, ps (procps), aws (awscli), curl
-        #     (curl-minimal) and setsid (util-linux)
-        #   - AWSFIS-Run-Network-Packet-Loss: atd (at), dig (bind-utils), lsof,
-        #     pgrep (procps) and tc (iproute-tc)
-        #   - the agent-install document Resilience Hub runs on the task before
-        #     a test, which needs python3 and python3-requests (observed in a
-        #     July 2026 test run, where installing them at run time failed)
+        # the FIS fault documents run inside a task is baked into this image.
+        # The Dockerfile below is deployment/ssm-agent-sidecar.Dockerfile, which
+        # says what is baked in and why; this build has no source, so its lines
+        # are written here, and tests/test_fis_sidecar.py holds the two equal.
+        # The weekly repave (self-update.yaml) rebuilds the image from that file
+        # and leaves the FROM line alone when it mirrors the images named here.
         set -e
         REPO=amazon-ssm-agent${ENV_SUFFIX}
         {

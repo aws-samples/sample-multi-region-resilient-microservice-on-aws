@@ -4,8 +4,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Self-update automation for long-lived installs. Weekly EventBridge Scheduler
   triggers a CodeBuild repave: clone main, rebuild all service images (fresh
-  base layers + current dependencies), re-mirror observability sidecars, then
-  roll out - a CloudFormation Tag update when the commit changed, or a forced
+  base layers + current dependencies), re-mirror observability sidecars,
+  rebuild the FIS fault-injection sidecar image, then roll out - a
+  CloudFormation Tag update when the commit changed, or a forced
   ECS deployment when only base layers moved. Combined with the ECR lifecycle
   policies, superseded vulnerable images are expired and their Inspector
   findings auto-close without operator intervention.
@@ -288,10 +289,20 @@ Resources:
                       docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${SVC}${ENV_SUFFIX}:$TAG
                     done
                   done
-                # 2. Re-mirror observability sidecars at the pinned versions
+                # 2. Re-mirror observability sidecars at the pinned versions.
+                #    The sidecar buildspec also names the FIS sidecar's base image, in the
+                #    FROM line of the Dockerfile it writes. That image is built (step 3), not
+                #    mirrored: copying the bare base over the baked image left every task
+                #    started afterwards with a sidecar that exited 127 for want of aws and ps,
+                #    so no task registered with SSM and Resilience Hub's ECS faults found no
+                #    target (the repave of 2026-10-06 02:03Z did it; seen 2026-10-07).
+                #    The list is read into a variable, where set -e sees a failure, and an
+                #    empty list fails the build instead of mirroring nothing.
                 - |
                   set -e
-                  for ENTRY in $(grep -oE 'public\.ecr\.aws/[a-z-]+/[a-z-]+:[a-zA-Z0-9.]+' deployment/mirror-sidecar-buildspec.yml | sort -u); do
+                  IMAGES=$(grep -v 'echo "FROM ' deployment/mirror-sidecar-buildspec.yml | grep -oE 'public\.ecr\.aws/[a-z-]+/[a-z-]+:[a-zA-Z0-9.]+' | sort -u)
+                  test -n "$IMAGES"
+                  for ENTRY in $IMAGES; do
                     NAME=$(basename ${ENTRY%%:*}); TAG_VAL=${ENTRY##*:}
                     docker pull $ENTRY
                     for R in $PRIMARY_REGION $STANDBY_REGION; do
@@ -299,9 +310,26 @@ Resources:
                       docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${NAME}${ENV_SUFFIX}:$TAG_VAL
                     done
                   done
+                # 3. Rebuild the FIS sidecar image from its Dockerfile (fresh base layers and
+                #    packages, as in step 1). The task subnets have no internet route, so the
+                #    tools the sidecar and the FIS fault documents run are baked in. Each is
+                #    checked in the built image BEFORE it replaces the one the tasks pull:
+                #    a failed check ends the build here, and the services keep the image they
+                #    run. The Dockerfile goes in on stdin, so no build context is sent.
+                - |
+                  set -e
+                  docker build --pull -t amazon-ssm-agent:$TAG - < deployment/ssm-agent-sidecar.Dockerfile
+                  for TOOL in jq ps aws curl setsid at atd dig lsof pgrep tc python3; do
+                    docker run --rm --entrypoint /bin/sh amazon-ssm-agent:$TAG -c "command -v $TOOL" > /dev/null
+                  done
+                  docker run --rm --entrypoint /bin/sh amazon-ssm-agent:$TAG -c 'python3 -c "import requests"'
+                  for R in $PRIMARY_REGION $STANDBY_REGION; do
+                    docker tag amazon-ssm-agent:$TAG $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/amazon-ssm-agent${ENV_SUFFIX}:latest
+                    docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/amazon-ssm-agent${ENV_SUFFIX}:latest
+                  done
             post_build:
               commands:
-                # 3. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise.
+                # 4. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise.
                 # set -e: any rollout failure MUST fail the build -- without it a denied
                 # UpdateStack is swallowed by the loop and CodeBuild reports SUCCEEDED
                 # while services keep running the old images (observed 2026-08-16).
