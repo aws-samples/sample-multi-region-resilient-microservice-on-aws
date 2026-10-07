@@ -14,7 +14,7 @@ sys.path.insert(0, str(TESTS))
 from ngrh_scenario import (  # noqa: E402
     OBSERVABILITY, PEER_DEGRADED, STOP, SUCCESS, TEMPLATE, environment, reconciled_fake, spec_tests,
 )
-from ngrh_fake_aws import CLUSTER, ENV, PLAN_ARN, PRIMARY, STANDBY, service_arn  # noqa: E402
+from ngrh_fake_aws import CLUSTER, ENV, PLAN_ARN, PRIMARY, STANDBY, alarm_arn, service_arn  # noqa: E402
 
 from ngrh_testing import cli, preflight  # noqa: E402
 
@@ -248,6 +248,99 @@ class TestAlarms:
         fake.alarms[(STANDBY, PEER_DEGRADED)]["state"] = "ALARM"
         fake.alarms[(PRIMARY, "hop-ui-slow-us-east-1-t")]["state"] = "INSUFFICIENT_DATA"
         assert check(fake).passed
+
+
+# --- 4: the alarms are ones the service discovers -----------------------------------------------------------
+#
+# 2026-10-07: StartTestRun refused the orders test with "One or more alarms referenced by this test were not
+# discovered for this service", after a fresh assessment that had looked at every orders alarm but one. The
+# one was hop-checkout-errors, tagged checkout, and orders discovers the tags orders and shared.
+
+class TestAlarmScope:
+
+    def tag(self, fake, name, tags, region=PRIMARY):
+        fake.alarm_tags[(region, name)] = tags
+
+    @pytest.mark.parametrize("mode", [LIVE, STATIC])
+    @pytest.mark.parametrize("source", [SUCCESS[0], OBSERVABILITY[0]])
+    def test_a_source_alarm_tagged_for_another_service_refuses_in_both_modes(self, mode, source):
+        fake = reconciled_fake()
+        self.tag(fake, source, {"service": "checkout"})
+        kind = "success" if source in SUCCESS else "observability"
+        assert reasons(check(fake, mode), 4) == [
+            f"{kind} source alarm {source} is tagged service=checkout, but service orders discovers only alarms tagged "
+            "service=orders|shared; Resilience Hub would refuse the run (alarms not discovered). Use an alarm of that "
+            "service or a shared one as a source; this one can stay in the evidence alarms"]
+        assert numbers(check(fake, mode)) == [4]
+
+    def test_the_refusal_names_the_test(self):
+        fake = reconciled_fake()
+        self.tag(fake, OBSERVABILITY[0], {"service": "checkout"})
+        assert [r.test for r in check(fake).refusals] == ["orders-broker-dependency"]
+        assert str(check(fake).refusals[0]).startswith("[4] orders-broker-dependency: observability source alarm ")
+
+    @pytest.mark.parametrize("tags", [{"service": "orders"}, {"service": "shared"}, {"service": "shared", "team": "x"}])
+    def test_the_services_own_tag_and_shared_are_accepted(self, tags):
+        fake = reconciled_fake()
+        self.tag(fake, OBSERVABILITY[0], tags)
+        assert check(fake).passed
+
+    @pytest.mark.parametrize("tags,said", [({}, "none of those tags"), ({"team": "x"}, "none of those tags"),
+                                           ({"Service": "orders"}, "none of those tags")])
+    def test_an_alarm_without_the_service_tag_refuses(self, tags, said):
+        fake = reconciled_fake()
+        self.tag(fake, SUCCESS[1], tags)
+        (reason,) = reasons(check(fake), 4)
+        assert f"success source alarm {SUCCESS[1]} is tagged {said}" in reason
+
+    def test_stop_and_evidence_alarms_may_belong_to_other_services(self):
+        # They are not test sources; region-degraded is shared in practice, and the hop alarms of the
+        # services behind ui are the evidence the report lays out.
+        fake = reconciled_fake()
+        self.tag(fake, STOP, {"service": "checkout"})
+        self.tag(fake, PEER_DEGRADED, {"service": "ui"}, region=STANDBY)
+        assert check(fake).passed
+
+    def test_any_tag_filter_of_the_service_will_do(self):
+        fake = reconciled_fake()
+        fake.service_scopes[service_arn("orders")] = [
+            {"type": "TAGS", "resourceTags": [{"key": "service", "values": ["orders"]}, {"key": "tier", "values": ["gold"]}]}]
+        self.tag(fake, SUCCESS[0], {"tier": "gold"})
+        self.tag(fake, SUCCESS[1], {"service": "orders"})
+        self.tag(fake, OBSERVABILITY[0], {"service": "orders"})
+        self.tag(fake, OBSERVABILITY[1], {"service": "orders"})
+        assert check(fake).passed
+        self.tag(fake, SUCCESS[0], {"tier": "silver"})
+        (reason,) = reasons(check(fake), 4)
+        assert "is tagged tier=silver, but" in reason and "only alarms tagged service=orders or tier=gold;" in reason
+
+    def test_a_service_no_tag_scopes_is_a_note_not_a_verdict(self):
+        fake = reconciled_fake()
+        fake.service_scopes[service_arn("orders")] = [{"type": "DESIGN_FILE", "designFileS3Url": "s3://b/hld.md"}]
+        self.tag(fake, OBSERVABILITY[0], {"service": "checkout"})
+        result = check(fake)
+        assert result.passed
+        assert result.notes == ["orders-broker-dependency: service orders has no tag input source, so which alarms it discovers is not checked"]
+
+    def test_an_alarm_that_does_not_exist_is_reported_once_by_the_existence_check(self):
+        fake = reconciled_fake()
+        del fake.alarms[(PRIMARY, OBSERVABILITY[1])]
+        assert reasons(check(fake), 4) == [f"alarm {OBSERVABILITY[1]} does not exist in {PRIMARY}"]
+
+    def test_every_source_alarm_is_read_once_and_the_service_once(self):
+        fake = reconciled_fake()
+        check(fake)
+        tagged = [c["resource_arn"] for c in fake.calls_of("list-tags-for-resource")]
+        assert sorted(tagged) == sorted(alarm_arn(n) for n in SUCCESS + OBSERVABILITY)
+        assert len(fake.calls_of("list-input-sources")) == 1
+
+    @pytest.mark.parametrize("operation", ["list-input-sources", "list-tags-for-resource"])
+    def test_an_error_reading_the_scope_is_a_refusal_not_a_crash(self, operation):
+        fake = reconciled_fake()
+        service = "resiliencehubv2" if operation == "list-input-sources" else "cloudwatch"
+        fake.fail_on(service, operation, "An error occurred (AccessDeniedException): no")
+        (reason,) = reasons(check(fake), 4)
+        assert reason.startswith("could not check which alarms each service discovers: ") and "AccessDeniedException" in reason
 
 
 # --- 5, 6, 7: nothing else is running ---------------------------------------------------------------------------

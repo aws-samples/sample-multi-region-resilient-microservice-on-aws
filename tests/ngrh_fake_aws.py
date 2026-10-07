@@ -58,6 +58,17 @@ def task_definition_arn(service: str, region: str = PRIMARY, revision: int = 7) 
     return f"arn:aws:ecs:{region}:{ACCOUNT}:task-definition/apps{ENV}-{service}:{revision}"
 
 
+def default_alarm_service_tag(name: str) -> str:
+    """The ``service`` tag monitoring.yml gives an alarm: the service a hop alarm watches, orders for
+    orders-created-zero, and otherwise the monitoring stack's own tag, shared."""
+    if name.startswith("hop-"):
+        service = name.split("-")[1]           # hop-<service>-<errors|slow>-<Region><Env>
+        return "cart" if service == "carts" else service
+    if name.startswith("orders-created-zero"):
+        return "orders"
+    return "shared"
+
+
 class FakeAws:
     def __init__(self, env: str = ENV, account: str = ACCOUNT) -> None:
         self.env, self.account = env, account
@@ -72,6 +83,8 @@ class FakeAws:
         self.stacks: Dict[Tuple[str, str], Dict[str, str]] = {(PRIMARY, f"region-switch{env}"): {"RegionSwitchPlanArn": PLAN_ARN}}
         self.templates = {template_arn(t) for t in TEMPLATES}
         self.alarms: Dict[Tuple[str, str], Dict[str, str]] = {}  # (region, name) -> {"state", "type"}
+        self.alarm_tags: Dict[Tuple[str, str], Dict[str, str]] = {}  # (region, name) -> the alarm's tags
+        self.service_scopes: Dict[str, List[Dict[str, Any]]] = {}  # service ARN -> input sources, where not the default
         self.alarm_history: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, name) -> history items
         self.brokers: Dict[str, List[str]] = {BROKER_ID: [f"amqps://{BROKER_HOST}:5671"]}
         self.tests: Dict[str, Dict[str, Any]] = {}  # test id -> the Test structure
@@ -98,6 +111,7 @@ class FakeAws:
             ("mq", "describe-broker"): self._describe_broker,
             ("cloudwatch", "describe-alarms"): self._describe_alarms,
             ("cloudwatch", "describe-alarm-history"): self._describe_alarm_history,
+            ("cloudwatch", "list-tags-for-resource"): self._list_tags_for_resource,
             ("iam", "list-attached-role-policies"): self._list_attached_role_policies,
             ("iam", "get-role"): self._get_role,
             ("fis", "list-experiments"): self._list_experiments,
@@ -107,6 +121,7 @@ class FakeAws:
             ("ecs", "describe-task-definition"): self._describe_task_definition,
             ("resiliencehubv2", "list-test-templates"): self._list_test_templates,
             ("resiliencehubv2", "list-services"): self._list_services,
+            ("resiliencehubv2", "list-input-sources"): self._list_input_sources,
             ("resiliencehubv2", "list-tests"): self._list_tests,
             ("resiliencehubv2", "get-test"): self._get_test,
             ("resiliencehubv2", "create-test"): self._create_test,
@@ -128,8 +143,11 @@ class FakeAws:
 
     # --- test setup -------------------------------------------------------------------------
 
-    def add_alarm(self, name: str, region: str = PRIMARY, state: str = "OK", kind: str = "MetricAlarm") -> None:
+    def add_alarm(self, name: str, region: str = PRIMARY, state: str = "OK", kind: str = "MetricAlarm",
+                  service_tag: Optional[str] = None) -> None:
+        """An alarm that exists, tagged as monitoring.yml would tag it unless ``service_tag`` says otherwise."""
         self.alarms[(region, name)] = {"state": state, "type": kind}
+        self.alarm_tags[(region, name)] = {"service": service_tag or default_alarm_service_tag(name)}
 
     def add_test(self, service: str, template: str, **fields: Any) -> str:
         """Put a test on a service directly (as if an earlier reconcile, or a person, made it)."""
@@ -235,6 +253,23 @@ class FakeAws:
         if alarm is not None and alarm["type"] not in (alarm_types or ["MetricAlarm"]):
             return {"AlarmHistoryItems": []}  # the real API lists metric alarms only unless composites are asked for
         return {"AlarmHistoryItems": list(self.alarm_history.get((region, alarm_name), []))}
+
+    def _list_tags_for_resource(self, region: Optional[str], resource_arn: str) -> Dict[str, Any]:
+        name = resource_arn.rsplit(":alarm:", 1)[-1]
+        if (region, name) not in self.alarms:
+            raise self._error("cloudwatch", "list-tags-for-resource", "ResourceNotFoundException", f"alarm {name} not found")
+        return {"Tags": [{"Key": k, "Value": v} for k, v in sorted(self.alarm_tags.get((region, name), {}).items())]}
+
+    def _list_input_sources(self, region: Optional[str], service_arn: str) -> Dict[str, Any]:
+        """A service discovers by the tag ``service`` in its own name and ``shared`` (ngrh.yaml), next to
+        the design file every service in the account has."""
+        if service_arn in self.service_scopes:
+            return {"inputSourceSummaries": self.service_scopes[service_arn]}
+        name = service_arn.rsplit("/", 1)[-1].rsplit("-id", 1)[0]
+        return {"inputSourceSummaries": [
+            {"inputSourceId": "design", "type": "DESIGN_FILE", "designFileS3Url": "s3://bucket/design/hld.md"},
+            {"inputSourceId": "tags", "type": "TAGS", "resourceTags": [{"key": "service", "values": [name, "shared"]}]},
+        ]}
 
     def _list_attached_role_policies(self, region: Optional[str], role_name: str) -> Dict[str, Any]:
         if role_name not in self.role_policies:

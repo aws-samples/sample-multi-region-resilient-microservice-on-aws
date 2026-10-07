@@ -137,6 +137,38 @@ def check_alarms(aws: AwsCli, tests: Sequence[ResolvedTest], live: bool) -> List
     return out
 
 
+def check_alarm_scope(aws: AwsCli, env: Environment, tests: Sequence[ResolvedTest], notes: List[str]) -> List[Refusal]:
+    """Resilience Hub takes only the alarms it discovered for the service as test sources, and it finds
+    a service's alarms by the tags its input sources name (orders: ``service`` is orders or shared).
+    A source alarm tagged for another service is never discovered, and StartTestRun then refuses the
+    whole run with "alarms not discovered for this service": the orders test's ``hop-checkout-errors``,
+    tagged checkout, did so on 2026-10-07, after a fresh assessment had looked at every orders alarm.
+    Only success and observability alarms are sources. Stop conditions and evidence alarms are not,
+    and are not checked here. A service no tag scopes gets a note instead of a verdict."""
+    out: List[Refusal] = []
+    for t in tests:
+        scope = api.service_tag_scope(aws, env.ngrh_region, t.service_arn)
+        if not scope:
+            notes.append(f"{t.name}: service {t.test.service} has no tag input source, so which alarms it discovers is not checked")
+            continue
+        accepted = " or ".join(f"{key}={'|'.join(sorted(values))}" for key, values in scope)
+        for kind, alarms in (("success", t.success), ("observability", t.observability)):
+            for alarm in alarms:
+                try:
+                    found = api.alarm_tags(aws, alarm.region, alarm.arn)
+                except AwsCliError as e:
+                    if "ResourceNotFound" not in str(e):
+                        raise
+                    continue  # it does not exist, which check 4 reports
+                if any(found.get(key) in values for key, values in scope):
+                    continue
+                has = ", ".join(f"{k}={v}" for k, v in sorted(found.items()) if k in {key for key, _ in scope}) or "none of those tags"
+                out.append(Refusal(4, f"{kind} source alarm {alarm.name} is tagged {has}, but service {t.test.service} discovers only "
+                                      f"alarms tagged {accepted}; Resilience Hub would refuse the run (alarms not discovered). "
+                                      f"Use an alarm of that service or a shared one as a source; this one can stay in the evidence alarms", t.name))
+    return out
+
+
 # --- 5, 6, 7: nothing else is running -------------------------------------------------------------
 
 def check_no_active_runs(aws: AwsCli, env: Environment) -> List[Refusal]:
@@ -245,6 +277,7 @@ def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: 
     if resolved:
         refusals.extend(_seeing(2, "which templates Resilience Hub offers", lambda: check_templates(aws, env, resolved)))
         refusals.extend(_seeing(4, "the alarms", lambda: check_alarms(aws, resolved, mode == LIVE)))
+        refusals.extend(_seeing(4, "which alarms each service discovers", lambda: check_alarm_scope(aws, env, resolved, result.notes)))
         refusals.extend(check_drift(aws, env, resolved))
         for t in resolved:
             refusals.extend(_seeing(9, "the service's configuration", lambda t=t: check_service_configuration(aws, env, t), t.name))

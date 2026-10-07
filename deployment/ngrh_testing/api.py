@@ -79,3 +79,20 @@ def active_runs(aws: AwsCli, region: str, service_arns: Sequence[str]) -> List[T
 def list_service_arns(aws: AwsCli, region: str) -> List[str]:
     """Every NGRH service in the account, the sample's and other people's."""
     return [s["serviceArn"] for s in aws.call(SERVICE, "list-services", region).get("serviceSummaries", [])]
+
+
+def service_tag_scope(aws: AwsCli, region: str, service_arn: str) -> List[Tuple[str, Set[str]]]:
+    """The tag filters of the service's TAGS input sources, as (tag key, accepted values); empty when
+    no tag scopes the service. They decide which resources, alarms included, Resilience Hub discovers
+    for the service."""
+    scope: List[Tuple[str, Set[str]]] = []
+    for source in aws.call(SERVICE, "list-input-sources", region, service_arn=service_arn).get("inputSourceSummaries", []):
+        if source.get("type") == "TAGS":
+            scope.extend((tag["key"], set(tag["values"])) for tag in source.get("resourceTags", []))
+    return scope
+
+
+def alarm_tags(aws: AwsCli, region: str, alarm_arn: str) -> Dict[str, str]:
+    """The tags on a CloudWatch alarm."""
+    tags = aws.call("cloudwatch", "list-tags-for-resource", region, resource_arn=alarm_arn).get("Tags", [])
+    return {tag["Key"]: tag["Value"] for tag in tags}

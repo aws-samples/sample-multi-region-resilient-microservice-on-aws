@@ -47,7 +47,7 @@ class TestCreate:
         (test_id,) = fake.tests
         assert sorted(fake.sources[test_id]) == DESIRED_SOURCES
         assert write_operations(fake) == ["create-test", "put-test-sources"]
-        assert lines == [f"{NAME}: created test {test_id}; sources +5 -0"]
+        assert lines == [f"{NAME}: created test {test_id}; sources +{len(SUCCESS) + len(OBSERVABILITY)} -0"]
         assert plans[0].action == "create"
 
     def test_the_sources_are_written_in_the_shape_the_api_takes(self):
@@ -55,8 +55,8 @@ class TestCreate:
         run_reconcile(fake)
         (put,) = fake.calls_of("put-test-sources")
         assert {"successCriteriaAlarm": {"alarmArn": alarm_arn(SUCCESS[0])}} in put["test_sources"]
-        assert {"observabilityAlarm": {"alarmArn": alarm_arn(OBSERVABILITY[2])}} in put["test_sources"]
-        assert len(put["test_sources"]) == 5
+        assert {"observabilityAlarm": {"alarmArn": alarm_arn(OBSERVABILITY[-1])}} in put["test_sources"]
+        assert len(put["test_sources"]) == len(SUCCESS) + len(OBSERVABILITY)
 
     def test_the_broker_host_comes_from_the_brokers_own_endpoint(self):
         fake = deployed_fake()
@@ -194,11 +194,11 @@ class TestNothingIsWrittenWhenSomethingIsWrong:
     def test_an_alarm_that_does_not_exist_is_named_with_its_region(self):
         fake = deployed_fake()
         del fake.alarms[(STANDBY, f"region-degraded-{STANDBY}{ENV}")]
-        del fake.alarms[(PRIMARY, OBSERVABILITY[2])]
+        del fake.alarms[(PRIMARY, OBSERVABILITY[-1])]
         with pytest.raises(context.ContextError) as e:
             run_reconcile(fake)
         assert sorted(e.value.problems) == [
-            f"alarm {OBSERVABILITY[2]} does not exist in {PRIMARY}",
+            f"alarm {OBSERVABILITY[-1]} does not exist in {PRIMARY}",
             f"alarm region-degraded-{STANDBY}{ENV} does not exist in {STANDBY}",
         ]
         assert fake.writes() == []
@@ -232,7 +232,7 @@ class TestNothingIsWrittenWhenSomethingIsWrong:
         fake = deployed_fake()
         plans, lines = run_reconcile(fake, write=False)
         assert fake.writes() == []
-        assert plans[0].action == "create" and lines == [f"{NAME}: to create; sources +5 -0"]
+        assert plans[0].action == "create" and lines == [f"{NAME}: to create; sources +{len(SUCCESS) + len(OBSERVABILITY)} -0"]
 
 
 # --- delete-tests ---------------------------------------------------------------------------------
@@ -335,11 +335,11 @@ class TestCommandLine:
 
     def test_every_problem_is_printed_to_stderr(self, capsys):
         fake = deployed_fake()
-        del fake.alarms[(PRIMARY, OBSERVABILITY[2])]
+        del fake.alarms[(PRIMARY, OBSERVABILITY[-1])]
         del fake.alarms[(PRIMARY, SUCCESS[0])]
         assert cli.main(["reconcile", *ARGS], aws=fake) == cli.EXIT_ERROR
         err = capsys.readouterr().err
-        assert SUCCESS[0] in err and OBSERVABILITY[2] in err
+        assert SUCCESS[0] in err and OBSERVABILITY[-1] in err
 
     def test_an_api_error_is_a_message_not_a_traceback(self, capsys):
         fake = deployed_fake()

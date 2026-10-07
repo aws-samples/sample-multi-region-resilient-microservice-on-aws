@@ -407,7 +407,7 @@ class TestReport:
         assert (data["expected"], data["observed"], data["matches"]) == ("FAIL", "FAIL", True)
         assert data["testRun"]["status"] == "FAILED" and data["testRun"]["parameters"]["duration"] == ["15"]
         assert [e["eventType"] for e in data["events"]] == ["TEST_RUN_STARTED", "TEST_RUN_FAILED"]
-        assert len(data["sources"]) == 5 and set(data["sourceEvents"]) == set(alarm_arn(n) for n in SUCCESS + OBSERVABILITY)
+        assert len(data["sources"]) == len(SUCCESS + OBSERVABILITY) and set(data["sourceEvents"]) == set(alarm_arn(n) for n in SUCCESS + OBSERVABILITY)
         assert data["resolvedTargets"][0]["targetName"] == "orders-task-1"
         assert data["dependencies"][0]["dnsName"] == "b-3d43.mq.us-east-1.on.aws"
         assert data["experiments"][0]["experiment"]["state"]["status"] == "completed"

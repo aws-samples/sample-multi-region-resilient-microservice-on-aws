@@ -21,7 +21,11 @@ A run that ends `ERROR` or `STOPPED` is neither: the test did not finish, and th
 broker in us-east-1. The broker host is read from the broker's own endpoint (`OrdersMqBroker`), so the name
 follows each deployment. The success alarms are the orders journeys from us-east-1 (`journey-lcl-orders` and
 `journey-global-orders`), which enter through ui. `region-degraded` for us-east-1 stops the run early if any of
-that Region's local journeys fails for long enough.
+that Region's local journeys fails for long enough. The observability alarms are `hop-orders-slow` and
+`orders-created-zero`. `hop-checkout-errors` would say more about the blast radius, but it is tagged checkout,
+and Resilience Hub takes only alarms it discovered for the service as test sources, which for orders means the
+tags orders and shared. It is in the report's evidence instead (the ten hop alarms are), and preflight refuses
+a source outside the service's tags before the run starts.
 
 Expected result: FAIL
 
@@ -32,9 +36,9 @@ up to 60 seconds. Checkout's call to orders reaches the 3-second Service Connect
 an error and ui serves an error page inside the canary's 30-second run. The order itself was saved before the
 publish, so `orders-created-zero` stays `OK`.
 
-**What confirms it:** `hop-orders-slow` and `hop-checkout-errors` go to `ALARM` while `orders-created-zero` stays
-`OK`, and the orders journeys fail. The report lays the alarms out by hop, so the first alarm to fire shows where
-the time went.
+**What confirms it:** `hop-orders-slow` goes to `ALARM` while `orders-created-zero` stays `OK`, and the orders
+journeys fail. In the report's evidence, `hop-checkout-errors` fires as well. The report lays the alarms out by
+hop, so the first alarm to fire shows where the time went.
 
 **What would contradict it:** the journeys stay `OK` (the publish does not block as inferred), or
 `orders-created-zero` fires (orders are not being saved, which points at the database rather than the broker).

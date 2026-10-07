@@ -22,7 +22,9 @@ TEMPLATE = "aws-dependency-validation:rtdep001"
 NAME = "orders-broker-dependency"
 
 SUCCESS = [f"journey-lcl-orders-{PRIMARY}{ENV}", f"journey-global-orders-{PRIMARY}{ENV}"]
-OBSERVABILITY = [f"hop-orders-slow-{PRIMARY}{ENV}", f"hop-checkout-errors-{PRIMARY}{ENV}", f"orders-created-zero-{PRIMARY}{ENV}"]
+# Only alarms tagged for orders or shared can be sources of an orders test: hop-checkout-errors is tagged checkout,
+# so it is evidence (one of the ten HOPS) and not a source.
+OBSERVABILITY = [f"hop-orders-slow-{PRIMARY}{ENV}", f"orders-created-zero-{PRIMARY}{ENV}"]
 HOPS = [f"hop-{s}-{k}-{PRIMARY}{ENV}" for s in ("ui", "catalog", "carts", "checkout", "orders") for k in ("errors", "slow")]
 STOP = f"region-degraded-{PRIMARY}{ENV}"
 PEER_DEGRADED = f"region-degraded-{STANDBY}{ENV}"

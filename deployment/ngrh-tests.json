@@ -16,7 +16,6 @@
       ],
       "observabilityAlarms": [
         {"name": "hop-orders-slow", "region": "primary"},
-        {"name": "hop-checkout-errors", "region": "primary"},
         {"name": "orders-created-zero", "region": "primary"}
       ],
       "stopAlarms": [

@@ -270,6 +270,32 @@ class TestSpecAgainstTemplates:
                     if name.endswith("Service") and r["Type"] == "AWS::ResilienceHubV2::Service"}
         assert declared == set(spec.SERVICES)
 
+    def test_every_source_alarm_carries_a_tag_its_service_discovers(self):
+        # Resilience Hub takes only the alarms it discovered for a service as that service's test sources,
+        # and discovers them by the service's tag input sources (ngrh.yaml). On 2026-10-07 StartTestRun
+        # refused the orders test because hop-checkout-errors, tagged checkout, was one of its sources;
+        # the report shows that alarm as evidence instead. An alarm with no tag of its own carries the
+        # monitoring stack's, service=shared (test_ngrh_tag_discovery pins the Makefile passing it).
+        scope = {}
+        for name, resource in _template("ngrh.yaml")["Resources"].items():
+            if resource["Type"] == "AWS::ResilienceHubV2::Service":
+                filters = [(tag["Key"], set(tag["Values"]))
+                           for source in resource["Properties"]["InputSources"]
+                           for tag in source["ResourceConfiguration"]["ResourceTags"]]
+                scope[name[: -len("Service")].lower()] = filters
+        alarm_tags = {}
+        for resource in _template("monitoring.yml")["Resources"].values():
+            if resource["Type"] in ("AWS::CloudWatch::Alarm", "AWS::CloudWatch::CompositeAlarm"):
+                base = resource["Properties"]["AlarmName"]["!Sub"][: -len("-${AWS::Region}${Env}")]
+                alarm_tags[base] = {"service": "shared",
+                                    **{t["Key"]: t["Value"] for t in resource["Properties"].get("Tags", [])}}
+        for test in spec.load(str(SPEC_FILE)).tests:
+            for alarm in test.success_alarms + test.observability_alarms:
+                tags = alarm_tags[alarm.name]
+                assert any(tags.get(key) in values for key, values in scope[test.service]), (
+                    f"{test.name}: source alarm {alarm.name} is tagged {tags}, which service {test.service} does not "
+                    f"discover ({scope[test.service]}); StartTestRun would refuse the run. Move it to the evidence alarms")
+
     def test_the_fault_region_parameter_of_every_template_is_one_it_takes(self):
         for template, shape in spec.TEMPLATES.items():
             assert shape.fault_region in shape.parameters and shape.fault_region in shape.required, template
