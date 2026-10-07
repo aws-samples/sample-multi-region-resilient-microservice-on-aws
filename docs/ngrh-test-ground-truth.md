@@ -44,12 +44,17 @@ publish, so `orders-created-zero` stays `OK`.
 
 **What confirms it:** `hop-orders-slow` goes to `ALARM` while `orders-created-zero` stays `OK`, and the orders
 journeys fail. In the report's evidence, `hop-checkout-errors` fires as well. The report lays the alarms out by
-hop, so the first alarm to fire shows where the time went.
+hop. The order in which they fire does not show where the time went: in the run of 2026-10-07 the ui alarms fired
+first, orders' next and checkout's last, all after the fault had already stopped (see Runs).
 
 **What would contradict it:** the journeys stay `OK` (the publish does not block as inferred), or
 `orders-created-zero` fires (orders are not being saved, which points at the database rather than the broker).
 
-**Confidence:** inferred from the code and the library's defaults; no run has confirmed it.
+**Confidence:** confirmed by one run, `bea5d9f4` on 2026-10-07 (see Runs): the journeys failed, the hop alarms of
+ui, orders and checkout fired, `orders-created-zero` stayed `OK`, and orders' own log shows the publish blocked on
+the request thread. Not seen: the full 15 minutes. The stop condition ended the run 5 minutes 55 seconds after the
+fault began, 40 seconds after the first journey alarm, so this run does not say how long the journeys would have
+stayed down, or whether Resilience Hub would have ended it `FAILED` without the stop condition.
 
 **After step 9 of the implementation plan** the publish is off the request path and bounded (its own executor, a
 2-second connection timeout, a full queue drops the event with a warning), and the expected result becomes
@@ -57,7 +62,7 @@ PASS. Step 9 changes the spec and this page in one commit.
 
 ## Runs
 
-No run has reached a verdict yet. Three attempts, on the first deployment this ran on:
+Four attempts so far, on the first deployment this ran on. The last is the only one that reached a verdict.
 
 - **2026-10-06 and 2026-10-07, `orders-broker-dependency`: refused twice before it started.** `StartTestRun`
   answered "alarms not discovered for this service". A source alarm, `hop-checkout-errors`, is tagged checkout,
@@ -70,3 +75,21 @@ No run has reached a verdict yet. Three attempts, on the first deployment this r
   of the report called this the expected FAIL. It is INCONCLUSIVE now, preflight refuses a run whose service has
   a running task that is not registered with SSM, and the repave rebuilds the sidecar image and checks its tools
   before it replaces the one the tasks pull.
+- **2026-10-07, `orders-broker-dependency`, run `bea5d9f4`: the first verdict, `FAILED` as expected, after 6 minutes
+  40 seconds.** Both orders tasks in us-east-1 were registered with SSM (the sidecar image was rebuilt and the
+  services rolled first). Times are UTC:
+  - 17:50:02 the packet-loss action started on both tasks, blocking the broker's host name.
+  - 17:54:11 the first `Connect timed out` in orders' log, from `OrdersEventHandler.onOrderCreated` through
+    `RabbitTemplate.convertAndSend`, after `Created Order` for that request: the publish, on the request thread,
+    as inferred. The orders canaries failed from 17:53.
+  - 17:55:17 `journey-global-orders` went to `ALARM`; 17:55:56 `journey-lcl-orders` and `region-degraded` for
+    us-east-1 did; 17:55:57 FIS halted the experiment on the stop condition; the run ended 17:56:26 with
+    "Experiment halted by stop condition."
+  - After the fault had stopped, the hop alarms fired: ui 17:57:30 and 17:57:39, orders 17:58:51 and 17:58:54,
+    checkout 17:59:40 and 17:59:53. All had cleared by 18:04. The journey alarms were `OK` again at 17:58:17 and
+    17:58:56. `orders-created-zero`, carts, catalog and everything in us-west-2 did not change.
+  - FIS delivered its log to `/aws/fis/ngrh-tests-dev` (start, target resolution, action and end events), and the
+    SSM commands behind the action all ended `Success` or `Cancelled`, none left running.
+  - The report written when the run ended missed all the hop alarms, which changed after it. `make ngrh-test` now
+    waits ten minutes after the run (`SETTLE_WAIT`) before it writes the report, and a report written earlier says
+    that it is early.
