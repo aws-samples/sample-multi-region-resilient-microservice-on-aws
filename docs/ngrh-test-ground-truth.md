@@ -33,32 +33,40 @@ and Resilience Hub takes only alarms it discovered for the service as test sourc
 tags orders and shared. It is in the report's evidence instead (the ten hop alarms are), and preflight refuses
 a source outside the service's tags before the run starts.
 
-Expected result: FAIL
+Expected result: PASS
 
-**Why, while orders publishes on the request thread:** `OrdersEventHandler` publishes the order-created event to
-the broker after the order is committed, on the thread that is answering checkout's call. Once the open
-connection to the broker is cut, the next publish has to reconnect, and the library's defaults let that block for
-up to 60 seconds. Checkout's call to orders reaches the 3-second Service Connect limit first, so checkout returns
-an error and ui serves an error page inside the canary's 30-second run. The order itself was saved before the
-publish, so `orders-created-zero` stays `OK`.
+**Why:** orders publishes the order-created event off the request path. `OrdersEventHandler` still reacts to the
+commit of the order, but it only queues the event for a pool of two threads (a queue of 100 behind them) and
+returns. Checkout's call to orders therefore never waits on the broker, and the orders journeys stay `OK`. A pool
+thread that can't open a connection gives up after 2 seconds (`spring.rabbitmq.connection-timeout`). Events that
+can't be sent are lost: a failed publish is logged and not retried, and an event that finds the queue full is
+dropped with a warning that names the order. Nothing in the sample consumes these events, and the order itself is
+saved either way. `orders-created-zero` is counted inside orders, in a listener that stays on the request thread,
+so it stays `OK` too.
 
-**What confirms it:** `hop-orders-slow` goes to `ALARM` while `orders-created-zero` stays `OK`, and the orders
-journeys fail. In the report's evidence, `hop-checkout-errors` fires as well. The report lays the alarms out by
-hop. The order in which they fire does not show where the time went: in the run of 2026-10-07 the ui alarms fired
-first, orders' next and checkout's last, all after the fault had already stopped (see Runs).
+**What confirms it:** the run ends `PASSED`. The journey alarms, `hop-orders-slow`, `orders-created-zero` and
+the hop alarms of ui and checkout all stay `OK` for the whole fault and the recovery window. Orders' log shows
+the fault at work: `Could not publish the order-created event for order <id>: SocketTimeoutException: Connect timed
+out` from the pool threads, and `Dropped the order-created event ... the publish queue is full` only if more than
+about 100 events pile up.
 
-**What would contradict it:** the journeys stay `OK` (the publish does not block as inferred), or
-`orders-created-zero` fires (orders are not being saved, which points at the database rather than the broker).
+**What would contradict it:** a journey alarm or `hop-orders-slow` goes to `ALARM`. Then something on the request
+path still waits for the broker, or the orders tasks still run an image from before this change (check the task
+definition's image tag). The report lays the alarms out by hop, but the order in which they fire does not show
+where the time went: in the run of 2026-10-07 the ui alarms fired first, orders' next and checkout's last, all after
+the fault had already stopped (see Runs).
 
-**Confidence:** confirmed by one run, `bea5d9f4` on 2026-10-07 (see Runs): the journeys failed, the hop alarms of
-ui, orders and checkout fired, `orders-created-zero` stayed `OK`, and orders' own log shows the publish blocked on
-the request thread. Not seen: the full 15 minutes. The stop condition ended the run 5 minutes 55 seconds after the
-fault began, 40 seconds after the first journey alarm, so this run does not say how long the journeys would have
-stayed down, or whether Resilience Hub would have ended it `FAILED` without the stop condition.
+**Confidence:** the code and its tests, not a run. JUnit tests create orders through the real service while a
+broker throws or never answers, and assert that the order commits, returns within 3 seconds and is counted. The
+first run against the new image has not happened yet; when it has, this page says what it showed.
 
-**After step 9 of the implementation plan** the publish is off the request path and bounded (its own executor, a
-2-second connection timeout, a full queue drops the event with a warning), and the expected result becomes
-PASS. Step 9 changes the spec and this page in one commit.
+**Before the publish was best-effort** the expected result was `FAIL`, and run `bea5d9f4` of 2026-10-07 confirmed
+it. The publish ran on the thread answering checkout's call. Once the open connection to the broker was cut, the
+next publish had to reconnect, which can block for up to 60 seconds with the client library's defaults. Checkout's
+call to orders reached the 3-second Service Connect limit first, checkout returned an error, ui served an error
+page inside the canary's 30-second run, and `orders-created-zero` stayed `OK` because the order was saved first.
+If the journeys fail again with the broker cut, compare with this: it is the signature of a publish back on the
+request path. The run's timeline is under Runs.
 
 ## Runs
 
@@ -75,8 +83,9 @@ Four attempts so far, on the first deployment this ran on. The last is the only 
   of the report called this the expected FAIL. It is INCONCLUSIVE now, preflight refuses a run whose service has
   a running task that is not registered with SSM, and the repave rebuilds the sidecar image and checks its tools
   before it replaces the one the tasks pull.
-- **2026-10-07, `orders-broker-dependency`, run `bea5d9f4`: the first verdict, `FAILED` as expected, after 6 minutes
-  40 seconds.** Both orders tasks in us-east-1 were registered with SSM (the sidecar image was rebuilt and the
+- **2026-10-07, `orders-broker-dependency`, run `bea5d9f4`: the first verdict, `FAILED`, after 6 minutes 40
+  seconds. It was the result expected then (the publish was still on the request thread), and it is the reason
+  the expectation is now `PASS`.** Both orders tasks in us-east-1 were registered with SSM (the sidecar image was rebuilt and the
   services rolled first). Times are UTC:
   - 17:50:02 the packet-loss action started on both tasks, blocking the broker's host name.
   - 17:54:11 the first `Connect timed out` in orders' log, from `OrdersEventHandler.onOrderCreated` through

@@ -55,10 +55,11 @@ class TestShippedSpec:
         assert [a.name for a in test.stop_alarms] == ["region-degraded"]
         assert len(test.success_alarms) + len(test.observability_alarms) <= spec.MAX_SOURCES
 
-    def test_until_step_9_the_test_is_expected_to_fail(self):
-        # The order-created publish is best-effort only after step 9, so the dependency test
-        # fails until then; step 9 flips this and the ground-truth doc together.
-        assert spec.load(str(SPEC_FILE)).tests[0].expected == "FAIL"
+    def test_the_dependency_test_is_expected_to_pass_since_the_publish_is_best_effort(self):
+        # Before step 9 the order-created publish ran on the request thread, so cutting the broker failed
+        # the orders journeys (run bea5d9f4 of 2026-10-07 showed it). Step 9 moved it off the request path
+        # and flipped this and the ground-truth doc together.
+        assert spec.load(str(SPEC_FILE)).tests[0].expected == "PASS"
 
     def test_select_takes_one_test_or_all(self):
         parsed = spec.load(str(SPEC_FILE))

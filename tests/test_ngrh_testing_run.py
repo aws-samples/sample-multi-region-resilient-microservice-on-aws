@@ -47,8 +47,10 @@ def source_event(name, old, new, at):
 
 
 def ready_to_run():
-    """A reconciled deployment where the run will go INITIALIZING, RUNNING, FAILED, with the evidence a report shows."""
+    """A reconciled deployment where the run will go INITIALIZING, RUNNING, PASSED (the expected result), with the evidence of a
+    failing run that the report tests render."""
     fake = reconciled_fake()
+    fake.run_script = ["INITIALIZING", "RUNNING", "RUNNING", "PASSED"]   # what the spec expects of the dependency test
     fake.fis[PRIMARY].append({"id": "EXP111", "state": {"status": "completed", "reason": "Experiment completed"}})
     fake.run_events = [
         {"eventId": "e1", "eventType": "TEST_RUN_STARTED", "message": "Test run started", "timestamp": "2026-10-06T16:00:05+00:00"},
@@ -207,10 +209,10 @@ class TestRun:
         fake = ready_to_run()
         code, clock = run_cli(fake, tmp_path)
         out = capsys.readouterr().out
-        assert code == 0                                                      # FAILED is what the spec expects
+        assert code == 0                                                      # PASSED is what the spec expects
         assert "Started run run-0002 of orders-broker-dependency, INITIALIZING; waiting up to 35 min (the test's 15 min plus 20)." in out
-        assert [l.split(": ")[1].split(" after")[0] for l in out.splitlines() if " after " in l] == ["INITIALIZING", "RUNNING", "FAILED"]
-        assert "orders-broker-dependency: FAILED. Expected FAIL, observed FAIL: as expected." in out
+        assert [l.split(": ")[1].split(" after")[0] for l in out.splitlines() if " after " in l] == ["INITIALIZING", "RUNNING", "PASSED"]
+        assert "orders-broker-dependency: PASSED. Expected PASS, observed PASS: as expected." in out
         assert clock.now == 90                                                # three polls apart, 30 s each
         (started,) = fake.calls_of("start-test-run")
         (test_id,) = fake.tests
@@ -229,10 +231,10 @@ class TestRun:
 
     def test_a_verdict_other_than_the_one_expected_exits_3(self, tmp_path, capsys):
         fake = ready_to_run()
-        fake.run_script = ["RUNNING", "PASSED"]
+        fake.run_script = ["RUNNING", "FAILED"]
         code, _ = run_cli(fake, tmp_path)
         assert code == cli.EXIT_FOUND
-        assert "Expected FAIL, observed PASS: NOT as expected." in capsys.readouterr().out
+        assert "Expected PASS, observed FAIL: NOT as expected." in capsys.readouterr().out
 
     @pytest.mark.parametrize("status", ["ERROR", "STOPPED"])
     def test_a_run_that_did_not_finish_is_not_a_verdict(self, tmp_path, capsys, status):
@@ -407,7 +409,7 @@ class TestReport:
         fake = ready_to_run()
         data = collected(fake)
         assert (data["test"], data["service"], data["template"]) == (NAME, "orders", TEMPLATE)
-        assert (data["expected"], data["observed"], data["matches"]) == ("FAIL", "FAIL", True)
+        assert (data["expected"], data["observed"], data["matches"]) == ("PASS", "FAIL", False)
         assert data["testRun"]["status"] == "FAILED" and data["testRun"]["parameters"]["duration"] == ["15"]
         assert [e["eventType"] for e in data["events"]] == ["TEST_RUN_STARTED", "TEST_RUN_FAILED"]
         assert len(data["sources"]) == len(SUCCESS + OBSERVABILITY) and set(data["sourceEvents"]) == set(alarm_arn(n) for n in SUCCESS + OBSERVABILITY)
@@ -441,7 +443,7 @@ class TestReport:
         text = report.render(collected(ready_to_run()), "ngrh-invoker-t")
         lines = text.splitlines()
         assert lines[0] == "# orders-broker-dependency: FAILED"
-        assert lines[2] == "Expected FAIL, observed FAIL: as expected."
+        assert lines[2] == "Expected PASS, observed FAIL: NOT as expected."
         assert "| journey-lcl-orders-us-east-1-t | success | FAILED | alarm went to ALARM |" in text
         assert "| hop-orders-slow-us-east-1-t | observability | - |  |" in text
         order = [text.index(h) for h in ("### Region health (us-west-2)", "### ui (us-east-1)", "### catalog (us-east-1)", "### carts (us-east-1)",
@@ -471,7 +473,7 @@ class TestReport:
         fake = ready_to_run()
         text = report.render(collected(fake, "ERROR"), "ngrh-invoker-t")
         assert "No error message came with the run." in text and "by role ngrh-invoker-t" in text and "CloudTrail" in text
-        assert "Expected FAIL, observed INCONCLUSIVE: NOT as expected." in text
+        assert "Expected PASS, observed INCONCLUSIVE: NOT as expected." in text
 
     def test_the_runs_own_error_message_is_shown(self):
         fake = ready_to_run()
@@ -567,6 +569,7 @@ def fault_refused(fake, run_error=SSM_RUN_ERROR, experiment=True, event=True):
     fake.run_events.append({"eventId": "end", "eventType": "test_run_ended", "message": "Test run completed with result: failure",
                             "timestamp": "2026-10-06T16:01:00+00:00", "attributes": {"result": "failure", "status": "failed"}})
     fake.run_error = run_error
+    fake.run_script = ["INITIALIZING", "RUNNING", "FAILED"]   # Resilience Hub ended the real run FAILED too
     return fake
 
 
@@ -603,7 +606,7 @@ class TestAFaultThatNeverRan:
         fake = ready_to_run()
         fake.fis[PRIMARY][0]["state"] = {"status": "stopped", "reason": "Stop condition triggered"}
         data = collected(fake)
-        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("FAIL", True, None)
+        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("FAIL", False, None)
 
     def test_a_run_the_sample_failed_keeps_its_verdict(self):
         fake = ready_to_run()
@@ -611,7 +614,7 @@ class TestAFaultThatNeverRan:
                            {"eventId": "end", "eventType": "test_run_ended", "message": "Test run completed with result: failure",
                             "timestamp": "2026-10-06T16:04:00+00:00", "attributes": {"result": "failure", "status": "failed"}}]
         data = collected(fake)
-        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("FAIL", True, None)
+        assert (data["observed"], data["matches"], data["faultNotRun"]) == ("FAIL", False, None)
 
     @pytest.mark.parametrize("status", ["ERROR", "STOPPED"])
     def test_a_run_that_did_not_finish_stays_inconclusive_for_its_own_reason(self, status):
@@ -622,7 +625,7 @@ class TestAFaultThatNeverRan:
         text = report.render(collected(fault_refused(ready_to_run())), "ngrh-invoker-t")
         lines = text.splitlines()
         assert lines[0] == "# orders-broker-dependency: INCONCLUSIVE, the fault did not run"
-        assert lines[2] == "Expected FAIL, observed INCONCLUSIVE: NOT as expected."
+        assert lines[2] == "Expected PASS, observed INCONCLUSIVE: NOT as expected."
         assert f"Resilience Hub ended the run FAILED, but the fault never ran, so nothing was done to the application and this says nothing about it: {SSM_RUN_ERROR}" in text
         assert "amazon-ssm-agent sidecar registers" in text and "aws ssm describe-instance-information" in text
         assert "The run reported an error" not in text and "No error message came" not in text
@@ -656,7 +659,7 @@ class TestAFaultThatNeverRan:
         code, _ = run_cli(fake, tmp_path)
         out = capsys.readouterr().out
         assert code == cli.EXIT_FOUND
-        assert "orders-broker-dependency: FAILED. Expected FAIL, observed INCONCLUSIVE: NOT as expected." in out
+        assert "orders-broker-dependency: FAILED. Expected PASS, observed INCONCLUSIVE: NOT as expected." in out
         assert f"The fault did not run, so this is not a verdict on the application: {SSM_RUN_ERROR}" in out
         data = json.loads(next(tmp_path.glob("*.json")).read_text())
         assert (data["observed"], data["matches"], data["faultNotRun"]) == ("INCONCLUSIVE", False, SSM_RUN_ERROR)
@@ -708,9 +711,9 @@ class TestTheEvidenceWindow:
         assert data["evidenceComplete"] is False
 
     def test_an_early_report_says_so_before_anything_else(self):
-        text = report.render(collected_at(ready_to_run(), ENDED + timedelta(seconds=17)))
+        text = report.render(collected_at(ready_to_run(), ENDED + timedelta(seconds=17), "PASSED"))
         lines = text.splitlines()
-        assert lines[0] == "# orders-broker-dependency: FAILED" and lines[2] == "Expected FAIL, observed FAIL: as expected."
+        assert lines[0] == "# orders-broker-dependency: PASSED" and lines[2] == "Expected PASS, observed PASS: as expected."
         notice = next(l for l in lines if l.startswith("**This report is early.**"))
         assert "read until 2026-10-06T16:30:00Z" in notice and "written at 2026-10-06T16:20:17Z" in notice
         assert f"make ngrh-test-report TEST={NAME} RUN=run-0002" in notice
@@ -768,7 +771,7 @@ class TestTheEvidenceWindow:
         out = capsys.readouterr().out
         assert code == 0 and clock.now == 90 + 600                          # three polls, then the window
         assert "The run ended. Waiting 10 min for the alarms' recovery to show before the report is written" in out
-        assert out.index("FAILED after") < out.index("Waiting 10 min") < out.index("Expected FAIL, observed FAIL")
+        assert out.index("PASSED after") < out.index("Waiting 10 min") < out.index("Expected PASS, observed PASS")
 
     def test_the_report_is_collected_after_the_wait_not_before(self, tmp_path, monkeypatch):
         fake = ready_to_run()

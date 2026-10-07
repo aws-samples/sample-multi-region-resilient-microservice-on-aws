@@ -27,7 +27,7 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 
 6. The checkout service uses Amazon ElastiCache for Redis for temporarily caching the contents of the cart until the order is placed.
 
-7. The orders service leverages Amazon RabbitMQ broker to publish order creation events for any downstream consumption purposes.
+7. The orders service leverages Amazon RabbitMQ broker to publish order creation events for any downstream consumption purposes. The publish is best effort and runs off the request path, on a small bounded pool: with the broker down, orders are still saved and answered in time, and the events that can't be sent are logged and dropped.
 
 8. Amazon CloudWatch Synthetics from each region sends requests to the application in each region via the ALB’s address and to the DNS name resolved through Route53 and pushes the metrics, logs and traces to CloudWatch.
 
