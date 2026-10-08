@@ -4,8 +4,9 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Self-update automation for long-lived installs. Weekly EventBridge Scheduler
   triggers a CodeBuild repave: clone main, rebuild all service images (fresh
-  base layers + current dependencies), re-mirror observability sidecars, then
-  roll out - a CloudFormation Tag update when the commit changed, or a forced
+  base layers + current dependencies), re-mirror observability sidecars,
+  rebuild the FIS fault-injection sidecar image, then roll out - a
+  CloudFormation Tag update when the commit changed, or a forced
   ECS deployment when only base layers moved. Combined with the ECR lifecycle
   policies, superseded vulnerable images are expired and their Inspector
   findings auto-close without operator intervention.
@@ -118,12 +119,33 @@ Resources:
                 # These ECS actions do not support resource-level permissions
                 # and require Resource '*' (see checkov skip CKV_AWS_111 above).
                 Resource: '*'
+              # The apps template tags its task definitions (service=<name>, for
+              # Resilience Hub tag discovery), so every revision CloudFormation
+              # registers during a repave is tagged as it is created, and ECS
+              # authorizes that as ecs:TagResource. Without this grant both
+              # Regions' repave updates rolled back (test2, 2026-10-05). The
+              # condition limits it to tagging at registration.
+              - Effect: Allow
+                Action: ecs:TagResource
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task-definition/apps${Env}-*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task-definition/apps${Env}-*'
+                Condition:
+                  StringEquals:
+                    ecs:CreateAction: RegisterTaskDefinition
               - Effect: Allow
                 Action: iam:PassRole
                 Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/*${Env}*'
                 Condition:
                   StringEquals:
                     iam:PassedToService: ecs-tasks.amazonaws.com
+              # The task definitions name their roles by !GetAtt <Role>.Arn, and
+              # CloudFormation resolves that by reading the role with the CALLER's
+              # permissions. Without this grant both Regions' repave updates
+              # rolled back on every task definition (test2, 2026-10-06).
+              - Effect: Allow
+                Action: iam:GetRole
+                Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/apps${Env}-*'
               - Effect: Allow
                 Action:
                   - ssm:GetParameter
@@ -267,10 +289,20 @@ Resources:
                       docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${SVC}${ENV_SUFFIX}:$TAG
                     done
                   done
-                # 2. Re-mirror observability sidecars at the pinned versions
+                # 2. Re-mirror observability sidecars at the pinned versions.
+                #    The sidecar buildspec also names the FIS sidecar's base image, in the
+                #    FROM line of the Dockerfile it writes. That image is built (step 3), not
+                #    mirrored: copying the bare base over the baked image left every task
+                #    started afterwards with a sidecar that exited 127 for want of aws and ps,
+                #    so no task registered with SSM and Resilience Hub's ECS faults found no
+                #    target (the repave of 2026-10-06 02:03Z did it; seen 2026-10-07).
+                #    The list is read into a variable, where set -e sees a failure, and an
+                #    empty list fails the build instead of mirroring nothing.
                 - |
                   set -e
-                  for ENTRY in $(grep -oE 'public\.ecr\.aws/[a-z-]+/[a-z-]+:[a-zA-Z0-9.]+' deployment/mirror-sidecar-buildspec.yml | sort -u); do
+                  IMAGES=$(grep -v 'echo "FROM ' deployment/mirror-sidecar-buildspec.yml | grep -oE 'public\.ecr\.aws/[a-z-]+/[a-z-]+:[a-zA-Z0-9.]+' | sort -u)
+                  test -n "$IMAGES"
+                  for ENTRY in $IMAGES; do
                     NAME=$(basename ${ENTRY%%:*}); TAG_VAL=${ENTRY##*:}
                     docker pull $ENTRY
                     for R in $PRIMARY_REGION $STANDBY_REGION; do
@@ -278,9 +310,26 @@ Resources:
                       docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${NAME}${ENV_SUFFIX}:$TAG_VAL
                     done
                   done
+                # 3. Rebuild the FIS sidecar image from its Dockerfile (fresh base layers and
+                #    packages, as in step 1). The task subnets have no internet route, so the
+                #    tools the sidecar and the FIS fault documents run are baked in. Each is
+                #    checked in the built image BEFORE it replaces the one the tasks pull:
+                #    a failed check ends the build here, and the services keep the image they
+                #    run. The Dockerfile goes in on stdin, so no build context is sent.
+                - |
+                  set -e
+                  docker build --pull -t amazon-ssm-agent:$TAG - < deployment/ssm-agent-sidecar.Dockerfile
+                  for TOOL in jq ps aws curl setsid at atd dig lsof pgrep tc python3; do
+                    docker run --rm --entrypoint /bin/sh amazon-ssm-agent:$TAG -c "command -v $TOOL" > /dev/null
+                  done
+                  docker run --rm --entrypoint /bin/sh amazon-ssm-agent:$TAG -c 'python3 -c "import requests"'
+                  for R in $PRIMARY_REGION $STANDBY_REGION; do
+                    docker tag amazon-ssm-agent:$TAG $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/amazon-ssm-agent${ENV_SUFFIX}:latest
+                    docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/amazon-ssm-agent${ENV_SUFFIX}:latest
+                  done
             post_build:
               commands:
-                # 3. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise.
+                # 4. Roll out: CFN Tag update when commit changed, forced ECS deployment otherwise.
                 # set -e: any rollout failure MUST fail the build -- without it a denied
                 # UpdateStack is swallowed by the loop and CodeBuild reports SUCCEEDED
                 # while services keep running the old images (observed 2026-08-16).
@@ -296,21 +345,50 @@ Resources:
                   for R in $PRIMARY_REGION $STANDBY_REGION; do
                     CURRENT=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query "Stacks[0].Parameters[?ParameterKey=='Tag'].ParameterValue" --output text)
                     if [ "$CURRENT" != "$TAG" ]; then
-                      echo "$R: updating apps${ENV_SUFFIX} Tag $CURRENT -> $TAG"
+                      # Every parameter except Tag keeps its current value, and the
+                      # list of them comes from the live stack, not from this
+                      # buildspec. UpdateStack resets a parameter left off the list
+                      # to its template default (Env would fall back to '' and
+                      # rename every resource), refuses one that has no default,
+                      # and rejects UsePreviousValue for a key the stack does not
+                      # have. The hard-coded list this replaces could not update an
+                      # apps stack deployed from ecs.yaml once it gained VpcId,
+                      # which has no default.
+                      # Read into a variable first, so a failed call fails the build:
+                      # set -e ignores a failed command substitution in a for-loop's
+                      # word list.
+                      KEYS=$(aws cloudformation describe-stacks --region $R --stack-name apps${ENV_SUFFIX} --query 'Stacks[0].Parameters[].ParameterKey' --output text)
+                      KEEP=""
+                      HAS_TAG=""
+                      for K in $KEYS; do
+                        if [ "$K" = Tag ]; then HAS_TAG=yes; else KEEP="$KEEP $K"; fi
+                      done
+                      # Tag is the one parameter every apps stack has. A list
+                      # without it is not this stack's list, so stop before an
+                      # update that would reset whatever it left out.
+                      if [ -z "$HAS_TAG" ]; then
+                        echo "$R: apps${ENV_SUFFIX} lists no Tag parameter (got: $KEYS); not updating it" >&2
+                        exit 1
+                      fi
+                      PARAMS="ParameterKey=Tag,ParameterValue=$TAG"
+                      for K in $KEEP; do PARAMS="$PARAMS ParameterKey=$K,UsePreviousValue=true"; done
+                      echo "$R: updating apps${ENV_SUFFIX} Tag $CURRENT -> $TAG, keeping$KEEP"
+                      # $PARAMS is unquoted on purpose: one word per parameter.
+                      # Parameter keys are alphanumeric and TAG is a commit hash.
                       aws cloudformation update-stack --region $R --stack-name apps${ENV_SUFFIX} \
                         --use-previous-template \
-                        --parameters ParameterKey=Tag,ParameterValue=$TAG \
-                          ParameterKey=Env,UsePreviousValue=true \
-                          ParameterKey=PrimaryRegion,UsePreviousValue=true \
-                          ParameterKey=StandbyRegion,UsePreviousValue=true \
-                          ParameterKey=KmsKey,UsePreviousValue=true \
+                        --parameters $PARAMS \
                         --capabilities CAPABILITY_NAMED_IAM
                       WAIT_REGIONS="$WAIT_REGIONS $R"
                       CFN_REGIONS="$CFN_REGIONS $R"
                     else
                       echo "$R: same commit - forcing new deployment to pick up rebuilt layers"
                       CL=$(aws ecs list-clusters --region $R --query 'clusterArns[0]' --output text)
-                      for S in $(aws ecs list-services --region $R --cluster $CL --query 'serviceArns[]' --output text); do
+                      # Into a variable for the same reason as KEYS: a failed listing
+                      # in the for-loop's word list would skip every forced
+                      # deployment and still let the build succeed.
+                      SERVICES=$(aws ecs list-services --region $R --cluster $CL --query 'serviceArns[]' --output text)
+                      for S in $SERVICES; do
                         aws ecs update-service --region $R --cluster $CL --service $S --force-new-deployment --query 'service.serviceName' --output text
                       done
                     fi

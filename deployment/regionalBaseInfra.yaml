@@ -212,6 +212,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: checkout
   CatalogRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -229,6 +232,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: catalog
   CartsRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -246,6 +252,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: cart
   AssetsRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -263,6 +272,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: assets
   OrdersRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -280,6 +292,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: orders
   UIRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -297,6 +312,9 @@ Resources:
       EncryptionConfiguration:
         EncryptionType: KMS
         KmsKey: !Ref KmsKey
+      Tags:
+        - Key: service
+          Value: ui
   CWAgentRepo:
     Type: AWS::ECR::Repository
     Metadata:
@@ -342,6 +360,27 @@ Resources:
       ImageScanningConfiguration:
         ScanOnPush: true
       RepositoryName: !Sub 'adot-autoinstrumentation-node${Env}'
+      ImageTagMutability: MUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 3 most recent tagged images","selection":{"tagStatus":"tagged","tagPatternList":["*"],"countType":"imageCountMoreThan","countNumber":3},"action":{"type":"expire"}}]}'
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref KmsKey
+  # The FIS fault-injection sidecar: the SSM agent image with the packages its
+  # start script and the FIS fault documents need baked in, built by
+  # mirror-sidecar-buildspec.yml. The task subnets have no internet route, so
+  # neither public.ecr.aws pulls nor package installs work from a task.
+  SsmAgentRepo:
+    Type: AWS::ECR::Repository
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_51
+            comment: "The mirror build re-pushes :latest on every run, so the tag must stay mutable."
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      RepositoryName: !Sub 'amazon-ssm-agent${Env}'
       ImageTagMutability: MUTABLE
       LifecyclePolicy:
         LifecyclePolicyText: '{"rules":[{"rulePriority":1,"description":"Expire untagged images after 1 day","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Keep only the 3 most recent tagged images","selection":{"tagStatus":"tagged","tagPatternList":["*"],"countType":"imageCountMoreThan","countNumber":3},"action":{"type":"expire"}}]}'

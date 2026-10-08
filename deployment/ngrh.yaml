@@ -2,14 +2,16 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Next-Gen Resilience Hub (ResilienceHubV2) model for the multi-region resilient
   microservice. Defines two resiliency policies (Tier-1 / Tier-2), one System,
-  four User Journeys, and six Services with CloudFormation-stack input sources
-  spanning both regions. The Browse/Catalog RPO compensating control is captured
-  as a Service Assertion. Assessment execution is imperative (see `make ngrh-assess`).
+  four User Journeys, and six Services. Each Service discovers its resources by
+  TAG (input source `service` in {<service-name>, shared}) rather than by
+  CloudFormation stack, so a service only sees the resources it actually uses
+  plus shared infrastructure. DependencyDiscovery stays ENABLED so each service
+  is registered as a traffic source and its dependency graph is expanded from the
+  tagged seed. Assessment execution is imperative (see `make ngrh-assess`).
 
 # ---------------------------------------------------------------------------
-# Parameters. Stack ARNs are resolved at deploy time by the `ngrh` Makefile
-# target (describe-stacks per region) so this template is portable across any
-# account/Env without hardcoded resource names.
+# Parameters. Resource discovery is tag-based (key "service"), so no per-stack
+# ARNs are required, so this template is portable across any account/Env.
 # ---------------------------------------------------------------------------
 Parameters:
   Env:
@@ -22,39 +24,6 @@ Parameters:
   StandbyRegion:
     Type: String
     Default: us-west-2
-  AppsArnPrimary:
-    Type: String
-    Description: StackId ARN of the apps (ECS) stack in the primary region
-  AppsArnStandby:
-    Type: String
-    Description: StackId ARN of the apps (ECS) stack in the standby region
-  CatalogDbArnPrimary:
-    Type: String
-  CatalogDbArnStandby:
-    Type: String
-  CartsDbArnPrimary:
-    Type: String
-    Description: >-
-      StackId ARN of the carts DynamoDB stack (primary region only — the
-      Global Table is defined once in primary and replicates to standby).
-  OrdersDsqlArnPrimary:
-    Type: String
-  OrdersDsqlArnStandby:
-    Type: String
-  GrArn:
-    Type: String
-    Description: StackId ARN of the global-routing (Route 53 / ARC) stack — primary region only (Route 53 is global)
-  CanariesArnPrimary:
-    Type: String
-  CanariesArnStandby:
-    Type: String
-  MonitoringArnPrimary:
-    Type: String
-  MonitoringArnStandby:
-    Type: String
-  RegionSwitchArn:
-    Type: String
-    Description: StackId ARN of the ARC Region Switch plan stack (failover/failback orchestration)
 
 Resources:
 
@@ -93,8 +62,13 @@ Resources:
             ExpiredObjectDeleteMarker: true
 
   # -------------------------------------------------------------------------
-  # Invoker role NGRH assumes to discover resources / run assessments.
-  # Trust resiliencehub.amazonaws.com, attach the managed execution policy.
+  # Invoker role NGRH assumes to discover resources, run assessments and run
+  # tests. The V2 assessment policy covers discovery and assessment reads.
+  # The resilience testing policy lets NGRH create, start, stop and read the
+  # FIS experiment behind each test run (tagged managedBy=resiliencehub),
+  # pass the test's experiment role to FIS, and read CloudWatch alarm history
+  # for the test's alarms. Without it every test run fails at
+  # fis:CreateExperimentTemplate.
   # -------------------------------------------------------------------------
   InvokerRole:
     Type: AWS::IAM::Role
@@ -107,8 +81,12 @@ Resources:
             Principal:
               Service: resiliencehub.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSResilienceHubV2AssessmentExecutionPolicy
+        - arn:aws:iam::aws:policy/AWSResilienceHubResilienceTestingPolicy
       Policies:
         # S3 write access for NGRH report output and design file reads.
         # All other read permissions (CFN, ARC, EC2, ECS, etc.) are covered
@@ -126,6 +104,249 @@ Resources:
                 Resource:
                   - !GetAtt NgrhBucket.Arn
                   - !Sub "${NgrhBucket.Arn}/*"
+
+  # -------------------------------------------------------------------------
+  # Experiment role for NGRH tests: choose it as the IAM role when creating a
+  # test. NGRH builds an FIS experiment from the test template and FIS
+  # assumes this role to inject the faults, so it carries the permissions
+  # the FIS actions reference lists for every action in the four NGRH test
+  # templates (AZ recovery, dependency validation, multi-Region isolation,
+  # multi-Region recovery). The four network actions use the AWS managed
+  # FIS network policy; the rest are below. SSM commands are limited to the
+  # FIS-provided AWSFIS-* documents. Faults on ECS tasks additionally need
+  # the FIS SSM agent sidecar and enableFaultInjection in the task definition.
+  # -------------------------------------------------------------------------
+  TestExperimentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "ngrh-test-experiment${Env}"
+      Description: FIS experiment role for Resilience Hub (NGRH) tests
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: fis.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:fis:*:${AWS::AccountId}:experiment/*"
+      ManagedPolicyArns:
+        # aws:network:disrupt-connectivity, route-table- and transit-gateway-
+        # disrupt-cross-region-connectivity; tag-scoped to managedByFIS.
+        - arn:aws:iam::aws:policy/service-role/AWSFaultInjectionSimulatorNetworkAccess
+      Policies:
+        - PolicyName: ngrh-test-faults
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # aws:ec2:stop-instances (AZ recovery)
+              - Sid: Ec2StopStartInstances
+                Effect: Allow
+                Action:
+                  - ec2:StopInstances
+                  - ec2:StartInstances
+                Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+              # Restart instances that have encrypted EBS volumes.
+              - Sid: Ec2EncryptedVolumeGrant
+                Effect: Allow
+                Action: kms:CreateGrant
+                Resource: !Sub "arn:${AWS::Partition}:kms:*:${AWS::AccountId}:key/*"
+                Condition:
+                  StringLike:
+                    kms:ViaService: ec2.*.amazonaws.com
+                  Bool:
+                    kms:GrantIsForAWSResource: "true"
+              # aws:ec2:api-/asg-insufficient-instance-capacity-error (AZ recovery).
+              # InjectApiError has no resource type, so it is scoped by action id.
+              - Sid: Ec2CapacityErrors
+                Effect: Allow
+                Action: ec2:InjectApiError
+                Resource: "*"
+                Condition:
+                  ForAnyValue:StringEquals:
+                    ec2:FisActionId:
+                      - aws:ec2:api-insufficient-instance-capacity-error
+                      - aws:ec2:asg-insufficient-instance-capacity-error
+              # aws:elasticache:replicationgroup-interrupt-az-power (AZ recovery)
+              - Sid: ElastiCacheAzPower
+                Effect: Allow
+                Action:
+                  - elasticache:InterruptClusterAzPower
+                  - elasticache:DescribeReplicationGroups
+                Resource: !Sub "arn:${AWS::Partition}:elasticache:*:${AWS::AccountId}:replicationgroup:*"
+              # aws:rds:failover-db-cluster (AZ recovery)
+              - Sid: RdsFailoverCluster
+                Effect: Allow
+                Action:
+                  - rds:FailoverDBCluster
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:*"
+                  - !Sub "arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:*"
+              # aws:arc:start-zonal-autoshift (AZ recovery). Load balancers are
+              # resources; Auto Scaling groups and EKS clusters are matched by
+              # the zonal shift resource identifier.
+              - Sid: ZonalShiftLoadBalancers
+                Effect: Allow
+                Action:
+                  - arc-zonal-shift:StartZonalShift
+                  - arc-zonal-shift:GetManagedResource
+                  - arc-zonal-shift:UpdateZonalShift
+                  - arc-zonal-shift:CancelZonalShift
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:elasticloadbalancing:*:${AWS::AccountId}:loadbalancer/app/*"
+                  - !Sub "arn:${AWS::Partition}:elasticloadbalancing:*:${AWS::AccountId}:loadbalancer/net/*"
+              - Sid: ZonalShiftAsgAndEks
+                Effect: Allow
+                Action:
+                  - arc-zonal-shift:StartZonalShift
+                  - arc-zonal-shift:GetManagedResource
+                  - arc-zonal-shift:UpdateZonalShift
+                  - arc-zonal-shift:CancelZonalShift
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    arc-zonal-shift:ResourceIdentifier:
+                      - !Sub "arn:${AWS::Partition}:autoscaling:*:${AWS::AccountId}:autoScalingGroup:*"
+                      - !Sub "arn:${AWS::Partition}:eks:*:${AWS::AccountId}:cluster/*"
+              # aws:ssm:send-command on EC2 instances, and the SSM commands FIS
+              # runs on ECS tasks registered by the FIS sidecar
+              # (aws:ecs:task-network-packet-loss). Only FIS-provided documents.
+              - Sid: SsmRunFisDocuments
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:*:*:document/AWSFIS-*"
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:instance/*"
+                  - !Sub "arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:managed-instance/*"
+              # ssm:CancelCommand has no resource type; FIS uses it to stop its
+              # own commands when an action ends or is stopped.
+              - Sid: SsmCancelCommands
+                Effect: Allow
+                Action: ssm:CancelCommand
+                Resource: "*"
+              # aws:ecs:task-network-packet-loss target lookup
+              - Sid: EcsTaskTargets
+                Effect: Allow
+                Action:
+                  - ecs:DescribeTasks
+                  - ecs:DescribeContainerInstances
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task/*/*"
+                  - !Sub "arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:container-instance/*/*"
+              # aws:eks:pod-network-packet-loss target lookup. The role also
+              # needs an EKS access entry in each cluster it targets.
+              - Sid: EksPodTargets
+                Effect: Allow
+                Action: eks:DescribeCluster
+                Resource: !Sub "arn:${AWS::Partition}:eks:*:${AWS::AccountId}:cluster/*"
+              # aws:network:disrupt-vpc-endpoint (multi-Region isolation): FIS
+              # swaps the endpoint's security groups for an empty one it creates.
+              - Sid: VpcEndpointIsolation
+                Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:ModifyVpcEndpoint
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc/*"
+                  - !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc-endpoint/*"
+              - Sid: VpcEndpointIsolationTags
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:security-group/*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction: CreateSecurityGroup
+              - Sid: VpcEndpointCrossRegion
+                Effect: Allow
+                Action: vpce:AllowMultiRegion
+                Resource: !Sub "arn:${AWS::Partition}:ec2:*:${AWS::AccountId}:vpc-endpoint/*"
+              # aws:s3:bucket-pause-replication (multi-Region isolation), limited
+              # to this account's buckets. Condition form follows the FIS
+              # example policy for this action.
+              - Sid: S3PauseReplication
+                Effect: Allow
+                Action: s3:PauseReplication
+                Resource: !Sub "arn:${AWS::Partition}:s3:::*"
+                Condition:
+                  StringEquals:
+                    s3:ResourceAccount: !Ref "AWS::AccountId"
+              - Sid: S3ReplicationConfigForPause
+                Effect: Allow
+                Action:
+                  - s3:PutReplicationConfiguration
+                  - s3:GetReplicationConfiguration
+                Resource: !Sub "arn:${AWS::Partition}:s3:::*"
+                Condition:
+                  BoolIfExists:
+                    s3:IsReplicationPauseRequest: "true"
+                  StringEquals:
+                    s3:ResourceAccount: !Ref "AWS::AccountId"
+              # aws:dynamodb:global-table-pause-replication (multi-Region isolation)
+              - Sid: DynamoDbPauseReplication
+                Effect: Allow
+                Action:
+                  - dynamodb:PutResourcePolicy
+                  - dynamodb:DeleteResourcePolicy
+                  - dynamodb:GetResourcePolicy
+                  - dynamodb:DescribeTable
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:*:${AWS::AccountId}:table/*"
+              # Multi-Region strong consistency (MRSC) global tables only.
+              - Sid: DynamoDbMrscPauseReplication
+                Effect: Allow
+                Action: dynamodb:InjectError
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    dynamodb:FisActionId: aws:dynamodb:global-table-pause-replication
+              # aws:memorydb:multi-region-cluster-pause-replication (multi-Region isolation)
+              - Sid: MemoryDbPauseReplication
+                Effect: Allow
+                Action:
+                  - memorydb:DescribeMultiRegionClusters
+                  - memorydb:PauseMultiRegionClusterReplication
+                Resource: !Sub "arn:${AWS::Partition}:memorydb::${AWS::AccountId}:multiregioncluster/*"
+              # Read-only lookups FIS uses to resolve and track targets. None of
+              # these actions accepts a resource ARN.
+              - Sid: TargetResolution
+                Effect: Allow
+                Action:
+                  - arc-zonal-shift:ListManagedResources
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:DescribeTags
+                  - ec2:DescribeInstances
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ecs:ListTasks
+                  - s3:ListAllMyBuckets
+                  - ssm:ListCommands
+                  - tag:GetResources
+                Resource: "*"
+              # Experiment logging to CloudWatch Logs (design 5.3): the permissions the CloudWatch Logs
+              # guide ("Logs sent to CloudWatch Logs") lists for setting up log delivery. Each test logs
+              # to the /aws/fis/ngrh-tests${Env} group monitoring.yml creates in the Region its fault
+              # lands in. CreateLogDelivery accepts no resource ARN. The other three are documented for
+              # log-group:* in the account: the guide says a single named group does not work for them.
+              # Whether FIS reads these from this role or from the invoker role is confirmed by the first
+              # live run: an empty log group means CloudTrail shows which principal was denied.
+              - Sid: FisLogDeliveryCreate
+                Effect: Allow
+                Action: logs:CreateLogDelivery
+                Resource: "*"
+              - Sid: FisLogDeliveryGroups
+                Effect: Allow
+                Action:
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:*"
 
   # -------------------------------------------------------------------------
   # Resiliency policies. One RTO/RPO bar per tier, applied across AZ + Region.
@@ -199,9 +420,18 @@ Resources:
       Description: "Order history"
 
   # -------------------------------------------------------------------------
-  # Services. Each spans both regions (Regions + dual-region input sources)
-  # and links to the journeys it participates in via AssociatedSystems.UserJourneyIds.
-  # PolicyArn = strictest tier among the service's journeys.
+  # Services. Each spans both regions and links to the journeys it participates
+  # in via AssociatedSystems.UserJourneyIds. PolicyArn = strictest tier among
+  # the service's journeys.
+  #
+  # Resource discovery is TAG-BASED: each service's input source is a
+  # `service` tag filter matching the service's own name plus `shared`. This
+  # scopes discovery precisely (e.g. catalog no longer discovers checkout's
+  # Redis or orders' MQ), which removes the need for negative "does not use X"
+  # assertions. DependencyDiscovery stays ENABLED so the tagged seed set is
+  # expanded along real dependency edges and the service is registered as a
+  # traffic source. Only genuine compensating-control / strategy assertions
+  # are retained.
   # -------------------------------------------------------------------------
   UiService:
     Type: AWS::ResilienceHubV2::Service
@@ -225,21 +455,12 @@ Resources:
             - !GetAtt CartJourney.UserJourneyId
             - !GetAtt ViewOrdersJourney.UserJourneyId
       InputSources:
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
-        # Global routing (Route 53 + ARC health checks) — the cross-region
-        # failover mechanism fronting the public entry point.
-        - ResourceConfiguration: { CfnStackArn: !Ref GrArn }
-        # CloudWatch Synthetics canaries probing the UI/ALB endpoint (both regions).
-        - ResourceConfiguration: { CfnStackArn: !Ref CanariesArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref CanariesArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
-      # Assertions guide the assessment LLM to avoid false findings.
-      # Without these, the LLM generates findings based on all discovered
-      # resources regardless of whether this service actually uses them
-      # (all services share the apps CFN stack as an input source).
+        - ResourceConfiguration:
+            ResourceTags:
+              - Key: service
+                Values:
+                  - ui
+                  - shared
       Assertions:
         # Why: without this, the assessment claims "no automated failover
         # mechanism" despite the ARC Region Switch plan being discovered.
@@ -257,22 +478,6 @@ Resources:
             Region Switch plan pre-scales the surviving region to 200%
             and shifts DNS within the RTO, making AZ-scoped mitigations
             unnecessary for this design.
-        # Why: all services discover ElastiCache/MQ from the shared apps
-        # stack. Without this, the assessment generates Redis HA findings
-        # for services that don't use Redis.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        # Why: same as Redis -- shared stack causes false MQ findings.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
 
   CatalogService:
     DependsOn: UiService
@@ -294,13 +499,12 @@ Resources:
           UserJourneyIds:
             - !GetAtt BrowseJourney.UserJourneyId
       InputSources:
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref CatalogDbArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+        - ResourceConfiguration:
+            ResourceTags:
+              - Key: service
+                Values:
+                  - catalog
+                  - shared
       Assertions:
         # Browse RPO compensating control (decision 3): catalog is read-only
         # in-region, written by a re-runnable external ingest -> no
@@ -325,14 +529,6 @@ Resources:
             Region Switch plan pre-scales the surviving region to 200%
             and shifts DNS within the RTO, making AZ-scoped mitigations
             unnecessary for this design.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
 
   CartService:
     DependsOn: CatalogService
@@ -355,19 +551,13 @@ Resources:
             - !GetAtt CartJourney.UserJourneyId
             - !GetAtt CheckoutJourney.UserJourneyId
       InputSources:
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref CartsDbArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
-      # Assertions guide the assessment LLM to avoid false findings.
-      # Without these, the LLM generates findings based on all discovered
-      # resources regardless of whether this service actually uses them
-      # (all services share the apps CFN stack as an input source).
+        - ResourceConfiguration:
+            ResourceTags:
+              - Key: service
+                Values:
+                  - cart
+                  - shared
       Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
         - Text: >-
             Regional failover is automated via ARC Region Switch plan
             (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
@@ -379,18 +569,6 @@ Resources:
             Region Switch plan pre-scales the surviving region to 200%
             and shifts DNS within the RTO, making AZ-scoped mitigations
             unnecessary for this design.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
 
   CheckoutService:
     DependsOn: CartService
@@ -412,19 +590,13 @@ Resources:
           UserJourneyIds:
             - !GetAtt CheckoutJourney.UserJourneyId
       InputSources:
-        # ElastiCache Redis lives in the apps stack.
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
-      # Assertions guide the assessment LLM to avoid false findings.
-      # Without these, the LLM generates findings based on all discovered
-      # resources regardless of whether this service actually uses them
-      # (all services share the apps CFN stack as an input source).
+        - ResourceConfiguration:
+            ResourceTags:
+              - Key: service
+                Values:
+                  - checkout
+                  - shared
       Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
         - Text: >-
             Regional failover is automated via ARC Region Switch plan
             (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
@@ -436,14 +608,6 @@ Resources:
             Region Switch plan pre-scales the surviving region to 200%
             and shifts DNS within the RTO, making AZ-scoped mitigations
             unnecessary for this design.
-        - Text: >-
-            This service does not use Amazon MQ RabbitMQ. The MQ brokers
-            discovered from the shared apps stack belong to the orders
-            service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
 
   OrdersService:
     DependsOn: CheckoutService
@@ -466,21 +630,13 @@ Resources:
             - !GetAtt CheckoutJourney.UserJourneyId
             - !GetAtt ViewOrdersJourney.UserJourneyId
       InputSources:
-        # Aurora DSQL + Amazon MQ (RabbitMQ; MQ broker is in the apps stack).
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref OrdersDsqlArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref OrdersDsqlArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
-      # Assertions guide the assessment LLM to avoid false findings.
-      # Without these, the LLM generates findings based on all discovered
-      # resources regardless of whether this service actually uses them
-      # (all services share the apps CFN stack as an input source).
+        - ResourceConfiguration:
+            ResourceTags:
+              - Key: service
+                Values:
+                  - orders
+                  - shared
       Assertions:
-        # Why: without this, the assessment claims "no automated failover
-        # mechanism" despite the ARC Region Switch plan being discovered.
         - Text: >-
             Regional failover is automated via ARC Region Switch plan
             (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
@@ -492,14 +648,6 @@ Resources:
             Region Switch plan pre-scales the surviving region to 200%
             and shifts DNS within the RTO, making AZ-scoped mitigations
             unnecessary for this design.
-        - Text: >-
-            This service does not use ElastiCache Redis. The Redis
-            replication groups discovered from the shared apps stack
-            belong to the checkout service only.
-        - Text: >-
-            This service does not use Aurora Global Database. The Aurora
-            clusters discovered from other input sources belong to the
-            catalog service only.
         - Text: >-
             RabbitMQ is used only for post-commit event notification
             (OrderCreatedEvent published after DSQL transaction commits).
@@ -527,18 +675,17 @@ Resources:
           UserJourneyIds:
             - !GetAtt BrowseJourney.UserJourneyId
       InputSources:
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref AppsArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnPrimary }
-        - ResourceConfiguration: { CfnStackArn: !Ref MonitoringArnStandby }
-        - ResourceConfiguration: { CfnStackArn: !Ref RegionSwitchArn }
+        - ResourceConfiguration:
+            ResourceTags:
+              - Key: service
+                Values:
+                  - assets
+                  - shared
       Assertions:
         - Text: >-
             Assets is a stateless nginx container serving static files
             (images, CSS, JS). It has no data store, no session state,
-            and no further dependencies. It does not use ElastiCache
-            Redis, Amazon MQ RabbitMQ, Aurora, DynamoDB, or any other
-            data store. Findings about these resources are not applicable.
+            and no further dependencies.
         - Text: >-
             Regional failover is automated via ARC Region Switch plan
             (mr-rs-plan-ngrh) which pre-scales ECS to 200% and shifts
@@ -561,6 +708,14 @@ Outputs:
   NgrhBucketName:
     Description: NGRH shared bucket (reports, design files). Empty before stack delete.
     Value: !Ref NgrhBucket
+  InvokerRoleName:
+    Description: Role NGRH assumes for discovery, assessments and tests (each service's invoker role)
+    Value: !Ref InvokerRole
+  TestExperimentRoleName:
+    Description: IAM role to choose when creating an NGRH test (FIS assumes it to inject the faults)
+    Value: !Ref TestExperimentRole
+  TestExperimentRoleArn:
+    Value: !GetAtt TestExperimentRole.Arn
   ServiceArns:
     Description: Comma-separated service ARNs (used by `make ngrh-assess`)
     Value: !Join
@@ -571,3 +726,17 @@ Outputs:
         - !GetAtt CheckoutService.ServiceArn
         - !GetAtt OrdersService.ServiceArn
         - !GetAtt AssetsService.ServiceArn
+  # One output per service, so the test tooling can name the service a test
+  # runs on without parsing ServiceArns.
+  UiServiceArn:
+    Value: !GetAtt UiService.ServiceArn
+  CatalogServiceArn:
+    Value: !GetAtt CatalogService.ServiceArn
+  CartServiceArn:
+    Value: !GetAtt CartService.ServiceArn
+  CheckoutServiceArn:
+    Value: !GetAtt CheckoutService.ServiceArn
+  OrdersServiceArn:
+    Value: !GetAtt OrdersService.ServiceArn
+  AssetsServiceArn:
+    Value: !GetAtt AssetsService.ServiceArn

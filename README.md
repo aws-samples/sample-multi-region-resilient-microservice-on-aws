@@ -27,7 +27,7 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 
 6. The checkout service uses Amazon ElastiCache for Redis for temporarily caching the contents of the cart until the order is placed.
 
-7. The orders service leverages Amazon RabbitMQ broker to publish order creation events for any downstream consumption purposes.
+7. The orders service leverages Amazon RabbitMQ broker to publish order creation events for any downstream consumption purposes. The publish is best effort and runs off the request path, on a small bounded pool: with the broker down, orders are still saved and answered in time, and the events that can't be sent are logged and dropped.
 
 8. Amazon CloudWatch Synthetics from each region sends requests to the application in each region via the ALB’s address and to the DNS name resolved through Route53 and pushes the metrics, logs and traces to CloudWatch.
 
@@ -47,6 +47,64 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 4. ARC then toggles the Route53 Health Check for the failing region to “unhealthy” so that DNS returns only the remaining healthy region as clients resolve the application’s fully-qualified domain name
 
 5. An operator uses the SSM runbook to recover a copy of the old primary database from a snapshot and compare the data in the new primary database to the old and create a missing transaction report
+
+The numbers label the diagram. The plan runs them in the order 1, 2, 4, 3: it moves DNS as soon as the remaining Region has scaled up, and switches the database over last. [Automatic failover and fail-back](#3-automatic-failover-and-fail-back) says why.
+
+### 3. Automatic failover and fail-back
+
+The Region Switch plan in [`deployment/failover.yaml`](deployment/failover.yaml) moves traffic away from a Region, and `make failback` brings the Region back.
+
+**What the plan does when it deactivates a Region**, in this order:
+
+1. It scales up the ECS services of the Region that stays, all six in parallel, to twice the highest count they reached in the last 24 hours (15 minutes allowed).
+2. It moves DNS. The plan's Route 53 health check for the Region goes unhealthy, so the application's name resolves only to the Region that stays (5 minutes allowed).
+3. It switches the catalog database over. The writer of the Aurora global database moves to the Region that stays (10 minutes allowed). This is a switchover, which loses no data.
+
+An operator starts it, at the Region that stays, because the Region being drained may be the impaired one:
+
+```
+aws arc-region-switch start-plan-execution --plan-arn <RegionSwitchPlanArn> --action deactivate \
+  --target-region <Region to move away from> --mode graceful --region <the other Region>
+```
+
+> **Why traffic moves before the catalog database.** The failover plan moves traffic as soon as the healthy Region has scaled up, and only then switches the catalog database's writer to that Region. That order is acceptable because catalog is a low-write database. Shoppers only read it, and each Region reads from its own copy, so the healthy Region serves catalog pages without the writer. Its only writes are the schema and sample product data that the catalog service loads when it first starts, so nothing needs the writer during a failover. If a workload like this one does need to accept writes during an outage, it can queue them and apply them after recovery.
+>
+> The switchover loses no data. If it can't finish, for example because the primary database is down, the plan pauses with traffic already moved, and a person decides whether to retry it, skip it, or fail over with possible data loss. The automation never makes that trade on its own.
+
+**If the switchover pauses the run.** The execution waits in the state `pausedByFailedStep`, and a paused execution holds the plan: a new execution and `make failback` both wait until a person resolves it. There are three ways out, and only the last can lose data:
+
+- **Retry.** The API has no retry for a failed step. Once the database is healthy, cancel the paused execution (`aws arc-region-switch cancel-plan-execution`) and start the deactivate again. That repeats the scale-up too, which asks for more tasks the second time because ARC sizes it from the highest count of the last 24 hours (never past each service's maximum of 10). This path has not been tried on this sample.
+- **Skip the step.** `aws arc-region-switch update-plan-execution-step --step-name switch-over-catalog-db --action-to-take skip --comment <why>` lets the run finish. The writer stays where it is. Each Region keeps reading its own cluster, so only catalog writes wait. `make failback` moves the writer to the primary Region once its database is available.
+- **Switch the run to ungraceful.** `aws arc-region-switch update-plan-execution-step --step-name switch-over-catalog-db --action-to-take switchToUngraceful --comment <why>` fails the database over to the Region that stays, and can lose the catalog writes the old primary had not yet replicated. Choose it only when the primary database is not coming back soon and losing those writes is acceptable.
+
+**Failing a Region back.** When the Region is healthy again, run:
+
+```
+make failback REGION=<Region>
+```
+
+`REGION` is required and must be on the command line. The command needs no Resilience Hub stack. It does these in order and stops where the next step depends on the last:
+
+| Step | What it does |
+|---|---|
+| Preflight | Refuses, and lists every reason, unless the Region's own journey alarms and the other Region's view of it have been `OK` for 10 minutes, no plan execution is going or paused, and the plan's Route 53 health checks are not all unhealthy. It also refuses a Region that is serving while the other one is the Region DNS moved away from. |
+| Activate | Starts the plan's activate workflow for the Region, graceful, at that Region's endpoint, and waits (10 minutes at most). A Region whose health check is healthy already is not activated again. If the execution fails, pauses or runs out of time, the command stops: capacity and the writer are left alone while DNS is in doubt. |
+| Capacity | The failover scaled the remaining Region up and nothing scales it down again, so this sets every service's desired count and Auto Scaling minimum back to 2 in both Regions, the values `ecs.yaml` declares. The maximum is left as it is. |
+| Writer | If the catalog writer is not in `PRIMARY_REGION`, switches the global database over to the cluster there, and waits for it. After a person chose to fail the database over, the old primary has to rejoin and catch up first, so this waits up to 45 minutes. If it has not by then the writer stays where it is, which is safe, and the command prints what to run to finish. |
+
+Every step reads before it writes, so running the command again after a partial failure repeats nothing that is done. It exits 0 when done, 1 when a step failed, 2 when preflight refused (nothing was changed), and 3 when it finished except for what it says is left for you. The credentials need to read CloudWatch alarms, start and read plan executions, update ECS services and their Application Auto Scaling targets, and switch over the Aurora global database.
+
+Activating the Region in the ARC console runs only the DNS step. It does not put the capacity back or move the writer, so use `make failback`.
+
+**Measurement and reports.** The plan has a recovery time objective of 10 minutes. ARC measures it from the start of an execution until the application health alarms, the `journey-global-*` alarms of both Regions, are green, and writes a report of each execution (the step timeline, the alarms' states and the recovery time against the objective) to the stack's reports bucket, named in the output `ReportsBucketName`, under `executions/`. Reports expire after 90 days. The plan also lists the other journey alarms (`journey-lcl-*`, `journey-rmt-*` and `region-degraded`) as trigger alarms.
+
+**How long it takes, measured once.** An operator-started deactivate of us-east-1 on a test deployment took 6 minutes 18 seconds, which ARC reported as the recovery time (objective: 10 minutes). The six scale-ups ran in parallel and ended after 65 seconds (ui) to 195 seconds (carts, the service that starts slowest, which sets the pace); moving DNS took 2 minutes, because the step waits for Route 53 to show the Region's health check as unhealthy; the switchover took 1 minute. That run had no failure to detect, so a failover that an alarm starts adds the 2 to 3 minutes the alarms need, and the time ARC takes from the alarms to the start of the plan, which is not published. `make failback` took 4 minutes: the activation 2 minutes, the capacity reset seconds, the switchover back 1 minute 19 seconds. Task size and start-up time set these numbers, so measure your own with `make ngrh-test TEST=catalog-recovery` or an operator-started deactivate.
+
+**What the switchover costs users.** The Region that gives up the database writer fails its catalog-backed journeys for about a minute: its catalog gets `connection refused` while the cluster there changes roles, then connects again on its own, without restarting a task. In the failover that Region is the one traffic has just left: the global journeys, which go through the DNS name as users do, stayed at 100%, but the Region's own canaries failed for that minute, and so did the other Region's canaries that test it. In the fail-back it is the Region that has been serving, and DNS already names both Regions again, so some requests to it failed for that minute. One bad minute does not meet an alarm's two-of-three rule, but two do: the canaries that test the Region from outside (`journey-rmt-*`) went into alarm for two minutes after the failover. That did not meet a trigger, because a trigger also needs the Region's own journey alarm (`journey-lcl-*`), and one bad minute did not raise it.
+
+**What starts a failover.** While automatic failover is enabled (the default) the plan has eight alarm triggers, one for each Region and journey (home, cart, catalog, orders). The trigger for Region A and a journey starts when three things hold at once: the journey fails in A (`journey-lcl-<journey>` in A, A's canaries against A's own load balancer, is in alarm), the other Region B confirms it (`journey-rmt-<journey>` in B, B's canaries against A's load balancer, is in alarm), and B is healthy itself (`region-degraded` in B is `OK`). Each canary alarm needs two failed runs out of three one-minute runs, so a failure has to last about two minutes before it counts. Because B has to be healthy, an event that hits both Regions starts nothing, and because B has to agree, one broken observer starts nothing. A trigger starts a graceful deactivate of A, as the plan's execution role, and not more than once in 60 minutes. Nothing asks anyone first: a journey that stays down in one Region while the other Region is healthy fails that Region over, which is what the plan is for. Failing back is not automatic (`make failback`), and the automation never fails the database over with data loss: the switchover is the only database action the plan takes.
+
+**The automatic-failover switch.** `make deploy AUTOMATIC_FAILOVER=disabled` (the default is `enabled`) leaves out the eight triggers and the permission that lets the plan's execution role start the plan, so only an operator starts an execution. An existing deployment changes with `make region-switch-plan AUTOMATIC_FAILOVER=disabled` (or `enabled`), which updates the plan stack in place after deploying again what the plan waits for (global routing and monitoring). Before arming the triggers on a deployment, run `make ngrh-alarm-replay`: it counts how often the triggers' conditions would have been met over the last 14 days, and any match means the journey alarms are noisier than the triggers can bear. The e2e workflow deploys with `disabled` so that an ordinary run can never fail over its own deployment, and with `enabled` only for the manual `catalog-recovery` run.
 
 
 ## Resilience Modeling with AWS Resilience Hub
@@ -103,6 +161,70 @@ All six services resolve to Tier-1 because every service participates in at leas
 ### Region scope
 
 The application is modeled as a single multi-Region system with `disasterRecoveryApproach = ACTIVE_ACTIVE` for both the multi-AZ and multi-Region targets — both Regions serve traffic and the data tier is strongly consistent (Aurora DSQL, DynamoDB Global Tables). ECS capacity that ARC scales up on failover is reflected as a contributor to recovery time (RTO), not as a different DR classification.
+
+### How each service finds its resources
+
+Each service discovers its resources by tag, not by CloudFormation stack. Its input source matches resources whose `service` tag is the service's own name or `shared`, and dependency discovery follows the connections from there.
+
+* **Resources one service owns carry its name.** For example, the carts ECS service, its task definition, task role and ECR repository, the DynamoDB table and the cart alarms all carry `service=cart`.
+* **Resources the whole application relies on carry `service=shared`**, for example the VPCs, the load balancer, global routing, the Region Switch plan and the alarms that watch every journey.
+* **Where the tags come from:** stacks with a single owner, such as the databases, and fully shared stacks get the tag as a stack tag from the Makefile, which CloudFormation applies to every resource in the stack that supports tags. Stacks that mix owners (`apps`, the canaries, monitoring and the base infrastructure) tag each resource in the template.
+* **The ECS cluster has no `service` tag.** All six services run on it, so tagging it would make every service discover all the others through the cluster.
+
+This narrows each service's assessment to its own resources and the shared ones. For example, catalog's assessment no longer covers checkout's Redis, which stack discovery included because every service listed the `apps` stack.
+
+**Upgrading a deployment that already has the model.** Changing a service's input sources in place doesn't change what Resilience Hub has already discovered for it, so recreate the services:
+
+1. Run `make deploy` so the application's resources carry the tags.
+2. Run `make destroy-ngrh`, then `make ngrh`. Deleting the stack also empties its report bucket, so download any reports you want to keep first.
+3. Wait at least 4 hours for discovery to settle before running assessments. Expect different findings, because each service now covers fewer resources.
+
+### Running Resilience Hub tests
+
+The `ngrh` stack also creates the two IAM roles a Resilience Hub test run executes as:
+
+* **`ngrh-invoker${ENV}`** is each service's invoker role. Besides the assessment policy it carries `AWSResilienceHubResilienceTestingPolicy`, which lets Resilience Hub create, start and stop the AWS FIS experiment behind a test run. Without it every test run fails at `fis:CreateExperimentTemplate`.
+* **`ngrh-test-experiment${ENV}`** is the role to choose as the test's IAM role. FIS assumes it to inject the faults, and it carries the permissions the FIS actions reference lists for every action in the four Resilience Hub test templates (Availability Zone recovery, dependency validation, multi-Region isolation, multi-Region recovery). Only FIS experiments in this account can assume it.
+
+People running tests do not need to create IAM roles. They need `iam:PassRole` on these two roles (passed to `resiliencehub.amazonaws.com` and `fis.amazonaws.com`) and pick them when they create a test.
+
+Faults on ECS tasks (`aws:ecs:task-network-packet-loss`, used by the dependency validation and both multi-Region templates) need three things in the task definition ([requirements](https://docs.aws.amazon.com/fis/latest/userguide/ecs-task-actions.html#ecs-task-requirements)), and every task definition in this sample has them:
+
+* **An SSM agent sidecar** (`amazon-ssm-agent`, non-essential). It registers the task as an SSM managed instance tagged with the task's ARN, which is how FIS finds the task. The task subnets have no internet route, so the sidecar runs an image built into your account's ECR (`amazon-ssm-agent<ENV>`) from `deployment/ssm-agent-sidecar.Dockerfile`, with the commands it and the FIS fault documents run baked in. `make mirror-sidecar-images` builds it on a first deployment, and the weekly repave rebuilds it, checking each of those commands in the new image before it replaces the one your tasks pull. A bare SSM agent image in its place starts a sidecar that exits at once (no `aws`, no `ps`), no task registers with SSM, and Resilience Hub's ECS faults then fail with "At least one ECS Task is not registered as a SSM managed instance".
+* **`pidMode: task`**, so the sidecar can reach the application's processes.
+* **`enableFaultInjection: true`**, which turns on the ECS fault-injection endpoints that FIS network faults use on Fargate.
+
+Each task role can create the sidecar's SSM activation and pass the managed-instance role to SSM, and nothing else is added to it. ECS Exec stays off, because FIS can't run these actions on a task that has it enabled.
+
+**Upgrading a deployment that already has the weekly repave.** The repave's commands are part of its stack, and it clones `main` for the files they read. Run `make self-update` once the sidecar is on `main`; a repave still running the older commands would copy the bare SSM agent image over the sidecar's image, because it mirrors every public image the sidecar buildspec names. After that, `make mirror-sidecar-images` (or the next repave) rebuilds the image, and the service's tasks need replacing to pick it up. A live `make ngrh-test-preflight` says which tasks aren't registered with SSM.
+
+### Testing resilience with NGRH
+
+The tests live in [`deployment/ngrh-tests.json`](deployment/ngrh-tests.json), not in CloudFormation: Resilience Hub has no test resource, and creating a test twice is an error, so a small tool (`python3 -m ngrh_testing`, standard library only, run from `deployment/`) reads the file and makes Resilience Hub match it. Each test says which service it faults, which template it uses, what to block, which alarms decide the verdict, and what result the sample is expected to give. [`docs/ngrh-test-ground-truth.md`](docs/ngrh-test-ground-truth.md) explains each expectation. The first test, `orders-broker-dependency`, blocks orders' traffic to its Amazon MQ broker for 15 minutes. The second, `catalog-recovery`, drops catalog's traffic to its database in us-east-1 for 20 minutes and passes when the plan's alarm triggers (see [Automatic failover and fail-back](#3-automatic-failover-and-fail-back)) have moved the traffic to us-west-2 within the multi-Region objective of 10 minutes. It really fails us-east-1 over.
+
+Run them after `make deploy`, `make monitoring` and `make ngrh`:
+
+| Command | What it does |
+|---|---|
+| `make ngrh-tests` | Creates each test that doesn't exist and updates one that differs from the spec, then makes its alarm sources match. Safe to repeat: a test that matches is left alone, and nothing is ever deleted. It stops before writing anything if a reference doesn't resolve, an alarm or template doesn't exist, or a service has two tests for one template. |
+| `make ngrh-test-preflight [TEST=<name>\|all] [MODE=live\|static]` | Lists every reason a run should not go ahead, or says all checks passed. `MODE=static` checks only the configuration (roles, tests, alarms exist, the service can take the fault); the default `live` also checks the alarms are `OK` and that no test run, FIS experiment or plan execution is active. Exits 2 when refused. |
+| `make ngrh-test TEST=<name> [ALARM_WAIT=<minutes>] [SETTLE_WAIT=<minutes>] [FAILBACK=auto\|skip]` | Runs the live preflight, starts the run, follows it until it ends (the test's duration plus 20 minutes at most), waits `SETTLE_WAIT` minutes (default 10) so the alarms' recovery is in the report, and writes it. `ALARM_WAIT` first waits up to that many minutes for the test's success and stop alarms to have data, which a new deployment's alarms don't until its canaries have reported. This injects a real fault into the deployed sample. Exits 0 when the verdict is the expected one and 3 when it isn't, including when the fault never ran (a verdict of `INCONCLUSIVE`). If the Region Switch plan deactivated a Region during the run, `FAILBACK=auto` (the default) then waits up to 30 minutes for that Region to have been healthy for ten, runs `make failback` for it and adds the result to the report; `FAILBACK=skip` leaves the Region deactivated and prints the command. |
+| `make ngrh-test-stop TEST=<name> [STOP_WAIT=<minutes>]` | Asks the test's active run to stop, and with `STOP_WAIT` waits up to that many minutes for it to end. |
+| `make ngrh-test-report TEST=<name> [RUN=<id>]` | Collects a run's report again (the latest run by default), for example after a run you did not watch. |
+
+A run cannot start while any Resilience Hub service in the account has an active run, so tests that share resources never overlap, and a tester's own run on another service counts too.
+
+A test's success and observability alarms must be alarms Resilience Hub discovered for that service, which it finds by the service's tag input sources (orders: `service` is `orders` or `shared`). An alarm tagged for another service, such as `hop-checkout-errors` (tagged `checkout`), is refused by `StartTestRun` with "alarms not discovered for this service", however recent the assessment. Preflight reads the service's input sources and each source alarm's tags and refuses before the run starts; put such an alarm in `evidenceAlarms`, which the report reads from alarm history without Resilience Hub's involvement.
+
+**The recovery test needs the plan's triggers.** `catalog-recovery` is the one test with an eighth preflight check, and the live preflight refuses it unless the plan has a trigger that deactivates the Region the test impairs (a deployment made with `AUTOMATIC_FAILOVER=disabled` has none), the plan's last execution started more than the triggers' delay (60 minutes) ago, and scaling up us-west-2 to the percentage the plan asks for, over the highest task count each service had in us-east-1 in the last 24 hours, stays within the service's maximum. The static preflight leaves the check out, so a deployment with the switch off still passes it. Besides Resilience Hub's verdict the run has a check of its own, `deactivate-completed`: a deactivate of the impaired Region must have started during the run and ended `completed`. Without it a run could pass because the fault did not bite, or because a person moved the traffic by hand. The report lists the plan's executions during the run with each step and ARC's own recovery time against the objective. Run `make ngrh-alarm-replay` first, to see whether the triggers would have fired on the last days of real traffic.
+
+If your terminal drops or you press Ctrl-C, the run carries on in AWS: nothing is stopped for you. The tool prints the two commands to use later, `make ngrh-test-stop` and `make ngrh-test-report`.
+
+**In GitHub Actions**, every run of the `e2e` workflow creates the tests and runs the static preflight once the deploy has finished (the steps `Reconcile NGRH tests` and `Check NGRH tests (static preflight)`), so a change that breaks a test's references fails the pull request. No fault is injected. Every run deploys with `AUTOMATIC_FAILOVER=disabled`, because a journey that fails in one Region while the other is healthy, as it can while a deployment is still coming up, would otherwise fail the deployment over before the smoke test; only a run started by hand with `catalog-recovery` chosen deploys with it `enabled`. To run a fault test there, start the workflow by hand (Actions, then `e2e`, then Run workflow) and choose a test in `ngrh_test`; the default, `none`, runs none. The job waits up to 15 minutes for the test's alarms to have data, runs the test after the smoke test and before teardown (waiting ten more minutes after the run, so the report has the alarms' recovery), and attaches the report to the run as the `ngrh-test-reports` artifact, also when the test fails. For `catalog-recovery`, `make ngrh-test` fails the Region back itself, so the teardown starts with both Regions active. The step fails when the verdict isn't the expected one. The job's limit is six hours, the most GitHub allows for a hosted runner, and a run without a fault test uses about four. `catalog-recovery` adds the wait for alarm data (up to 15 minutes), the 20-minute fault, the settling and the fail-back, about an hour more when nothing goes wrong, so about five hours and a quarter against the limit; a job that times out does not finish its teardown, and the deployment then stays in the CI account until someone runs `make destroy-all` for it. If the job is cancelled while a run is going, a last step asks it to stop and waits up to 10 minutes, because teardown deletes the tests and refuses while a run is active. Resilience Hub discovers the resources of a new deployment over the hours after it is created, so a fault run on a fresh deployment may reach fewer targets than one on a deployment that has been up a while: the report lists the targets it reached.
+
+**The report** is written to `deployment/ngrh-test-reports/<test>-<run>.md` with the full data beside it as `.json` (the directory is not committed). It starts with the verdict against the expectation, then what Resilience Hub watched and each alarm's outcome, a timeline, the targets the fault reached and the dependencies it blocked. It also shows the state changes of alarms Resilience Hub doesn't watch, laid out by hop: both Regions' `region-degraded`, then ui and each back-end in turn. That layout is how you trace a journey that failed to the service behind ui that caused it. A run that ends `ERROR` carries no message when the invoker role was denied a call: look for `AccessDenied` in CloudTrail around the start time.
+
+`make destroy-ngrh` deletes the tests before the stack, because deleting a service that still has tests is not documented to work. It refuses while a run is active.
 
 
 ## Pre-requisites
@@ -202,6 +324,17 @@ DynamoDB and Aurora Global database.
 
 ![System Dashboard](assets/static/04.system-dashboard.png)
 
+### Container health checks
+
+ui is behind the ALB, whose health check gates its deployments. Each back-end (carts, orders, catalog, checkout, assets) has a container health check instead: during a deployment ECS stops the old tasks only after the new ones pass it, and it replaces a task that stops answering. The checks call endpoints that check no dependencies (Spring's readiness group for carts and orders, `/health` for catalog and checkout, `health.html` for assets), so a database or broker outage never makes ECS replace tasks. Their start periods cover the slowest start seen in testing: 240 seconds for carts, 120 for orders and 60 for the others.
+
+Without them, ECS stopped the old back-end tasks as soon as the new containers started, and every deployment failed the journeys for 4-5 minutes in the Region being deployed: carts took up to 4 minutes to start, and ui calls carts on every page.
+
+Deployments also avoid failing requests while tasks are replaced:
+
+* **Shutdown delay.** Callers' Service Connect proxies can still send a stopping task requests for a few seconds after its application gets the stop signal, and once the application has exited, the task's own proxy answers them with 503. Each back-end task therefore runs a small `shutdown-delay` container that depends on the application. A container dependency reverses at shutdown, so ECS sends the application its stop signal only after `shutdown-delay` exits, 15 seconds (`SHUTDOWN_DELAY_SECONDS`) after ECS signals it, and the application keeps serving until then. In testing the applications got their stop signal about 26 seconds later than before, because ECS took another 11 seconds or so to move on to them. ui doesn't need one: the ALB stops sending a ui task requests before ECS stops it.
+* **carts warm-up.** The first request a new carts process serves builds its DynamoDB client, fetches the task's credentials and opens its first connection to DynamoDB. That took up to 4.7 seconds on 0.5 vCPU, longer than the 3-second Service Connect timeout on ui's calls. carts now sends itself one cart request at startup, before its readiness probe passes, so its first real request is fast. If the warm-up fails or takes longer than 10 seconds (`carts.startup-warmup.timeout`), carts starts anyway, so a DynamoDB outage can't keep it from starting.
+
 ## Injecting Chaos to simulate failures
 To induce failures into your environment, you can use the `multi-region-scenario.yml` and cause a regional service disruption. This cloudformation template uses AWS Fault Injection Service to simulate disruptions like pausing DynamoDB Global Table replication and disrupting cross region network connectivity from subnets. Running this experiment will also allow you to perform a Regional failover and observe the reconciliation process.
 
@@ -242,8 +375,8 @@ drops monthly cost by roughly $1,000.
 | Cost Type | Amount (USD) |
 |-----------|-------------|
 | Upfront Cost | $0.00 |
-| Monthly Cost | ~$2,850 |
-| Total 12 Months Cost* | ~$34,200 |
+| Monthly Cost | ~$3,348 |
+| Total 12 Months Cost* | ~$40,200 |
 
 \* Includes upfront cost. Most line items are flat 24/7 — actual cost will
 vary with the canary schedule, log retention, and workload volume.
@@ -254,7 +387,7 @@ vary with the canary schedule, log retention, and workload volume.
 
 | Service | Monthly Cost | Configuration |
 |---------|--------------|----------------|
-| ECS Fargate Spot | $97 | 6 services × 2 tasks (FARGATE_SPOT, ~70% off on-demand): 4 × (1 vCPU / 2 GB) + 2 × (0.25 vCPU / 0.5 GB), Linux/x86 24/7 |
+| ECS Fargate | $346 | 6 services × 2 tasks on on-demand Fargate: 4 × (1 vCPU / 2 GB), carts (0.5 vCPU / 1 GB) and assets (0.25 vCPU / 1 GB), Linux/x86 24/7. Each task also runs the SSM agent sidecar used for fault injection, which is why the two small services have 1 GB. Fargate Spot would cost about $104, but Spot can reclaim tasks in the middle of a failover or a resilience test |
 | Application Load Balancer | $20 | 1 internal ALB ($16 base + ~$4 LCU) |
 | VPC Interface Endpoints | $329 | 15 endpoints × 3 AZs × $0.01/AZ-hr (S3 + DynamoDB are gateway endpoints, free) |
 | Aurora MySQL Serverless v2 | $175 | 2 instances × 1 ACU minimum × $0.12/ACU-hr (idle) |
@@ -268,7 +401,7 @@ vary with the canary schedule, log retention, and workload volume.
 | Secrets Manager | $20 | ~50 secrets ($0.40 each) |
 | KMS | $1 | 1 multi-Region CMK + light request volume |
 | CloudWatch Logs | ~$30 | ECS task + app logs (varies with traffic) |
-| **Per-Region subtotal** | **~$1,386** | |
+| **Per-Region subtotal** | **~$1,635** | |
 
 ### Shared / Global Costs (charged once, not per Region)
 
@@ -284,10 +417,10 @@ vary with the canary schedule, log retention, and workload volume.
 
 | | Monthly Cost |
 |---|---|
-| US East (N. Virginia) | ~$1,386 |
-| US West (Oregon) | ~$1,386 |
+| US East (N. Virginia) | ~$1,635 |
+| US West (Oregon) | ~$1,635 |
 | Shared / global | ~$78 |
-| **Total** | **~$2,850** |
+| **Total** | **~$3,348** |
 
 ### Cost-reduction levers
 

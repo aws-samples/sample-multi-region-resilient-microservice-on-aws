@@ -33,6 +33,13 @@ import (
 )
 
 func main() {
+	// ECS container health check (deployment/ecs.yaml). The image is distroless,
+	// with no shell or HTTP client, so the binary probes its own /health
+	// endpoint: `/manager healthcheck` exits 0 when it answers 200 in time.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(healthcheck(healthcheckURL(os.Getenv("PORT")), 3*time.Second))
+	}
+
 	ctx := context.Background()
 
 	var config config.AppConfiguration
@@ -136,4 +143,31 @@ func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
 	)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return tp, nil
+}
+
+// healthcheckURL is the local /health endpoint on the port the server listens
+// on (PORT, default 8080, as in config.AppConfiguration).
+func healthcheckURL(port string) string {
+	if port == "" {
+		port = "8080"
+	}
+	return "http://127.0.0.1:" + port + "/health"
+}
+
+// healthcheck probes url once and returns the process exit code: 0 when it
+// answers 200 OK within timeout, 1 otherwise. /health has no dependencies, so
+// a failure means this process is not serving, not that the database is down.
+func healthcheck(url string, timeout time.Duration) int {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(os.Stderr, "healthcheck: status", resp.StatusCode)
+		return 1
+	}
+	return 0
 }

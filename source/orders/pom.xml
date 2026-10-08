@@ -36,6 +36,14 @@
 		     parse DoS, fixed in 2.21.6). 2.21.4 already carries the
 		     CVE-2026-54512, CVE-2026-54513 and GHSA-r7wm-3cxj-wff9 fixes. -->
 		<jackson-bom.version>2.21.7</jackson-bom.version>
+		<!-- Override Spring Boot 3.5.16 BOM (5.25.0) to patch four HIGH findings
+		     in the RabbitMQ Java client that spring-boot-starter-amqp pulls in:
+		     CVE-2026-63337 (arbitrary class loading through an untrusted
+		     JSON-RPC response, fixed in 5.33.0), CVE-2026-69219 and
+		     CVE-2026-69220 (denial of service through oversized allocations
+		     while reading a frame, fixed in 5.33.1) and CVE-2026-75516 (denial
+		     of service through oversized frames, fixed in 5.34.0). -->
+		<rabbit-amqp-client.version>5.34.0</rabbit-amqp-client.version>
 	</properties>
 
 	<dependencies>

@@ -2,6 +2,10 @@
 ENV=
 PRIMARY_REGION=us-east-1
 STANDBY_REGION=us-west-2
+# enabled adds the eight alarm triggers to the Region Switch plan and lets its execution role start the plan (a
+# trigger starts the plan as that role); disabled leaves both out, so a person starts it. See "Automatic failover
+# and fail-back" in the README.
+AUTOMATIC_FAILOVER=enabled
 ####
 
 ####
@@ -26,14 +30,15 @@ endif
 
 deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_infrastructure standby_ecs global_routing \
 	canaries_primary canaries_standby restore-reconciliation monitoring \
-	region-switch secrets-rotation chaos-engineering ngrh
+	region-switch arc-dns-status secrets-rotation chaos-engineering ngrh
 
 deploy-primary: test-creds create-peer primary_infrastructure primary_ecs
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
 	$(eval _CAN_VPC:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./canaries.yaml \
-	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} PrimaryOnly=true VpcId=$(_CAN_VPC) --capabilities CAPABILITY_IAM --s3-bucket $(result)
+	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} PrimaryOnly=true VpcId=$(_CAN_VPC) --capabilities CAPABILITY_IAM --s3-bucket $(result) \
+	--tags service=shared
 
 deploy: deploy-all
 	@echo "*** Deployment Outputs ****"
@@ -57,12 +62,14 @@ create-peer:
 
 	@echo "Deploying VPC Stack in ${PRIMARY_REGION}"
 	@aws cloudformation deploy --template ./regionalVpc.yaml --region ${PRIMARY_REGION} \
-	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} PrimaryOnly=true
+	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} PrimaryOnly=true \
+	--tags service=shared
 
 	@if [ "$(PRIMARY_ONLY)" = "false" ];then \
 		PRIMARY_VPC=$$(aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text) && \
 		aws cloudformation deploy --template ./regionalVpc.yaml --region ${STANDBY_REGION} \
-	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} PrimaryVpcId=$$PRIMARY_VPC; \
+	--stack-name baseVpc${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} PrimaryVpcId=$$PRIMARY_VPC \
+	--tags service=shared; \
 	fi
 
 	@echo "create-peer done"
@@ -75,7 +82,8 @@ codebuild-infra: primary_infrastructure
 	@echo "Deploying CodeBuild project in ${PRIMARY_REGION}"
 	@aws cloudformation deploy --template ./codebuild.yaml --region ${PRIMARY_REGION} \
 	--stack-name codebuild${ENV} --capabilities CAPABILITY_NAMED_IAM \
-	--parameter-overrides Env=${ENV} PrimaryRegion=${PRIMARY_REGION} StandbyRegion=${STANDBY_REGION} KmsKey=retail-store-ar
+	--parameter-overrides Env=${ENV} PrimaryRegion=${PRIMARY_REGION} StandbyRegion=${STANDBY_REGION} KmsKey=retail-store-ar \
+	--tags service=shared
 
 ecr-login:
 	@echo "ECR login is handled by CodeBuild — skipping"
@@ -193,7 +201,8 @@ primary_infrastructure: create-peer
 	$(eval _PEER_ID:=$(shell [ "$(PRIMARY_ONLY)" = "false" ] && aws cloudformation describe-stacks --stack-name baseVpc$(ENV) --region $(STANDBY_REGION) --query "Stacks[0].Outputs[?OutputKey=='PeeringConnectionId'].OutputValue" --output text))
 	@aws cloudformation deploy --template ./regionalBaseInfra.yaml --region ${PRIMARY_REGION} \
 	--stack-name baseInfra${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} PrimaryOnly=${PRIMARY_ONLY} \
-	VpcId=$(_VPC_P) VpcPeeringConnectionId=$(_PEER_ID)
+	VpcId=$(_VPC_P) VpcPeeringConnectionId=$(_PEER_ID) \
+	--tags service=shared
 
 primary_ecs: build-images mirror-sidecar-images primary_region_catalog-db orders-dsql-db dsql-vpc-endpoint carts-db
 	@echo "Deploy ECS Services in ${PRIMARY_REGION}"
@@ -208,7 +217,8 @@ standby_infrastructure: create-peer
 	$(eval _PEER_ID_S:=$(shell aws cloudformation describe-stacks --stack-name baseVpc$(ENV) --region $(STANDBY_REGION) --query "Stacks[0].Outputs[?OutputKey=='PeeringConnectionId'].OutputValue" --output text))
 	@aws cloudformation deploy --template ./regionalBaseInfra.yaml --region ${STANDBY_REGION} \
 	--stack-name baseInfra${ENV} --capabilities CAPABILITY_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} \
-	VpcId=$(_VPC_S) VpcPeeringConnectionId=$(_PEER_ID_S)
+	VpcId=$(_VPC_S) VpcPeeringConnectionId=$(_PEER_ID_S) \
+	--tags service=shared
 
 standby_ecs: build-images mirror-sidecar-images standby_region_catalog-db orders-dsql-db dsql-vpc-endpoint-standby
 	@echo "Deploy ECS Services in ${STANDBY_REGION}"
@@ -223,9 +233,13 @@ global_routing: standby_ecs primary_ecs
 	$(eval _GR_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./globalRouting.yaml \
 	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV} \
-	VpcIdPrimary=$(_GR_VPC_P) VpcIdStandby=$(_GR_VPC_S)
+	VpcIdPrimary=$(_GR_VPC_P) VpcIdStandby=$(_GR_VPC_S) \
+	--tags service=shared
 
-region-switch-plan: global_routing
+# The plan names the journey alarms monitoring.yml defines (as associated alarms), so both Regions' monitoring
+# stacks come first. monitoring used to wait for arc-dns-status, which waits for the plan: nothing in monitoring.yml
+# needs it (the dashboard only charts the metrics the Lambda publishes), and the plan now needs monitoring.
+region-switch-plan: global_routing monitoring
 	@echo "Deploy the ARC Region Switch Plan"
 	$(eval PRIMARY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(PRIMARY_REGION)$(ENV) \
@@ -247,7 +261,8 @@ region-switch-plan: global_routing
 	--parameter-overrides Env=${ENV} DomainName=demo${ENV}.io \
 	PrimaryClusterArn=$(PRIMARY_CLUSTER_ARN) StandbyClusterArn=$(STANDBY_CLUSTER_ARN) \
 	PrimaryCatalogDbArn=$(_PRIMARY_CATALOG_DB) StandbyCatalogDbArn=$(_STANDBY_CATALOG_DB) \
-	HostedZoneId=$(_HOSTED_ZONE_ID)
+	HostedZoneId=$(_HOSTED_ZONE_ID) AutomaticFailover=$(AUTOMATIC_FAILOVER) \
+	--tags service=shared
 
 region-switch: region-switch-plan
 	@echo "Wiring plan health checks to Route53 records"
@@ -266,27 +281,31 @@ region-switch: region-switch-plan
 	--stack-name gr${ENV} --capabilities CAPABILITY_NAMED_IAM \
 	--parameter-overrides DomainName=demo${ENV}.io Env=${ENV} KmsKey=retail-store-ar${ENV} \
 	VpcIdPrimary=$(_RS_VPC_P) VpcIdStandby=$(_RS_VPC_S) \
-	PrimaryHealthCheckId=$(PRIMARY_HC_ID) StandbyHealthCheckId=$(STANDBY_HC_ID)
+	PrimaryHealthCheckId=$(PRIMARY_HC_ID) StandbyHealthCheckId=$(STANDBY_HC_ID) \
+	--tags service=shared
 
 canaries_primary: global_routing
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
 	$(eval _CAN_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./canaries.yaml \
-	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} VpcId=$(_CAN_VPC_P) --capabilities CAPABILITY_IAM --s3-bucket $(result)
+	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} VpcId=$(_CAN_VPC_P) --capabilities CAPABILITY_IAM --s3-bucket $(result) \
+	--tags service=shared
 canaries_standby: global_routing
 	@echo "Deploy the Synthetic Canaries in ${STANDBY_REGION}"
 	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
 	$(eval _CAN_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --region ${STANDBY_REGION} --template ./canaries.yaml \
-	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${PRIMARY_REGION} VpcId=$(_CAN_VPC_S) --capabilities CAPABILITY_IAM --s3-bucket $(result)
+	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${PRIMARY_REGION} VpcId=$(_CAN_VPC_S) --capabilities CAPABILITY_IAM --s3-bucket $(result) \
+	--tags service=shared
 
 primary_region_catalog-db: primary_infrastructure
 	@echo "Creating Catalog service Aurora MySql database in ${PRIMARY_REGION}..."
 	$(eval _CAT_VPC_P:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./database/aurora/aurora-global-primary-cluster.yml \
 	--region ${PRIMARY_REGION} --stack-name catalog-db-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} NamingPrefix=catalog DatabaseName=catalog KmsKey=retail-store-ar${ENV} VpcId=$(_CAT_VPC_P)
+	--parameter-overrides Env=${ENV} NamingPrefix=catalog DatabaseName=catalog KmsKey=retail-store-ar${ENV} VpcId=$(_CAT_VPC_P) \
+	--tags service=catalog
 
 standby_region_catalog-db: standby_infrastructure primary_region_catalog-db
 	$(eval result:=$(shell aws ssm get-parameter --name catalog-global-db-cluster-CredentialSecretArn$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text|sed s/$(PRIMARY_REGION)/$(STANDBY_REGION)/g ))
@@ -294,16 +313,19 @@ standby_region_catalog-db: standby_infrastructure primary_region_catalog-db
 	$(eval _CAT_VPC_S:=$(shell aws ssm get-parameter --name VpcId$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
 	@aws cloudformation deploy --template ./database/aurora/aurora-global-standby-cluster.yml \
 	--region ${STANDBY_REGION} --stack-name catalog-db-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} NamingPrefix=catalog DBSecretArn=${result} DatabaseName=catalog KmsKey=retail-store-ar${ENV} VpcId=$(_CAT_VPC_S)
+	--parameter-overrides Env=${ENV} NamingPrefix=catalog DBSecretArn=${result} DatabaseName=catalog KmsKey=retail-store-ar${ENV} VpcId=$(_CAT_VPC_S) \
+	--tags service=catalog
 
 orders-dsql-db: primary_infrastructure standby_infrastructure
 	@echo "Phase 1: Creating DSQL clusters in both regions..."
 	@aws cloudformation deploy --template ./database/dsql/orders-dsql-cluster.yml \
 	--region ${PRIMARY_REGION} --stack-name orders-dsql-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2
+	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2 \
+	--tags service=orders
 	@aws cloudformation deploy --template ./database/dsql/orders-dsql-cluster.yml \
 	--region ${STANDBY_REGION} --stack-name orders-dsql-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2
+	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2 \
+	--tags service=orders
 	@echo "Phase 2: Linking DSQL clusters..."
 	@PRIMARY_ARN=$$(aws cloudformation describe-stacks --stack-name orders-dsql-stack${ENV} \
 		--region ${PRIMARY_REGION} --query "Stacks[0].Outputs[?OutputKey=='ClusterArn'].OutputValue" --output text) && \
@@ -313,11 +335,13 @@ orders-dsql-db: primary_infrastructure standby_infrastructure
 	aws cloudformation deploy --template ./database/dsql/orders-dsql-cluster.yml \
 	--region ${PRIMARY_REGION} --stack-name orders-dsql-stack${ENV} --capabilities CAPABILITY_IAM \
 	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2 \
-	"PeerClusterArns=$$PRIMARY_ARN,$$STANDBY_ARN" && \
+	"PeerClusterArns=$$PRIMARY_ARN,$$STANDBY_ARN" \
+	--tags service=orders && \
 	aws cloudformation deploy --template ./database/dsql/orders-dsql-cluster.yml \
 	--region ${STANDBY_REGION} --stack-name orders-dsql-stack${ENV} --capabilities CAPABILITY_IAM \
 	--parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2 \
-	"PeerClusterArns=$$PRIMARY_ARN,$$STANDBY_ARN"
+	"PeerClusterArns=$$PRIMARY_ARN,$$STANDBY_ARN" \
+	--tags service=orders
 	@echo "Storing public endpoints for auth token generation..."
 	@PUB_PRIMARY=$$(aws ssm get-parameter --name orders-dsql-cluster-Endpoint$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text) && \
 	PUB_STANDBY=$$(aws ssm get-parameter --name orders-dsql-cluster-Endpoint$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text) && \
@@ -415,7 +439,8 @@ carts-db: primary_infrastructure
 	@echo "Creating Carts service DynamoDB Global Table in ${PRIMARY_REGION} and ${STANDBY_REGION}..."
 	@aws cloudformation deploy --template ./database/dynamodb/global-table.yml \
 	--region ${PRIMARY_REGION} --stack-name carts-db-stack${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} NamingPrefix=carts KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2
+	--parameter-overrides Env=${ENV} NamingPrefix=carts KmsKey=retail-store-ar${ENV} WitnessRegion=us-east-2 \
+	--tags service=cart
 
 # Optional Windows EC2 clients for in-VPC browser testing (diagnostics only).
 # NOT part of deploy-all -- run 'make client ENV=...' to deploy both regions.
@@ -458,18 +483,28 @@ restore-reconciliation: primary_infrastructure standby_infrastructure standby_re
 	@aws cloudformation package --template-file ./database/crdr-reconciliation/src/restore-reconcile-catalog-ssm.yaml --region ${STANDBY_REGION} --s3-bucket $(result) --output-template-file ./database/crdr-reconciliation/src/out.yaml
 	@aws cloudformation deploy --template-file ./database/crdr-reconciliation/src/out.yaml --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} VpcId=$(_RECON_VPC)
 
-monitoring: restore-reconciliation arc-dns-status
+monitoring: restore-reconciliation
 	@echo "Deploy the Monitoring Dashboard"
 	$(eval _PRIMARY_CLUSTER:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id EcsCluster --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _STANDBY_CLUSTER:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id EcsCluster --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _CANARY_BUCKET_PRIMARY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text))
 	$(eval _CANARY_BUCKET_STANDBY:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text))
+	# ui's hop alarms use the ALB and target group full names: the part of each ARN after
+	# "loadbalancer/" (app/<name>/<id>) and after the last ":" (targetgroup/<name>/<id>).
+	$(eval _PRIMARY_ALB:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id Alb --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:loadbalancer/||'))
+	$(eval _STANDBY_ALB:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id Alb --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:loadbalancer/||'))
+	$(eval _PRIMARY_UI_TG:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id AlbTargetGroup --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:||'))
+	$(eval _STANDBY_UI_TG:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id AlbTargetGroup --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text | sed 's|.*:||'))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./monitoring.yml \
 	--stack-name monitoring${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides PrimaryRegion=${PRIMARY_REGION} Env=${ENV} SecondaryRegion=${STANDBY_REGION} \
-	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) --s3-bucket $(_CANARY_BUCKET_PRIMARY)
+	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) \
+	UiLoadBalancerFullName=$(_PRIMARY_ALB) UiTargetGroupFullName=$(_PRIMARY_UI_TG) --s3-bucket $(_CANARY_BUCKET_PRIMARY) \
+	--tags service=shared
 	@aws cloudformation deploy --region ${STANDBY_REGION} --template ./monitoring.yml \
 	--stack-name monitoring${ENV} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides PrimaryRegion=${PRIMARY_REGION} Env=${ENV} SecondaryRegion=${STANDBY_REGION} \
-	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) --s3-bucket $(_CANARY_BUCKET_STANDBY)
+	PrimaryEcsCluster=$(_PRIMARY_CLUSTER) SecondaryEcsCluster=$(_STANDBY_CLUSTER) \
+	UiLoadBalancerFullName=$(_STANDBY_ALB) UiTargetGroupFullName=$(_STANDBY_UI_TG) --s3-bucket $(_CANARY_BUCKET_STANDBY) \
+	--tags service=shared
 
 arc-dns-status: region-switch boto3-layer
 	@echo "Deploy ARC DNS status Lambda to both regions"
@@ -489,10 +524,12 @@ arc-dns-status: region-switch boto3-layer
 	$(eval _RECORD:=$(shell aws secretsmanager get-secret-value --secret-id DNSRecordSecret$(ENV) --region $(PRIMARY_REGION) --query 'SecretString' --output text))
 	@aws cloudformation deploy --region ${PRIMARY_REGION} --template ./arc-dns-status.yaml \
 	--stack-name arc-dns-status${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV}
+	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV} \
+	--tags service=shared
 	@aws cloudformation deploy --region ${STANDBY_REGION} --template ./arc-dns-status.yaml \
 	--stack-name arc-dns-status${ENV} --capabilities CAPABILITY_IAM \
-	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV}
+	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV} \
+	--tags service=shared
 
 boto3-layer:
 	@echo "Ensuring boto3-latest Lambda layer exists in both regions"
@@ -665,6 +702,7 @@ destroy-ecr-primary: destroy-apps-primary
 	@aws ecr delete-repository --force --repository-name cloudwatch-agent${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-java${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-node${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
+	@aws ecr delete-repository --force --repository-name amazon-ssm-agent${ENV} --region $(PRIMARY_REGION) --no-cli-pager || true
 
 destroy-ecr-standby: destroy-apps-standby
 	@echo "Deleting ECR Repos..."
@@ -677,6 +715,7 @@ destroy-ecr-standby: destroy-apps-standby
 	@aws ecr delete-repository --force --repository-name cloudwatch-agent${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-java${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
 	@aws ecr delete-repository --force --repository-name adot-autoinstrumentation-node${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
+	@aws ecr delete-repository --force --repository-name amazon-ssm-agent${ENV} --region $(STANDBY_REGION) --no-cli-pager || true
 
 destroy-global_routing: destroy-canaries-standby destroy-canaries-primary destroy-region-switch
 	@echo "Deleting global routing stack..."
@@ -750,6 +789,11 @@ destroy-canaries-primary:
 	@aws cloudformation wait stack-delete-complete --stack-name canaries${ENV} --region ${PRIMARY_REGION}
 
 destroy-region-switch:
+	@echo "Emptying the Region Switch reports bucket before the stack delete..."
+	$(eval REPORTS_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name region-switch$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='ReportsBucketName'].OutputValue" --output text 2>/dev/null))
+	@if [ -n "$(REPORTS_BUCKET)" ] && [ "$(REPORTS_BUCKET)" != "None" ]; then \
+		./cleanup.sh $(REPORTS_BUCKET); \
+	fi
 	@echo "Deleting region switch plan..."
 	@aws cloudformation delete-stack --stack-name region-switch${ENV} --region ${PRIMARY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name region-switch${ENV} --region ${PRIMARY_REGION}
@@ -842,36 +886,16 @@ destroy-client-standby:
 
 ####
 # Next-Gen Resilience Hub (NGRH / ResilienceHubV2) model
-# Builds policies + system + user journeys + services with CloudFormation-stack
-# input sources spanning both regions. Stack ARNs are resolved dynamically so
-# this works in any account/Env. Run AFTER `make deploy` (needs the app stacks).
+# Builds policies + system + user journeys + services with TAG-BASED input
+# sources (service tag in {<name>, shared}) spanning both regions. Run AFTER
+# `make deploy` (the app stacks must be deployed WITH the service tags).
 ####
 
 ngrh:
-	@echo "Resolving app stack ARNs in $(PRIMARY_REGION) and $(STANDBY_REGION)..."
-	$(eval _APPS_P := $(shell aws cloudformation describe-stacks --stack-name apps$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _APPS_S := $(shell aws cloudformation describe-stacks --stack-name apps$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _CAT_P := $(shell aws cloudformation describe-stacks --stack-name catalog-db-stack$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _CAT_S := $(shell aws cloudformation describe-stacks --stack-name catalog-db-stack$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _CARTS_P := $(shell aws cloudformation describe-stacks --stack-name carts-db-stack$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _ORD_P := $(shell aws cloudformation describe-stacks --stack-name orders-dsql-stack$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _ORD_S := $(shell aws cloudformation describe-stacks --stack-name orders-dsql-stack$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _GR := $(shell aws cloudformation describe-stacks --stack-name gr$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _CAN_P := $(shell aws cloudformation describe-stacks --stack-name canaries$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _CAN_S := $(shell aws cloudformation describe-stacks --stack-name canaries$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _MON_P := $(shell aws cloudformation describe-stacks --stack-name monitoring$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _MON_S := $(shell aws cloudformation describe-stacks --stack-name monitoring$(ENV) --region $(STANDBY_REGION) --query 'Stacks[0].StackId' --output text))
-	$(eval _RS := $(shell aws cloudformation describe-stacks --stack-name region-switch$(ENV) --region $(PRIMARY_REGION) --query 'Stacks[0].StackId' --output text))
+	@echo "Deploying tag-based NGRH model (resources discovered by service tag)..."
 	@aws cloudformation deploy --template ./ngrh.yaml --region $(PRIMARY_REGION) \
 	--stack-name ngrh$(ENV) --capabilities CAPABILITY_NAMED_IAM \
-	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION) \
-	AppsArnPrimary=$(_APPS_P) AppsArnStandby=$(_APPS_S) \
-	CatalogDbArnPrimary=$(_CAT_P) CatalogDbArnStandby=$(_CAT_S) \
-	CartsDbArnPrimary=$(_CARTS_P) \
-	OrdersDsqlArnPrimary=$(_ORD_P) OrdersDsqlArnStandby=$(_ORD_S) \
-	GrArn=$(_GR) CanariesArnPrimary=$(_CAN_P) CanariesArnStandby=$(_CAN_S) \
-	MonitoringArnPrimary=$(_MON_P) MonitoringArnStandby=$(_MON_S) \
-	RegionSwitchArn=$(_RS)
+	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION)
 	@echo "NGRH model deployed (stack ngrh$(ENV)). Run 'make ngrh-assess' to run failure-mode assessments."
 
 ngrh-assess:
@@ -895,7 +919,90 @@ ngrh-assess:
 	@echo "Assessments started. View findings per service with:"
 	@echo "  aws resiliencehubv2 list-failure-mode-findings --service-arn <arn> --region $(PRIMARY_REGION)"
 
+####
+# Alarm replay (read-only, design 5.9): how the journey alarms and the failover triggers
+# would have behaved over the last DAYS days of canary data (1-14; CloudWatch keeps
+# one-minute datapoints for 15 days). Run it before arming automatic failover: it exits 3
+# when a trigger's conditions were met, and lists every journey alarm that fired.
+####
+DAYS ?= 14
+
+ngrh-alarm-replay:
+	@python3 -m ngrh_testing replay --primary-region $(PRIMARY_REGION) --standby-region $(STANDBY_REGION) \
+	--env="$(ENV)" --days $(DAYS)
+
+####
+# NGRH tests (design 5.8 and 5.9): deployment/ngrh-tests.json is the spec, and python3 -m
+# ngrh_testing (standard library only, run from this directory) creates, updates and deletes the
+# tests it describes in Resilience Hub. ENV starts with a dash, so it goes after an =.
+####
+NGRH_TESTING_ARGS = --primary-region $(PRIMARY_REGION) --standby-region $(STANDBY_REGION) --env="$(ENV)"
+
+# Create or update every test in the spec, and make its alarm sources match. Re-runnable: a test that
+# matches is left alone. Run it after `make ngrh`, `make monitoring` and `make deploy`.
+ngrh-tests:
+	@python3 -m ngrh_testing reconcile $(NGRH_TESTING_ARGS)
+
+# make ngrh-test-preflight [TEST=<name>|all] [MODE=live|static]: refuse, with every reason, unless a
+# run can go ahead. static leaves out the checks about what is happening right now (alarm states,
+# active runs, FIS experiments, plan executions): CI runs it right after a deploy. Exits 2 when refused.
+TEST ?=
+MODE ?= live
+RUN ?=
+
+ngrh-test-preflight:
+	@python3 -m ngrh_testing preflight $(NGRH_TESTING_ARGS) --test "$(if $(TEST),$(TEST),all)" --mode "$(MODE)"
+
+# make ngrh-test TEST=<name> [ALARM_WAIT=<minutes>] [SETTLE_WAIT=<minutes>]: preflight (live), start the test's
+# run, follow it to its end, and write deployment/ngrh-test-reports/<test>-<run>.{json,md}. The run injects a
+# real fault into the deployed estate, so it names one test; exits 3 if the verdict is not the one the spec expects.
+# ALARM_WAIT first waits up to that long for the test's success and stop alarms to have data: a new
+# deployment's alarms start without it, and preflight refuses a run while one is not OK (CI passes 15).
+# SETTLE_WAIT is how long to wait after the run ends before the report is written (default 10, the length of
+# the evidence window): the hop alarms often change one to three minutes after the fault stops.
+# FAILBACK is auto (the default) or skip. When the Region Switch plan deactivated a Region during the run, which the
+# recovery test makes happen, auto waits for the Region to have been healthy for ten minutes and then runs
+# `make failback` for it, and records that in the report; skip leaves it deactivated and prints the command.
+ALARM_WAIT ?= 0
+SETTLE_WAIT ?=
+FAILBACK ?=
+
+ngrh-test:
+	@python3 -m ngrh_testing run $(NGRH_TESTING_ARGS) --test "$(TEST)" --alarm-wait-minutes "$(ALARM_WAIT)"$(if $(SETTLE_WAIT), --settle-minutes "$(SETTLE_WAIT)")$(if $(FAILBACK), --failback "$(FAILBACK)")
+
+# make ngrh-test-stop TEST=<name> [STOP_WAIT=<minutes>]: stop the test's active run, and with STOP_WAIT wait
+# up to that long for it to end (destroy-ngrh refuses while a run is active; CI passes 10).
+STOP_WAIT ?= 0
+
+ngrh-test-stop:
+	@python3 -m ngrh_testing stop $(NGRH_TESTING_ARGS) --test "$(TEST)" --wait-minutes "$(STOP_WAIT)"
+
+# make ngrh-test-report TEST=<name> [RUN=<id>]: collect a run's report (the test's latest run by default).
+ngrh-test-report:
+	@python3 -m ngrh_testing report $(NGRH_TESTING_ARGS) --test "$(TEST)" $(if $(RUN),--run "$(RUN)")
+
+####
+# Fail-back (design 5.10): make failback REGION=<Region> serves from a Region again after the Region Switch
+# plan moved traffic away from it. It checks the Region has been healthy for ten minutes and no plan execution
+# is going; starts the plan's activate workflow for the Region and waits; puts every service's desired count and
+# Auto Scaling minimum back to 2 in both Regions (the failover scaled the other Region up and nothing scales it
+# down); and switches the catalog database's writer back to PRIMARY_REGION (a switchover, no data loss), waiting
+# up to 45 minutes for an old primary to rejoin after a person failed the database over. Every step is safe to
+# repeat. REGION must be given on the command line: an environment variable of that name would be picked up
+# otherwise. It needs no ngrh stack. Exits 0 when done, 2 when it refused (nothing changed), 3 when it finished
+# except for what it says is left to do.
+####
+failback:
+	@if [ "$(origin REGION)" != "command line" ]; then \
+		echo "usage: make failback REGION=<Region>, for example REGION=$(PRIMARY_REGION)" >&2; exit 2; \
+	fi
+	@python3 -m ngrh_testing failback $(NGRH_TESTING_ARGS) --region "$(REGION)"
+
+# Deleting a service that still has tests is not documented to work, so the tests go first. The tool
+# refuses while a test run is active, and does nothing if the ngrh stack is already gone.
 destroy-ngrh:
+	@echo "Deleting the NGRH tests before the stack..."
+	@python3 -m ngrh_testing delete-tests $(NGRH_TESTING_ARGS)
 	@echo "Emptying NGRH bucket before stack delete..."
 	$(eval NGRH_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='NgrhBucketName'].OutputValue" --output text 2>/dev/null))
 	@if [ -n "$(NGRH_BUCKET)" ] && [ "$(NGRH_BUCKET)" != "None" ]; then \

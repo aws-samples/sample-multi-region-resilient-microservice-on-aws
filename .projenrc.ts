@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import { github } from 'projen';
 import { GitHubProject } from 'projen/lib/github';
 
@@ -32,6 +33,7 @@ project.gitignore.exclude(
   '**/ash_output',
   '**/aggregated_results*',
   'deployment/.build-done/',
+  'deployment/ngrh-test-reports/',
   '.ash/',
   '.claude/',
   '.kiro/',
@@ -144,10 +146,15 @@ dep.config.updates.push(
     'open-pull-requests-limit': 5,
     groups: NON_MAJOR_GROUP,
     labels: AUTO_LABELS,
+    // Dependabot names an image by its path without the registry host, so
+    // public.ecr.aws/docker/library/amazoncorretto is
+    // "docker/library/amazoncorretto". The bare names used before matched
+    // nothing once the Dockerfiles moved to ECR Public, which let the
+    // 2026-09-30 major bumps (#165, #166, #168, #167) through.
     ignore: [
-      { 'dependency-name': 'amazoncorretto', 'update-types': ['version-update:semver-major'] },
-      { 'dependency-name': 'node', 'update-types': ['version-update:semver-major'] },
-      { 'dependency-name': 'golang' },
+      { 'dependency-name': 'docker/library/amazoncorretto', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'docker/library/node', 'update-types': ['version-update:semver-major'] },
+      { 'dependency-name': 'docker/library/golang' },
     ],
   })),
   // GitHub Actions versions are pinned in .projenrc.ts and bumped manually.
@@ -318,10 +325,30 @@ const e2e = new github.GithubWorkflow(project.github!, 'e2e', {
     cancelInProgress: false,
   },
 });
+// The tests the NGRH spec defines, for the manual fault run's choice input below. Read at synth time, so
+// a test added to the spec appears in the input after `npx projen` (a test checks they agree).
+const NGRH_SPEC: { tests: { name: string; template: string }[] } = JSON.parse(fs.readFileSync('deployment/ngrh-tests.json', 'utf8'));
+const NGRH_TEST_NAMES: string[] = NGRH_SPEC.tests.map((t) => t.name);
+// The tests that need the Region Switch plan to start itself: the multi-Region recovery template impairs a Region and
+// passes if the plan's alarm triggers move the traffic. Only a manual run of one of them deploys with the triggers.
+const RECOVERY_TEST_NAMES: string[] = NGRH_SPEC.tests
+  .filter((t) => t.template === 'aws-multi-region-recovery:rtmr002').map((t) => t.name);
+const TRIGGERS_ARMED = RECOVERY_TEST_NAMES.map((n) => `inputs.ngrh_test == '${n}'`).join(' || ');
+
 e2e.on({
   push: { branches: ['main'], paths: E2E_PATHS },
   pullRequest: { branches: ['main'], paths: E2E_PATHS },
-  workflowDispatch: {},
+  workflowDispatch: {
+    inputs: {
+      ngrh_test: {
+        description: 'Run this NGRH fault test against the deployment before teardown (none runs no fault). ' +
+          'It injects a real fault for up to 15 minutes, then uploads its report.',
+        type: 'choice',
+        default: 'none',
+        options: ['none', ...NGRH_TEST_NAMES],
+      },
+    },
+  },
 });
 e2e.addJob('e2e', {
   name: 'Build, Deploy, Test, Teardown',
@@ -330,7 +357,9 @@ e2e.addJob('e2e', {
   // pull_request events triggered by dependabot[bot]. The same code is
   // validated on push:main after merge.
   if: "github.actor != 'dependabot[bot]'",
-  timeoutMinutes: 300,
+  // A run takes about 4h20m. A manual fault run adds up to 15 minutes for the alarms to have data, the
+  // fault's 15 minutes and 20 minutes of grace, so 300 minutes could cut it off mid-teardown.
+  timeoutMinutes: 360,
   permissions: {
     idToken: github.workflows.JobPermission.WRITE,
     contents: github.workflows.JobPermission.READ,
@@ -338,6 +367,14 @@ e2e.addJob('e2e', {
   env: {
     AWS_REGION: 'us-east-1',
     STANDBY_REGION: 'us-west-2',
+    // The manual fault run's input ('none' when the run was not started by hand). It reaches the run
+    // blocks as $NGRH_TEST and never through an expression inside one.
+    NGRH_TEST: "${{ inputs.ngrh_test || 'none' }}",
+    // Whether the Region Switch plan gets its alarm triggers (the Makefile's AUTOMATIC_FAILOVER). Off for every run
+    // except the manual one of a recovery test: a journey failing in one Region while the other is healthy, as it can
+    // while a deployment is still coming up, would otherwise fail the deployment over before the smoke test. A run
+    // that is not started by hand has no input, which compares as not equal.
+    AUTOMATIC_FAILOVER: `\${{ (${TRIGGERS_ARMED}) && 'enabled' || 'disabled' }}`,
     // ENV is set from a short (7-char) git sha in the first step below.
     // Uses PR head SHA (not GITHUB_SHA which is the merge commit for
     // pull_request events -- merge SHAs can collide with prior runs).
@@ -378,12 +415,12 @@ e2e.addJob('e2e', {
     {
       name: 'Build images (both regions)',
       workingDirectory: 'deployment',
-      run: 'make build-images ENV=${{ env.ENV }}',
+      run: 'make build-images "ENV=${ENV}"',
     },
     {
       name: 'Deploy (full multi-region)',
       workingDirectory: 'deployment',
-      run: 'make deploy ENV=${{ env.ENV }}',
+      run: 'make deploy "ENV=${ENV}" "AUTOMATIC_FAILOVER=${AUTOMATIC_FAILOVER}"',
     },
     {
       name: 'Capture failure diagnostics',
@@ -392,7 +429,7 @@ e2e.addJob('e2e', {
         'set +e',
         'BAD_STATUSES="CREATE_FAILED ROLLBACK_IN_PROGRESS ROLLBACK_COMPLETE ROLLBACK_FAILED UPDATE_ROLLBACK_COMPLETE UPDATE_ROLLBACK_FAILED REVIEW_IN_PROGRESS CREATE_IN_PROGRESS"',
         'echo "::group::Failed and in-progress stacks (both regions)"',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
         '  echo "=== $region ==="',
         '  aws cloudformation list-stacks --region "$region" --no-cli-pager \\',
         '    --query "StackSummaries[?StackStatus==\'CREATE_FAILED\' || StackStatus==\'ROLLBACK_IN_PROGRESS\' || StackStatus==\'ROLLBACK_COMPLETE\' || StackStatus==\'ROLLBACK_FAILED\' || StackStatus==\'UPDATE_ROLLBACK_COMPLETE\' || StackStatus==\'UPDATE_ROLLBACK_FAILED\' || StackStatus==\'REVIEW_IN_PROGRESS\' || StackStatus==\'CREATE_IN_PROGRESS\'].[StackName, StackStatus]" \\',
@@ -401,11 +438,11 @@ e2e.addJob('e2e', {
         'echo "::endgroup::"',
         '',
         '# Enumerate all failed/rollback stacks for our ENV suffix and pull detailed diagnostics for each.',
-        'echo "::group::Per-stack diagnostics for this run (ENV=${{ env.ENV }})"',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        'echo "::group::Per-stack diagnostics for this run (ENV=${ENV})"',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
         '  echo "=== $region ==="',
         '  STACKS=$(aws cloudformation list-stacks --region "$region" --no-cli-pager \\',
-        '    --query "StackSummaries[?(StackStatus==\'CREATE_FAILED\' || StackStatus==\'ROLLBACK_IN_PROGRESS\' || StackStatus==\'ROLLBACK_COMPLETE\' || StackStatus==\'ROLLBACK_FAILED\' || StackStatus==\'UPDATE_ROLLBACK_COMPLETE\' || StackStatus==\'UPDATE_ROLLBACK_FAILED\' || StackStatus==\'REVIEW_IN_PROGRESS\') && contains(StackName, \'${{ env.ENV }}\')].StackName" \\',
+        '    --query "StackSummaries[?(StackStatus==\'CREATE_FAILED\' || StackStatus==\'ROLLBACK_IN_PROGRESS\' || StackStatus==\'ROLLBACK_COMPLETE\' || StackStatus==\'ROLLBACK_FAILED\' || StackStatus==\'UPDATE_ROLLBACK_COMPLETE\' || StackStatus==\'UPDATE_ROLLBACK_FAILED\' || StackStatus==\'REVIEW_IN_PROGRESS\') && contains(StackName, \'${ENV}\')].StackName" \\',
         '    --output text)',
         '  for stack in $STACKS; do',
         '    echo "--- $stack ---"',
@@ -424,6 +461,19 @@ e2e.addJob('e2e', {
       ].join('\n'),
     },
     {
+      // Design 5.12: every run creates the NGRH tests from deployment/ngrh-tests.json, then checks they
+      // could run (roles, templates, alarms, the services' fault readiness). No fault is injected: the
+      // static preflight leaves out the checks about what is happening right now.
+      name: 'Reconcile NGRH tests',
+      workingDirectory: 'deployment',
+      run: 'make ngrh-tests "ENV=${ENV}"',
+    },
+    {
+      name: 'Check NGRH tests (static preflight)',
+      workingDirectory: 'deployment',
+      run: 'make ngrh-test-preflight TEST=all MODE=static "ENV=${ENV}"',
+    },
+    {
       name: 'Smoke test',
       workingDirectory: 'deployment',
       run: [
@@ -433,12 +483,12 @@ e2e.addJob('e2e', {
         '# are the actual user-facing health signal. Check that at least',
         '# one canary per region has run and reported PASSED within the',
         '# last 15 minutes.',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
         '  echo "===== $region ====="',
         '  CANARIES=$(aws synthetics describe-canaries --region "$region" --no-cli-pager \\',
-        '    --query "Canaries[?contains(Name, \'${{ env.ENV }}\')].Name" --output text)',
+        '    --query "Canaries[?contains(Name, \'${ENV}\')].Name" --output text)',
         '  if [ -z "$CANARIES" ]; then',
-        '    echo "$region: no canaries found for ENV=${{ env.ENV }}"',
+        '    echo "$region: no canaries found for ENV=${ENV}"',
         '    exit 1',
         '  fi',
         '  echo "Canaries: $CANARIES"',
@@ -465,12 +515,67 @@ e2e.addJob('e2e', {
       ].join('\n'),
     },
     {
+      // Only when someone started the workflow by hand and chose a test. The smoke test above has
+      // shown the canaries pass, which is where the test's success alarms start. The alarms of a new
+      // deployment start without data, so the run waits up to 15 minutes for them before its own
+      // preflight. The verdict not being the one the spec expects fails the step (exit 3), and the
+      // report is uploaded either way.
+      name: 'Run NGRH fault test',
+      if: "env.NGRH_TEST != 'none'",
+      workingDirectory: 'deployment',
+      run: 'make ngrh-test "TEST=${NGRH_TEST}" "ENV=${ENV}" ALARM_WAIT=15',
+    },
+    {
+      // A run still going when the job ends (the step above was cancelled, or outlasted its budget)
+      // would make destroy-ngrh refuse to delete the tests, and a run that was asked to stop still
+      // counts as active until it ends. Best effort: this step must not fail the job.
+      name: 'Stop NGRH fault test if still running',
+      if: "always() && env.NGRH_TEST != 'none'",
+      workingDirectory: 'deployment',
+      run: 'make ngrh-test-stop "TEST=${NGRH_TEST}" "ENV=${ENV}" STOP_WAIT=10 || true',
+    },
+    {
+      name: 'Upload NGRH test reports',
+      if: "always() && env.NGRH_TEST != 'none'",
+      uses: 'actions/upload-artifact@v7',
+      with: {
+        'name': 'ngrh-test-reports',
+        'path': 'deployment/ngrh-test-reports',
+        'if-no-files-found': 'ignore',
+        'retention-days': 30,
+      },
+    },
+    {
+      // An Amazon MQ broker's three log groups are named by its id and nothing of the run, and the
+      // broker is gone by the time the log group step runs, so the ids are written down here, while
+      // it still exists. It runs after a failed run too: the ids in the log tell whoever cleans up
+      // that run's log groups by hand which ones are its. A Region it can't list is a warning, since
+      // the run's verdict is not this step's, and its list is left empty so the next step can read it.
+      name: 'Record the message brokers of this run',
+      if: 'always()',
+      run: [
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  list="${RUNNER_TEMP}/mq-brokers-${region}.txt"',
+        '  : > "$list"',
+        '  found=""',
+        '  if ids=$(aws mq list-brokers --region "$region" --query "BrokerSummaries[?BrokerName==\'retail-store-ar-ordersmq${ENV}\'].BrokerId" --output text); then',
+        '    for id in $ids; do',
+        '      if [ "$id" != None ]; then echo "$id" >> "$list"; found="$found $id"; fi',
+        '    done',
+        '    echo "$region: message brokers of this run:${found:- none}"',
+        '  else',
+        '    echo "::warning::Could not list the message brokers in $region, so their log groups will not be deleted"',
+        '  fi',
+        'done',
+      ].join('\n'),
+    },
+    {
       name: 'Teardown',
       if: 'always()',
       workingDirectory: 'deployment',
       run: [
         'echo "Cleaning up e2e environment..."',
-        'make destroy-all ENV=${{ env.ENV }} || true',
+        'make destroy-all "ENV=${ENV}" || true',
         '',
         '# destroy-all stops at its first failing target, so a stall anywhere in',
         '# the database chain leaves every stack queued behind it -- secrets-rotation,',
@@ -482,14 +587,14 @@ e2e.addJob('e2e', {
         '# security group whose Lambda ENIs had not yet been released.',
         'is_db_or_vpc() {',
         '  case "$1" in',
-        '    baseInfra${{ env.ENV }}|baseVpc${{ env.ENV }}|catalog-db-stack${{ env.ENV }}|carts-db-stack${{ env.ENV }}|orders-dsql-stack${{ env.ENV }}) return 0 ;;',
+        '    baseInfra${ENV}|baseVpc${ENV}|catalog-db-stack${ENV}|carts-db-stack${ENV}|orders-dsql-stack${ENV}) return 0 ;;',
         '    *) return 1 ;;',
         '  esac',
         '}',
         'sweep_pass() {',
         '  local region name',
-        '  for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '    for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${{ env.ENV }}\') && !ends_with(StackStatus, \'_IN_PROGRESS\')].StackName" --output text 2>/dev/null || true); do',
+        '  for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '    for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${ENV}\') && !ends_with(StackStatus, \'_IN_PROGRESS\')].StackName" --output text 2>/dev/null || true); do',
         '      is_db_or_vpc "$name" && continue',
         '      echo "$region: $name still present, deleting"',
         '      aws cloudformation delete-stack --stack-name "$name" --region "$region" || true',
@@ -501,8 +606,8 @@ e2e.addJob('e2e', {
         '  local i region name busy',
         '  for i in $(seq 1 90); do',
         '    busy=""',
-        '    for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '      for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${{ env.ENV }}\') && ends_with(StackStatus, \'_IN_PROGRESS\')].StackName" --output text 2>/dev/null || true); do',
+        '    for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '      for name in $(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${ENV}\') && ends_with(StackStatus, \'_IN_PROGRESS\')].StackName" --output text 2>/dev/null || true); do',
         '        is_db_or_vpc "$name" || busy="$busy $region/$name"',
         '      done',
         '    done',
@@ -527,33 +632,33 @@ e2e.addJob('e2e', {
         '# a retained retry on DELETE_FAILED), and the VPC stacks are touched only',
         '# once no database stack remains in either region.',
         'present() { aws cloudformation describe-stacks --stack-name "$1" --region "$2" >/dev/null 2>&1; }',
-        'if present catalog-db-stack${{ env.ENV }} ${{ env.STANDBY_REGION }} || present catalog-db-stack${{ env.ENV }} ${{ env.AWS_REGION }}; then',
-        '  ./detach-global-cluster.sh catalog-global-db-cluster${{ env.ENV }} ${{ env.AWS_REGION }} || true',
-        '  ./safe-delete-db-stack.sh catalog-db-stack${{ env.ENV }} ${{ env.STANDBY_REGION }} aurora DBCluster || true',
-        '  aws rds delete-global-cluster --global-cluster-identifier catalog-global-db-cluster${{ env.ENV }} --region ${{ env.AWS_REGION }} --no-cli-pager 2>/dev/null || true',
-        '  ./safe-delete-db-stack.sh catalog-db-stack${{ env.ENV }} ${{ env.AWS_REGION }} aurora DBCluster || true',
+        'if present catalog-db-stack${ENV} ${STANDBY_REGION} || present catalog-db-stack${ENV} ${AWS_REGION}; then',
+        '  ./detach-global-cluster.sh catalog-global-db-cluster${ENV} ${AWS_REGION} || true',
+        '  ./safe-delete-db-stack.sh catalog-db-stack${ENV} ${STANDBY_REGION} aurora DBCluster || true',
+        '  aws rds delete-global-cluster --global-cluster-identifier catalog-global-db-cluster${ENV} --region ${AWS_REGION} --no-cli-pager 2>/dev/null || true',
+        '  ./safe-delete-db-stack.sh catalog-db-stack${ENV} ${AWS_REGION} aurora DBCluster || true',
         'fi',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '  if present orders-dsql-stack${{ env.ENV }} "$region"; then',
-        '    ./safe-delete-db-stack.sh orders-dsql-stack${{ env.ENV }} "$region" dsql OrdersDsqlCluster || true',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  if present orders-dsql-stack${ENV} "$region"; then',
+        '    ./safe-delete-db-stack.sh orders-dsql-stack${ENV} "$region" dsql OrdersDsqlCluster || true',
         '  fi',
-        '  if present carts-db-stack${{ env.ENV }} "$region"; then',
-        '    aws cloudformation delete-stack --stack-name carts-db-stack${{ env.ENV }} --region "$region" || true',
-        '    aws cloudformation wait stack-delete-complete --stack-name carts-db-stack${{ env.ENV }} --region "$region" || true',
+        '  if present carts-db-stack${ENV} "$region"; then',
+        '    aws cloudformation delete-stack --stack-name carts-db-stack${ENV} --region "$region" || true',
+        '    aws cloudformation wait stack-delete-complete --stack-name carts-db-stack${ENV} --region "$region" || true',
         '  fi',
         'done',
         'remaining=""',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '  for stack in catalog-db-stack${{ env.ENV }} carts-db-stack${{ env.ENV }} orders-dsql-stack${{ env.ENV }}; do',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  for stack in catalog-db-stack${ENV} carts-db-stack${ENV} orders-dsql-stack${ENV}; do',
         '    if present "$stack" "$region"; then remaining="$remaining $region/$stack"; fi',
         '  done',
         'done',
         'if [ -n "$remaining" ]; then',
         '  echo "::warning::Database stacks still present, leaving baseInfra and baseVpc in place so a retry can finish:$remaining"',
         'else',
-        '  for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '    aws cloudformation delete-stack --stack-name baseInfra${{ env.ENV }} --region "$region" || true',
-        '    aws cloudformation wait stack-delete-complete --stack-name baseInfra${{ env.ENV }} --region "$region" || true',
+        '  for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '    aws cloudformation delete-stack --stack-name baseInfra${ENV} --region "$region" || true',
+        '    aws cloudformation wait stack-delete-complete --stack-name baseInfra${ENV} --region "$region" || true',
         '  done',
         '  # baseVpc: standby first (peering connection lives on standby side).',
         '  # delete-vpc-stack.sh empties the canary bucket immediately before each',
@@ -563,21 +668,21 @@ e2e.addJob('e2e', {
         '  # land hours later, so a plain delete here fails on canaryBucket ("The',
         '  # bucket you tried to delete is not empty") -- run 35887370433 lost its',
         '  # standby baseVpc to three ALB log objects written 33s after the empty.',
-        '  ./delete-vpc-stack.sh baseVpc${{ env.ENV }} ${{ env.STANDBY_REGION }} || true',
-        '  ./delete-vpc-stack.sh baseVpc${{ env.ENV }} ${{ env.AWS_REGION }} || true',
+        '  ./delete-vpc-stack.sh baseVpc${ENV} ${STANDBY_REGION} || true',
+        '  ./delete-vpc-stack.sh baseVpc${ENV} ${AWS_REGION} || true',
         'fi',
         '',
         '# Delete ECR repos in both regions.',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '  for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node; do',
-        '    aws ecr delete-repository --force --repository-name ${repo}${{ env.ENV }} --region "$region" --no-cli-pager 2>/dev/null || true',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  for repo in catalog checkout ui carts assets orders cloudwatch-agent adot-autoinstrumentation-java adot-autoinstrumentation-node amazon-ssm-agent; do',
+        '    aws ecr delete-repository --force --repository-name ${repo}${ENV} --region "$region" --no-cli-pager 2>/dev/null || true',
         '  done',
         'done',
         '',
         '# Force-delete secrets to avoid recovery-window conflicts on re-runs.',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
         '  for secret in HostedZoneIdSecret DNSRecordSecret mr-app/ecs-cluster-arn-${region} mr-app/catalog-${region}-global-db-cluster Alb-${region}; do',
-        '    aws secretsmanager delete-secret --secret-id "${secret}${{ env.ENV }}" --force-delete-without-recovery --region "$region" --no-cli-pager 2>/dev/null || true',
+        '    aws secretsmanager delete-secret --secret-id "${secret}${ENV}" --force-delete-without-recovery --region "$region" --no-cli-pager 2>/dev/null || true',
         '  done',
         'done',
         '',
@@ -587,16 +692,16 @@ e2e.addJob('e2e', {
         '# stacks are gone; one left behind counts as an incomplete teardown, since at',
         '# 50 leaked namespaces every later deploy fails on EcsCluster.',
         'cloudmap_left=""',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '  ./delete-cloudmap-namespace.sh retail-store-ar${{ env.ENV }} "$region" || cloudmap_left="$cloudmap_left $region/retail-store-ar${{ env.ENV }}"',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  ./delete-cloudmap-namespace.sh retail-store-ar${ENV} "$region" || cloudmap_left="$cloudmap_left $region/retail-store-ar${ENV}"',
         'done',
         '',
         '# Say what is left. Every stack of this run carries the ENV suffix, so an',
         '# empty list is the only real proof the estate is gone; the ECS clusters',
         '# and Aurora instances are what bill when it is not.',
         'left=""',
-        'for region in ${{ env.AWS_REGION }} ${{ env.STANDBY_REGION }}; do',
-        '  names=$(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${{ env.ENV }}\')].StackName" --output text 2>/dev/null || true)',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  names=$(aws cloudformation describe-stacks --region "$region" --query "Stacks[?ends_with(StackName, \'${ENV}\')].StackName" --output text 2>/dev/null || true)',
         '  if [ -n "$names" ]; then left="$left $region: $names"; fi',
         'done',
         'incomplete=""',
@@ -606,6 +711,26 @@ e2e.addJob('e2e', {
         '  echo "::warning::Teardown incomplete,$incomplete"',
         'else',
         '  echo "Teardown complete"',
+        'fi',
+      ].join('\n'),
+    },
+    {
+      // Lambda (the canaries and the custom resources), CodeBuild, Container Insights, RDS and
+      // the services create log groups outside CloudFormation, so the Teardown above leaves
+      // them, 44 per run across the two Regions, and none of them expires. The step runs only
+      // after a passing run: a failed one keeps its logs for the post-mortem, which is all that
+      // is left of it once its stacks are gone. A region it cannot clean is a warning, like the
+      // Teardown's. Each Region's broker ids come from the step that recorded them.
+      name: 'Delete log groups of this run',
+      if: 'success()',
+      workingDirectory: 'deployment',
+      run: [
+        'left=""',
+        'for region in ${AWS_REGION} ${STANDBY_REGION}; do',
+        '  ./delete-run-log-groups.sh "${ENV}" "$region" "${RUNNER_TEMP}/mq-brokers-${region}.txt" || left="$left $region"',
+        'done',
+        'if [ -n "$left" ]; then',
+        '  echo "::warning::Log groups of this run could not all be deleted in:$left"',
         'fi',
       ].join('\n'),
     },
