@@ -57,9 +57,11 @@ STEPS = [("scale-up-ecs-services", "2026-10-06T16:04:15+00:00", "2026-10-06T16:0
 def execution(execution_id="exec-0001", action="deactivate", region=PRIMARY, state="completed",
               start="2026-10-06T16:04:10+00:00", end="2026-10-06T16:11:40+00:00", **extra):
     """An execution as ListPlanExecutions and GetPlanExecution give it, deactivating the primary during the fake run.
-    The comment is made up: what ARC writes there for an execution a trigger started is not documented."""
+    The comment has the form ARC wrote on the trigger-started executions in test4 (read 2026-10-08): the fixed text and the
+    trigger's description in square brackets. Their mode was graceful; nothing observed yet says a trigger can start another."""
     body = {"executionId": execution_id, "executionAction": action, "executionRegion": region, "executionState": state,
-            "startTime": start, "mode": "graceful", "comment": "Execution started by automated trigger",
+            "startTime": start, "mode": "graceful",
+            "comment": "Execution started by automated trigger [Deactivate us-east-1: its catalog journey fails there, and us-west-2 sees it fail too while us-west-2 is healthy]",
             "plan": {"recoveryTimeObjectiveMinutes": 10},
             "stepStates": [{"name": n, "status": "completed", "startTime": a, "endTime": b, "stepMode": "graceful"} for n, a, b in STEPS],
             "generatedReportDetails": [{"reportGenerationTime": end, "reportOutput": {"s3ReportOutput": {"s3ObjectKey": f"executions/{execution_id}/report.json"}}}]}
@@ -71,10 +73,14 @@ def execution(execution_id="exec-0001", action="deactivate", region=PRIMARY, sta
     return body
 
 
-def add_execution(fake, **kwargs):
-    """Put an execution in the plan's history, listed at both Regional endpoints as ARC does."""
+def add_execution(fake, held_at=None, **kwargs):
+    """Put an execution in the plan's history, at the one endpoint it ran at (``held_at``, a list of Regions, overrides):
+    a deactivate of a Region ran at the endpoint of the other, an activate at its own. Every execution read on 2026-10-08
+    (56, in two accounts) was listed at exactly one endpoint, and the other endpoint does not know it."""
     body = execution(**kwargs)
-    for region in (PRIMARY, STANDBY):
+    endpoints = held_at or [(STANDBY if body["executionRegion"] == PRIMARY else PRIMARY) if body["executionAction"] == "deactivate"
+                            else body["executionRegion"]]
+    for region in endpoints:
         fake.plan_executions[region].append(dict(body))
     return body
 
@@ -589,13 +595,31 @@ class TestReadingExecutions:
         details = [c for c in fake.calls if c[1] == "get-plan-execution"]
         assert [c[2] for c in details] == [STANDBY]                  # one read, at the Region that stays
 
-    def test_when_that_endpoint_fails_the_other_one_is_asked(self):
+    def test_when_that_endpoint_does_not_know_the_execution_the_other_one_is_asked(self):
+        # Not observed yet: a deactivate that a trigger started might run at the endpoint of the Region it deactivates,
+        # not at the other one (every trigger-started execution seen so far was an activate). The detail is then not at
+        # the endpoint tried first, which answers ResourceNotFoundException, and the other endpoint has it.
+        fake = fully_reconciled_fake()
+        add_execution(fake, held_at=[PRIMARY])
+        found, problems = executions.in_window(fake, environment(fake), PLAN_ARN, RUN_START, RUN_END)
+        assert problems == [] and found[0]["steps"] is not None
+        assert [c[2] for c in fake.calls if c[1] == "get-plan-execution"] == [STANDBY, PRIMARY]
+
+    def test_the_other_endpoint_does_not_know_an_execution_that_ran_elsewhere(self):
+        fake = fully_reconciled_fake()
+        add_execution(fake)                                        # a deactivate of the primary: it ran at the standby's endpoint
+        with pytest.raises(AwsCliError, match="ResourceNotFoundException"):
+            fake.call("arc-region-switch", "get-plan-execution", PRIMARY, plan_arn=PLAN_ARN, execution_id="exec-0001")
+        assert fake.call("arc-region-switch", "get-plan-execution", STANDBY, plan_arn=PLAN_ARN, execution_id="exec-0001")["executionId"] == "exec-0001"
+
+    def test_when_the_endpoint_that_holds_it_fails_the_detail_is_a_gap_not_a_guess(self):
         fake = fully_reconciled_fake()
         add_execution(fake)
         fake.fail_on("arc-region-switch", "get-plan-execution", "EndpointConnectionError")
         found, problems = executions.in_window(fake, environment(fake), PLAN_ARN, RUN_START, RUN_END)
-        assert problems == [] and found[0]["steps"] is not None
-        assert [c[2] for c in fake.calls if c[1] == "get-plan-execution"] == [STANDBY, PRIMARY]
+        assert found[0]["steps"] is None and found[0]["state"] == "completed", "the list still says what happened"
+        (problem,) = problems
+        assert "plan execution exec-0001 could not be read" in problem and "EndpointConnectionError" in problem and "ResourceNotFoundException" in problem
 
     def test_when_no_endpoint_answers_the_summary_stands_in_without_steps_and_a_problem_says_why(self):
         fake = fully_reconciled_fake()
@@ -622,9 +646,31 @@ class TestReadingExecutions:
         found, _ = executions.in_window(fake, environment(fake), PLAN_ARN, RUN_START, RUN_END)
         assert [e["executionId"] for e in found] == ["just-before"]
 
-    def test_an_execution_listed_at_both_endpoints_is_one(self):
+    def test_each_endpoint_lists_only_what_ran_there_so_both_are_read(self):
+        # A deactivate of the primary ran at the standby's endpoint; an activate of the primary at its own. Nothing is
+        # listed at both (56 of 56 real executions), so reading one endpoint would miss half of what happened.
+        fake = fully_reconciled_fake()
+        add_execution(fake, execution_id="away")
+        add_execution(fake, execution_id="back", action="activate", start="2026-10-06T16:20:00+00:00")
+        assert [e["executionId"] for e in fake.plan_executions[STANDBY]] == ["away"]
+        assert [e["executionId"] for e in fake.plan_executions[PRIMARY]] == ["back"]
+        found, problems = executions.in_window(fake, environment(fake), PLAN_ARN, RUN_START, RUN_END)
+        assert problems == [] and [e["executionId"] for e in found] == ["away", "back"]
+
+    def test_an_execution_whose_endpoint_cannot_be_listed_is_missing_and_a_problem_says_so(self):
+        # The cost of one execution living at one endpoint: if that endpoint can't be listed, the execution is invisible,
+        # and the only thing the report and the checks can do is say that they could not look.
+        fake = fully_reconciled_fake()
+        add_execution(fake)                                        # held at the standby's endpoint
+        fake.fail_on("arc-region-switch", "list-plan-executions", "AccessDenied", on_region=STANDBY)
+        found, problems = executions.in_window(fake, environment(fake), PLAN_ARN, RUN_START, RUN_END)
+        assert found == [] and len(problems) == 1 and f"could not list plan executions at the {STANDBY} endpoint" in problems[0]
+
+    def test_an_execution_an_endpoint_lists_twice_is_still_one(self):
+        # Defensive only: ARC has not been seen to do this.
         fake = fully_reconciled_fake()
         add_execution(fake)
+        fake.plan_executions[STANDBY].append(dict(fake.plan_executions[STANDBY][0]))
         found, _ = executions.in_window(fake, environment(fake), PLAN_ARN, RUN_START, RUN_END)
         assert len(found) == 1
 
@@ -824,7 +870,7 @@ class TestTheReportsPlanExecutions:
         assert "## Run checks" in text and "- PASS deactivate-completed: execution exec-0001 deactivated us-east-1" in text
         section = text.split("## Region Switch plan executions during the run")[1].split("## Timeline")[0]
         assert "- exec-0001: deactivate us-east-1, graceful, completed. 16:04:10 to 16:11:40. Recovery time 7 min 30 s against the objective of 10 min" in section
-        assert 'Started with the comment "Execution started by automated trigger"' in section
+        assert 'Started with the comment "Execution started by automated trigger [Deactivate us-east-1: its catalog journey fails there' in section
         assert "  - scale-up-ecs-services: completed, 16:04:15 to 16:05:20" in section
         assert "  - switch-over-catalog-db: completed, 16:06:30 to 16:11:40" in section
         assert "  - ARC's report: s3 key executions/exec-0001/report.json" in section

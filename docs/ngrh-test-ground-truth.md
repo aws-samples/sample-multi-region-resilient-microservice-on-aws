@@ -121,21 +121,30 @@ the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be hea
   database, and the execution waits in `pausedByFailedStep` with traffic already moved. The README's runbook has the
   three ways out, and `make failback` refuses until the execution is resolved.
 
+**Known from other accounts (read-only, 2026-10-08), and so no longer open:**
+
+- **`executionRegion` is the Region the execution targets.** In the demo account (6 plans, 56 distinct executions) and in
+  test4 (1 plan, 7), every execution is listed at one endpoint only, the one it ran at. All 46 activates there have
+  `executionRegion` equal to that endpoint, and all 10 deactivates have the other Region: a deactivate of us-east-1 is
+  held at us-west-2's endpoint with `executionRegion` us-east-1, which is how `StartPlanExecution`'s `targetRegion`
+  reads. The endpoint that did not run an execution answers `GetPlanExecution` with `ResourceNotFoundException`. So the
+  run check, the choice of which Region `run` fails back and the live preflight read it correctly, and every endpoint has
+  to be listed to see all executions (an endpoint that can't be listed hides what ran there, and the report says so).
+- **A trigger-started execution is graceful.** Both of test4's (2026-09-28 and 2026-09-30) ran in mode `graceful`. A
+  graceful Aurora step can only switch over, so an automatic run cannot lose data. Their comment is the fixed text
+  `Execution started by automated trigger` followed by the trigger's description in square brackets, so the report shows
+  which of the eight triggers fired. Both were `activate` executions, so which endpoint a trigger-started `deactivate`
+  runs at is still unobserved (the code reads the surviving Region's endpoint first and falls back to the other).
+- **A deactivate ends `completed`.** 9 of the demo account's 10 did (one was cancelled), all graceful.
+
 **Not known before the first run:**
 
 - Whether Resilience Hub only records the plan named in `regionSwitchPlan` (current documentation) or starts it
   itself (the template's own description says "to execute during the test"). The report lists every execution that
   started during the run with its mode and comment, and a second execution started a moment after the first would
   be this.
-- What `executionRegion` means in `list-plan-executions` and `get-plan-execution`. The API documents it only as "the
-  Region for a plan execution". The run check, the choice of which Region `run` fails back and the live preflight
-  all read it as the Region the execution targets, so a deactivate of us-east-1 has `executionRegion` us-east-1,
-  which is how `StartPlanExecution`'s `targetRegion` reads. If it is the Region whose endpoint ran the execution, the
-  check fails a correct run, and the fix is one line in `executions.py`. The timed, operator-started failover that
-  comes before this test settles it.
-- Whether `completedMonitoringApplicationHealth` or `completed` is the state a trigger-started execution ends in;
-  both count.
-- What comment, if any, ARC records on an execution its triggers started. Nothing reads it; the report prints it.
+- Whether a trigger-started execution ends `completedMonitoringApplicationHealth` or `completed`; both count. A
+  manual deactivate ended `completed`.
 - Whether `StartTestRun` accepts the five source alarms. The API says only alarms found during a service assessment
   can be test sources. Catalog's assessment of 2026-09-08 was older than all five alarms (created 2026-10-06), so it
   was assessed again on 2026-10-08 (17:28 to 17:43Z, 19 findings, no cost) before any run. For orders an assessment

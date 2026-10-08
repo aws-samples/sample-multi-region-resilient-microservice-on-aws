@@ -7,9 +7,15 @@ run was going, with its steps and ARC's own measurement of the recovery time, an
 names look at that list. ``run`` also reads it to know which Regions the run's failover deactivated, so that
 ``make failback`` can bring them back.
 
-An execution is listed at both Regional endpoints, so the list is merged by id (api.plan_executions). Its detail
-is read from the endpoint of the surviving Region first for a deactivate, because the Region being deactivated may
-be the one in trouble, and from the target Region's for an activate, which runs there.
+An endpoint lists only the executions that ran at it (api.plan_executions reads every endpoint and merges). A deactivate
+of A runs at the endpoint of the Region that stays, B, and an activate of A at A's own: of 56 distinct executions in two
+accounts, read on 2026-10-08, every one was listed at one endpoint, every activate had ``executionRegion`` equal to that
+endpoint, and every deactivate had the other Region there. ``executionRegion`` is therefore the Region the execution
+targets, as ``StartPlanExecution``'s ``targetRegion`` is. The other endpoint answers GetPlanExecution for such an
+execution with ResourceNotFoundException. So the detail is read from the endpoint of the surviving Region first for a
+deactivate (the Region being deactivated may be the one in trouble) and from the target Region's for an activate; the
+other endpoint is only a fallback, for an execution a trigger started that turns out to run elsewhere (not observed
+yet: every trigger-started execution seen so far was an activate).
 """
 
 from __future__ import annotations

@@ -112,7 +112,10 @@ def ecs_cluster(aws: AwsCli, region: str, env_suffix: str) -> str:
 
 def plan_executions(aws: AwsCli, plan_arn: str, regions: Sequence[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Every execution of the plan, merged from the endpoint of each Region and oldest first, and one line for
-    each endpoint that could not be read. ARC lists an execution at both endpoints, so the merge is by id."""
+    each endpoint that could not be read. An endpoint lists only the executions that ran at it: a deactivate of A
+    runs at B's endpoint, an activate of A at A's (56 of 56 distinct executions in two accounts were listed at one
+    endpoint only, 2026-10-08), so every endpoint has to be read, and an execution whose endpoint can't be read is not
+    in the result: that is what the problem line says. The merge by id only guards against a repeat."""
     executions: Dict[str, Dict[str, Any]] = {}
     problems: List[str] = []
     for region in regions:

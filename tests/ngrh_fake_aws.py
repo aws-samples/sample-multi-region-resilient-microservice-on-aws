@@ -104,7 +104,7 @@ class FakeAws:
     def __init__(self, env: str = ENV, account: str = ACCOUNT) -> None:
         self.env, self.account = env, account
         self.calls: List[Call] = []
-        self._errors: Dict[Tuple[str, str], List[str]] = {}
+        self._errors: Dict[Tuple[str, str], List[Tuple[str, Optional[str]]]] = {}   # (service, operation) -> (message, Region it applies to or None)
         self.outputs: Optional[Dict[str, str]] = {
             "ServiceArns": ",".join(service_arn(s, account) for s in NGRH_SERVICES),
             "TestExperimentRoleName": f"ngrh-test-experiment{env}",
@@ -274,8 +274,9 @@ class FakeAws:
         """Run ``change`` on the ``polls``-th describe-global-clusters call: the old primary rejoining, or becoming available."""
         self._global_changes.append((polls, change))
 
-    def fail_on(self, service: str, operation: str, message: str, times: int = 1) -> None:
-        self._errors.setdefault((service, operation), []).extend([message] * times)
+    def fail_on(self, service: str, operation: str, message: str, times: int = 1, on_region: Optional[str] = None) -> None:
+        """Make the next ``times`` calls of the operation fail; with ``on_region`` only calls made at that Region's endpoint count."""
+        self._errors.setdefault((service, operation), []).extend([(message, on_region)] * times)
 
     # --- what tests assert on ---------------------------------------------------------------
 
@@ -291,7 +292,10 @@ class FakeAws:
         self.calls.append((service, operation, region, params))
         queued = self._errors.get((service, operation))
         if queued:
-            raise AwsCliError(f"aws {service} {operation} in {region} failed: {queued.pop(0)}")
+            for index, (message, on_region) in enumerate(queued):
+                if on_region is None or on_region == region:
+                    del queued[index]
+                    raise AwsCliError(f"aws {service} {operation} in {region} failed: {message}")
         handler = self._handlers.get((service, operation))
         if handler is None:
             raise AssertionError(f"FakeAws has no handler for {service} {operation}")
@@ -567,9 +571,14 @@ class FakeAws:
                 "deactivateRegion": other if action == "activate" else target_region}
 
     def _get_plan_execution(self, region: Optional[str], plan_arn: str, execution_id: str) -> Dict[str, Any]:
-        for listed in (x for items in self.plan_executions.values() for x in items):
-            if listed["executionId"] == execution_id:     # an execution the test put in the list: its detail is what it was given
-                return {"planArn": plan_arn, "mode": "graceful", **listed}
+        for held_at, items in self.plan_executions.items():
+            for listed in items:
+                if listed["executionId"] != execution_id:
+                    continue
+                if held_at != region:        # an endpoint answers only for the executions that ran at it (2026-10-08, two accounts)
+                    raise self._error("arc-region-switch", "get-plan-execution", "ResourceNotFoundException",
+                                      f"Execution not found for execution: {execution_id}")
+                return {"planArn": plan_arn, "mode": "graceful", **listed}   # an execution the test put in the list: its detail is what it was given
         e = self.started_executions[execution_id]
         state = self.execution_script[min(e["polls"], len(self.execution_script) - 1)]
         e["polls"] += 1
