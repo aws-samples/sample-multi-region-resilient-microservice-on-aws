@@ -109,11 +109,19 @@ the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be hea
 **What would contradict it:**
 
 - The run ends `FAILED` although the deactivate completed: the global alarms came back after the 10 minutes. The
-  budget is tight (the design estimates 6.5 to 11.5 minutes: 3 to 4 to detect, a minute to scale up, up to a minute
-  for the DNS change, up to a minute and a half for the next canary run, 3 to 4 for the alarms to clear), and ARC
-  adds two delays it does not publish, from the alarms to the start of the plan and from the plan to the health
-  checks. The report's timeline shows where the time went. Either the alarms or the plan get faster, or the
-  expectation changes to what the run shows.
+  budget is tight. The design estimated 6.5 to 11.5 minutes (3 to 4 to detect, a minute to scale up, up to a minute
+  for the DNS change, up to a minute and a half for the next canary run, 3 to 4 for the alarms to clear). The one
+  plan execution measured so far (an operator-started deactivate of us-east-1 in test2, 2026-10-08, nothing
+  failing) took 6 minutes 18 seconds from its start, and two of the estimates were low: scaling up took 65 to 195
+  seconds (carts last, because two extra Java tasks take that long to start), not a minute, and the DNS step took
+  121 seconds, not up to one, because it waits for Route 53 to show the health check as unhealthy. The switchover
+  took 60 seconds and the final application-health step 0.6 seconds, because no global alarm was red. A failover
+  that an alarm starts adds the detection (two failed canary minutes out of three, so 2 to 3 minutes), ARC's
+  unpublished delay from the alarms to the start of the plan, and the time the global alarms need to turn green once
+  DNS has moved, all before the 10 minutes of the objective can be said to hold from the fault. So a `FAILED` from
+  the clock is possible even with every step working. The report's timeline shows where the time went. Either the
+  alarms or the plan get faster (the scale-up is the largest part; services that start faster, or a higher
+  minimum in the standby Region, would shorten it), or the expectation changes to what the run shows.
 - The run check fails with no deactivate: no trigger fired. The evidence alarms say which of the three conditions
   was missing. If the plan has no triggers the deployment was made with `AUTOMATIC_FAILOVER=disabled`, and
   preflight refuses the run before it starts.
@@ -161,9 +169,25 @@ because test2's plan has no triggers yet; its capacity part ran on the real numb
 in us-east-1 in 24 hours was 4, so the scale-up asks for at most 8 of 10). Test2's plan was then updated to this branch's
 step order, without triggers (2026-10-08 18:23Z, plan version 2 to 3, same ARN): ARC accepted the workflow, the
 10-minute objective, the 26 associated alarms and the reports bucket, and its own evaluation passed at both endpoints
-with no warnings. No execution has run that workflow yet, the triggers have not been deployed to test2, and no run of
-this test exists, so the triggers and the plan's behaviour under load have only been tested against a fake of the AWS
-calls. The first live run is the check.
+with no warnings.
+
+The plan has since run once for real, and so has `make failback`, both by an operator in test2 on 2026-10-08, with no
+fault and no trigger. A graceful deactivate of us-east-1 (started 18:41:56Z at us-west-2's endpoint) completed in
+6 minutes 18 seconds, ARC's report rated it Good with 0 errors, and the Aurora writer moved to us-west-2 by switchover.
+`make failback REGION=us-east-1` then ran from its preflight to its end without a fix (19:04:25 to 19:08:32Z): the
+activate took 2 minutes 6 seconds, the capacity reset put six services back to 2 and a minimum of 2 in us-west-2, and
+the writer returned to us-east-1 in 1 minute 19 seconds. Afterwards every ECS count, Auto Scaling minimum and maximum,
+task definition, health check, cluster state and alarm matched the state taken before, and the plan was unchanged.
+Both switchovers made the Region that gave up the writer fail its catalog-backed journeys for about a minute (its
+catalog got `connection refused` and reconnected without restarting a task); no alarm fired on the Region itself, and
+the three `journey-rmt-*` alarms that test it from outside were in alarm for two minutes after the failover. The
+replay of the two days before shows one trigger met: the first `orders-broker-dependency` run on 2026-10-07, which is
+explained, and neither switchover met a trigger.
+
+No trigger has been deployed to test2, no run of `catalog-recovery` exists, and no execution has been started by an
+alarm, so what is still untested against the real service is: that the eight triggers start the plan, which endpoint
+an alarm-started deactivate runs at, how long it takes from the fault, and whether the fault leaves the plan able to
+finish. The first live run is the check.
 
 ## Runs
 
