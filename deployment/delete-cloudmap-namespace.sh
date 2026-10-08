@@ -53,6 +53,15 @@ fi
 if ! err=$(aws servicediscovery delete-namespace --region "$REGION" --id "$ns_id" 2>&1 >/dev/null); then
     # The API error stays visible on stderr either way.
     echo "$err" >&2
+    # The namespace can also disappear between the lookup above and this call: the delete that
+    # destroy-all started finished in between (run 37783783626, us-west-2: DeleteNamespace answered
+    # NamespaceNotFound for the id the lookup had just returned, and the guard called that a leak
+    # although the sweep found no namespace afterwards). A namespace that is not there is what this
+    # helper is for, so it is not a failure.
+    if [[ "$err" == *NamespaceNotFound* ]]; then
+        echo "$REGION: namespace $ns_id ($NAME) was gone before it could be deleted"
+        exit 0
+    fi
     # DeleteNamespace is asynchronous: the namespace stays listed until Cloud Map
     # finishes, and a second DeleteNamespace meanwhile fails with DuplicateRequest.
     # destroy-all deletes the namespace and the e2e Teardown guard then runs this

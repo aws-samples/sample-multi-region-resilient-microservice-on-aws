@@ -314,6 +314,11 @@ if svc == "servicediscovery":
     if op == "delete-namespace":
         ns_id = opt("--id")
         ns = next((n for n in namespaces if n["id"] == ns_id), None)
+        if ns is not None and ns.get("vanishes"):
+            # The delete a previous destroy started finished between the caller's lookup and this call.
+            namespaces.remove(ns)
+            save()
+            ns = None
         if ns is None:
             fail("(NamespaceNotFound) when calling the DeleteNamespace operation: Namespace %s not found" % ns_id)
         if "deleting" in ns:
@@ -747,6 +752,18 @@ class TestDeleteCloudMapNamespace:
         assert "failed to delete namespace ns-abc1234" in r.stdout
         assert "InternalServiceError" in r.stderr
 
+    def test_a_namespace_that_vanishes_before_the_delete_is_not_a_failure(self, stub_env):
+        # Run 37783783626 (us-west-2): the lookup found the namespace and DeleteNamespace answered NamespaceNotFound,
+        # because the delete destroy-all had started finished in between. There is nothing left to delete or to wait for.
+        env, state, log = stub_env
+        state.write_text(json.dumps({"namespaces": {PRIMARY: _namespace(vanishes=True)}}))
+        r = _run_delete_ns(env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "namespace ns-abc1234 (%s) was gone before it could be deleted" % NAMESPACE in r.stdout
+        assert "NamespaceNotFound" in r.stderr                    # the API answer stays visible
+        assert _sd_ops(log) == ["list-namespaces", "list-services", "delete-namespace"]
+        assert json.loads(state.read_text())["namespaces"][PRIMARY] == []
+
     def test_a_delete_already_in_progress_waits_for_the_namespace_to_go(self, stub_env):
         # The defect from run 37401247653: destroy-all deleted the namespace, the
         # guard ran the helper again 33 s later while Cloud Map was still deleting
@@ -924,6 +941,24 @@ class TestTeardownGuardCloudMap:
         assert "Teardown incomplete" not in r.stdout
         final = json.loads(state.read_text())
         assert final["namespaces"] == {PRIMARY: [], STANDBY: []}
+
+    def test_a_namespace_that_vanishes_before_the_delete_leaves_the_teardown_complete(self, stub_env, tmp_path):
+        # Run 37783783626, us-west-2: the lookup returned the namespace and DeleteNamespace then answered
+        # NamespaceNotFound, because the delete destroy-all had started finished in between. The sweep found no
+        # namespace afterwards, but the guard warned "Teardown incomplete".
+        env, state, log = stub_env
+        state.write_text(json.dumps({
+            "stacks": {PRIMARY: {}, STANDBY: {}},
+            "members": [], "global_gone": True,
+            "namespaces": {PRIMARY: _namespace("ns-primary"), STANDBY: _namespace("ns-standby", vanishes=True)},
+        }))
+        r = _run_teardown(env, tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Teardown complete" in r.stdout and "Teardown incomplete" not in r.stdout, r.stdout
+        assert "NamespaceNotFound" in r.stderr, "the API answer stays visible"
+        assert json.loads(state.read_text())["namespaces"] == {PRIMARY: [], STANDBY: []}
+
+    def test_a_namespace_the_role_cannot_delete_makes_the_teardown_incomplete(self, stub_env, tmp_path):
         env, state, log = stub_env
         state.write_text(json.dumps({
             "stacks": {PRIMARY: {}, STANDBY: {}},
