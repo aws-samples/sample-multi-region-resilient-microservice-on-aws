@@ -25,6 +25,7 @@ on:
         options:
           - none
           - orders-broker-dependency
+          - catalog-recovery
 concurrency:
   group: e2e-deploy
   cancel-in-progress: false
@@ -39,6 +40,7 @@ jobs:
       AWS_REGION: us-east-1
       STANDBY_REGION: us-west-2
       NGRH_TEST: ${{ inputs.ngrh_test || 'none' }}
+      AUTOMATIC_FAILOVER: ${{ (inputs.ngrh_test == 'catalog-recovery') && 'enabled' || 'disabled' }}
     if: github.actor != 'dependabot[bot]'
     steps:
       - name: Checkout
@@ -61,7 +63,7 @@ jobs:
         run: make build-images "ENV=${ENV}"
         working-directory: deployment
       - name: Deploy (full multi-region)
-        run: make deploy "ENV=${ENV}"
+        run: make deploy "ENV=${ENV}" "AUTOMATIC_FAILOVER=${AUTOMATIC_FAILOVER}"
         working-directory: deployment
       - name: Capture failure diagnostics
         if: failure()

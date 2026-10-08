@@ -327,8 +327,13 @@ const e2e = new github.GithubWorkflow(project.github!, 'e2e', {
 });
 // The tests the NGRH spec defines, for the manual fault run's choice input below. Read at synth time, so
 // a test added to the spec appears in the input after `npx projen` (a test checks they agree).
-const NGRH_TEST_NAMES: string[] = JSON.parse(fs.readFileSync('deployment/ngrh-tests.json', 'utf8'))
-  .tests.map((t: { name: string }) => t.name);
+const NGRH_SPEC: { tests: { name: string; template: string }[] } = JSON.parse(fs.readFileSync('deployment/ngrh-tests.json', 'utf8'));
+const NGRH_TEST_NAMES: string[] = NGRH_SPEC.tests.map((t) => t.name);
+// The tests that need the Region Switch plan to start itself: the multi-Region recovery template impairs a Region and
+// passes if the plan's alarm triggers move the traffic. Only a manual run of one of them deploys with the triggers.
+const RECOVERY_TEST_NAMES: string[] = NGRH_SPEC.tests
+  .filter((t) => t.template === 'aws-multi-region-recovery:rtmr002').map((t) => t.name);
+const TRIGGERS_ARMED = RECOVERY_TEST_NAMES.map((n) => `inputs.ngrh_test == '${n}'`).join(' || ');
 
 e2e.on({
   push: { branches: ['main'], paths: E2E_PATHS },
@@ -365,6 +370,11 @@ e2e.addJob('e2e', {
     // The manual fault run's input ('none' when the run was not started by hand). It reaches the run
     // blocks as $NGRH_TEST and never through an expression inside one.
     NGRH_TEST: "${{ inputs.ngrh_test || 'none' }}",
+    // Whether the Region Switch plan gets its alarm triggers (the Makefile's AUTOMATIC_FAILOVER). Off for every run
+    // except the manual one of a recovery test: a journey failing in one Region while the other is healthy, as it can
+    // while a deployment is still coming up, would otherwise fail the deployment over before the smoke test. A run
+    // that is not started by hand has no input, which compares as not equal.
+    AUTOMATIC_FAILOVER: `\${{ (${TRIGGERS_ARMED}) && 'enabled' || 'disabled' }}`,
     // ENV is set from a short (7-char) git sha in the first step below.
     // Uses PR head SHA (not GITHUB_SHA which is the merge commit for
     // pull_request events -- merge SHAs can collide with prior runs).
@@ -410,7 +420,7 @@ e2e.addJob('e2e', {
     {
       name: 'Deploy (full multi-region)',
       workingDirectory: 'deployment',
-      run: 'make deploy "ENV=${ENV}"',
+      run: 'make deploy "ENV=${ENV}" "AUTOMATIC_FAILOVER=${AUTOMATIC_FAILOVER}"',
     },
     {
       name: 'Capture failure diagnostics',

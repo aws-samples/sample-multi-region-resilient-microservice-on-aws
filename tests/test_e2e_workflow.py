@@ -9,8 +9,13 @@ preflight; a run started by hand can run one fault test and upload its report.
 """
 
 import json
+import os
 import re
+import shutil
+import stat
+import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -24,7 +29,9 @@ MAKEFILE = REPO / "deployment" / "Makefile"
 sys.path.insert(0, str(REPO / "deployment"))
 from ngrh_testing import report  # noqa: E402
 
-JOB_VARIABLES = ("ENV", "AWS_REGION", "STANDBY_REGION", "NGRH_TEST")
+JOB_VARIABLES = ("ENV", "AWS_REGION", "STANDBY_REGION", "NGRH_TEST", "AUTOMATIC_FAILOVER")
+RECOVERY_TEMPLATE = "aws-multi-region-recovery:rtmr002"
+REAL_MAKE = shutil.which("make")
 
 DEPLOY = "Deploy (full multi-region)"
 RECONCILE = "Reconcile NGRH tests"
@@ -158,7 +165,70 @@ class TestTheManualFaultRun:
         assert job()["timeout-minutes"] >= 360
 
 
+def automatic_failover_given(chosen):
+    """What the job's AUTOMATIC_FAILOVER expression gives when ``ngrh_test`` is ``chosen`` (None when the run was not started by hand).
+
+    The expression is evaluated, not matched as text, so a rewrite that keeps the meaning still passes and one that
+    changes it fails. GitHub's && and || return an operand, like Python's ``and`` and ``or``, and an unset input is null."""
+    body = re.fullmatch(r"\$\{\{ ([^{}]+) \}\}", job()["env"]["AUTOMATIC_FAILOVER"]).group(1)
+    assert re.fullmatch(r"[\sa-z0-9_.'=&|()-]+", body), f"the expression uses something this test does not model: {body}"
+    python = body.replace("&&", " and ").replace("||", " or ")
+    return eval(python, {"__builtins__": {}}, {"inputs": types.SimpleNamespace(ngrh_test=chosen)})  # noqa: S307 (our own file)
+
+
+class TestAutomaticFailoverInCi:
+    """Step 11 (design 5.12). With the plan's triggers armed, a journey that fails in one Region while the other is healthy,
+    as it can while a deployment is still coming up, would fail the deployment over before the smoke test. So only the run
+    somebody started by hand to test recovery arms them."""
+
+    def _tests(self):
+        return json.loads(SPEC.read_text())["tests"]
+
+    def test_the_spec_has_a_recovery_test_so_the_cases_below_mean_something(self):
+        assert [t["name"] for t in self._tests() if t["template"] == RECOVERY_TEMPLATE]
+
+    @pytest.mark.parametrize("chosen", [None, "none"])
+    def test_a_run_nobody_started_and_the_default_choice_deploy_with_it_off(self, chosen):
+        assert automatic_failover_given(chosen) == "disabled"
+
+    def test_only_the_manual_run_of_a_recovery_test_deploys_with_it_on(self):
+        for t in self._tests():
+            expected = "enabled" if t["template"] == RECOVERY_TEMPLATE else "disabled"
+            assert automatic_failover_given(t["name"]) == expected, t["name"]
+
+    def test_it_is_in_the_job_environment_so_every_step_sees_one_value(self):
+        assert "AUTOMATIC_FAILOVER" in job()["env"]
+
+    def test_the_deploy_hands_it_to_make_and_it_is_the_only_deploy(self):
+        assert step(DEPLOY)["run"] == 'make deploy "ENV=${ENV}" "AUTOMATIC_FAILOVER=${AUTOMATIC_FAILOVER}"'
+        assert [s["name"] for s in steps() if re.search(r"\bmake deploy\b", s.get("run", ""))] == [DEPLOY]
+
+    def test_the_makefile_default_is_enabled_so_the_workflow_is_what_turns_it_off(self):
+        assert re.search(r"^AUTOMATIC_FAILOVER\s*[:?]?=\s*enabled\s*$", MAKEFILE.read_text(), flags=re.M)
+
+    @pytest.mark.skipif(REAL_MAKE is None, reason="make not installed")
+    @pytest.mark.parametrize("given, expected", [("disabled", "disabled"), ("enabled", "enabled"), (None, "enabled")])
+    def test_what_the_deploy_step_passes_reaches_the_plan_stack_as_its_parameter(self, tmp_path, given, expected):
+        # A dry run of the very command the step runs, with an aws that answers every lookup with a word, so the
+        # plan stack's deploy line is printed with the value make would give it.
+        stub = tmp_path / "aws"
+        stub.write_text("#!/bin/sh\necho stub\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        words = ["make", "-n", "deploy", "ENV=-abc1234"] + ([f"AUTOMATIC_FAILOVER={given}"] if given else [])
+        r = subprocess.run(words, cwd=MAKEFILE.parent, env=dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}"),
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert re.findall(r"AutomaticFailover=(\S+)", r.stdout) == [expected]
+
+
 class TestReadme:
+
+    def test_it_documents_the_switch_and_the_fail_back_choice_by_the_names_the_tool_uses(self):
+        readme = (REPO / "README.md").read_text()
+        for name in ("AUTOMATIC_FAILOVER", "FAILBACK", "catalog-recovery"):
+            assert name in readme, f"the README does not mention {name}"
+        section = readme[readme.index("### Testing resilience with NGRH"):]
+        assert "AUTOMATIC_FAILOVER" in section and "FAILBACK" in section, "the NGRH testing section must cover both"
 
     def test_it_explains_the_ci_steps_and_the_manual_input_by_the_names_the_workflow_uses(self):
         readme = (REPO / "README.md").read_text()
@@ -169,3 +239,30 @@ class TestReadme:
         assert step(UPLOAD)["with"]["name"] in readme
         for variable in ("ALARM_WAIT", "STOP_WAIT"):
             assert variable in readme and variable in step(FAULT)["run"] + step(STOP)["run"]
+
+    # A name found anywhere in the README proves little: "FAILBACK" and "catalog-recovery" occur in several places, so
+    # the one that goes missing from the place a reader looks would not be noticed. Each test below names the place.
+
+    def test_the_table_row_of_make_ngrh_test_offers_every_option_the_recipe_reads(self):
+        row = next(line for line in (REPO / "README.md").read_text().splitlines() if line.startswith("| `make ngrh-test TEST="))
+        signature = re.split(r"(?<!\\)\|", row)[1]       # the first cell; an escaped pipe (auto\|skip) is inside it
+        recipe = re.search(r"^ngrh-test:\n((?:\t.*\n)+)", MAKEFILE.read_text(), flags=re.M).group(1)
+        options = set(re.findall(r"\$\(([A-Z_]+)\)", recipe)) - {"NGRH_TESTING_ARGS", "TEST"}
+        assert options == {"ALARM_WAIT", "FAILBACK", "SETTLE_WAIT"}, "the recipe reads an option this test does not know"
+        for option in sorted(options):
+            assert f"[{option}=" in signature, f"the README's `make ngrh-test` row does not offer {option}"
+        assert "[FAILBACK=auto\\|skip]" in signature, "the row names the two choices of FAILBACK"
+
+    def test_the_paragraph_that_introduces_the_tests_names_every_test_in_the_spec(self):
+        readme = (REPO / "README.md").read_text()
+        intro = next(p for p in readme.split("\n\n") if p.startswith("The tests live in "))
+        for test in json.loads(SPEC.read_text())["tests"]:
+            assert f"`{test['name']}`" in intro, f"the paragraph that introduces the tests does not name {test['name']}"
+
+    def test_the_ci_paragraph_says_which_runs_deploy_with_automatic_failover_and_which_do_not(self):
+        readme = (REPO / "README.md").read_text()
+        ci = next(p for p in readme.split("\n\n") if p.startswith("**In GitHub Actions**"))
+        assert "`AUTOMATIC_FAILOVER=disabled`" in ci and "`enabled`" in ci
+        assert "`catalog-recovery`" in ci, "it says which manual run is the exception"
+        recovery = next(p for p in readme.split("\n\n") if p.startswith("**The recovery test needs the plan's triggers.**"))
+        assert "`AUTOMATIC_FAILOVER=disabled`" in recovery, "it says why a deployment without the switch is refused"
