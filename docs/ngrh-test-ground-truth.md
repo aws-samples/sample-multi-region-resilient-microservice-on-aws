@@ -137,11 +137,12 @@ the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be hea
   both count.
 - What comment, if any, ARC records on an execution its triggers started. Nothing reads it; the report prints it.
 - Whether `StartTestRun` accepts the five source alarms. The API says only alarms found during a service assessment
-  can be test sources, and catalog's latest assessment (2026-09-08) is older than all five alarms (created
-  2026-10-06). For orders an assessment was neither needed nor enough to explain a refusal (a mis-tagged alarm was
-  the cause), so a stale assessment alone is untested. If the run is refused with "alarms not discovered" and the
-  preflight shows the tags are right, run an assessment of catalog (about 15 minutes, nothing is injected) and try
-  again.
+  can be test sources. Catalog's assessment of 2026-09-08 was older than all five alarms (created 2026-10-06), so it
+  was assessed again on 2026-10-08 (17:28 to 17:43Z, 19 findings, no cost) before any run. For orders an assessment
+  was neither needed nor enough to explain a refusal (a mis-tagged alarm was the cause), so whether the first
+  assessment's age alone would have refused the alarms was never tested. If the run is refused with "alarms not
+  discovered" now, look at the alarms' tags against the service's input sources first (preflight does), not at the
+  assessment.
 
 **Confidence:** some for the setup, none for the result. `make ngrh-tests` created the test in test2 on 2026-10-08
 at 17:02Z, and Resilience Hub accepted its parameters as written (the plan ARN, both database endpoints, 20 minutes,
