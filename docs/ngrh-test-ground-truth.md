@@ -56,9 +56,9 @@ definition's image tag). The report lays the alarms out by hop, but the order in
 where the time went: in the run of 2026-10-07 the ui alarms fired first, orders' next and checkout's last, all after
 the fault had already stopped (see Runs).
 
-**Confidence:** the code and its tests, not a run. JUnit tests create orders through the real service while a
-broker throws or never answers, and assert that the order commits, returns within 3 seconds and is counted. The
-first run against the new image has not happened yet; when it has, this page says what it showed.
+**Confidence:** a run, and the code and its tests. Run `a54c42b9` of 2026-10-08 cut the broker for the full 15
+minutes and ended `PASSED` (see Runs). JUnit tests create orders through the real service while a broker throws
+or never answers, and assert that the order commits, returns within 3 seconds and is counted.
 
 **Before the publish was best-effort** the expected result was `FAIL`, and run `bea5d9f4` of 2026-10-07 confirmed
 it. The publish ran on the thread answering checkout's call. Once the open connection to the broker was cut, the
@@ -70,7 +70,8 @@ request path. The run's timeline is under Runs.
 
 ## Runs
 
-Four attempts so far, on the first deployment this ran on. The last is the only one that reached a verdict.
+Five attempts so far, on the first deployment this ran on. The last two reached a verdict: the first `FAILED`, as
+then expected, and the last `PASSED`, as expected now.
 
 - **2026-10-06 and 2026-10-07, `orders-broker-dependency`: refused twice before it started.** `StartTestRun`
   answered "alarms not discovered for this service". A source alarm, `hop-checkout-errors`, is tagged checkout,
@@ -102,3 +103,21 @@ Four attempts so far, on the first deployment this ran on. The last is the only 
   - The report written when the run ended missed all the hop alarms, which changed after it. `make ngrh-test` now
     waits ten minutes after the run (`SETTLE_WAIT`) before it writes the report, and a report written earlier says
     that it is early.
+- **2026-10-08, `orders-broker-dependency`, run `a54c42b9`: `PASSED`, as expected, after 20 minutes 44 seconds.**
+  The same fault on the same two orders tasks as run `bea5d9f4`, with the best-effort publish deployed (orders
+  running image tag `a1802e5`, put there by the repave of 2026-10-07). Times are UTC:
+  - 11:27:17 the packet-loss action started on both tasks; 11:42:17 it completed, after the full 15 minutes. The
+    stop condition never fired.
+  - 11:29:27 the first `Could not publish the order-created event for order <id>: SocketTimeoutException: Connect
+    timed out`, logged by the pool threads (`event-publisher-1` and `-2`), and 40 of them up to 11:42:29, one per
+    order created while the broker was cut. There were no `Dropped` warnings and no errors, so the queue never
+    filled. The first failure came about two minutes in, which fits a connection that was already open when the
+    fault began and had to be opened again.
+  - No alarm changed state from 11:20 to 11:58: not the four orders-related ones Resilience Hub watched, not
+    `region-degraded` in either Region, not any of the ten hop alarms, not `orders-created-zero`.
+  - All twelve canaries passed in both Regions through the fault: 279 of 279 runs in us-east-1 and 288 of 288 in
+    us-west-2, between 11:25 and 11:48.
+  - Resilience Hub spent five more minutes evaluating the success criteria (11:42:48 to 11:47:48) before it ended
+    the run `PASSED`, so a passing run takes about 21 minutes from its start.
+  - The fault reached the two ECS tasks and blocked the broker's host name; FIS finished the experiment itself
+    (`completed`, not halted).
