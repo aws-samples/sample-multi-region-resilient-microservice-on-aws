@@ -1,21 +1,28 @@
 # SPDX-License-Identifier: MIT-0
-"""Step 10 (design 5.6 and 5.10): the Region Switch plan in failover.yaml.
+"""Steps 10 and 11 (design 5.6 and 5.10): the Region Switch plan in failover.yaml.
 
 The deactivate workflow scales the remaining Region up, moves DNS, and only then switches the catalog database over,
 so traffic moves before the database does. The plan carries the recovery time objective, the associated alarms
 (the journey alarms monitoring.yml defines), the report configuration, and, while automatic failover is enabled,
-the permission for its execution role to start the plan. Nothing here fails a database over with data loss on its
-own: the one Aurora block is a switchover, and the ungraceful choice stays a person's.
+the permission for its execution role to start the plan and the eight alarm triggers that use it: a journey that
+fails in one Region, confirmed from the other while that one is healthy, deactivates the failing Region. Nothing
+here fails a database over with data loss on its own: the one Aurora block is a switchover, and the ungraceful
+choice stays a person's.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 DEPLOYMENT = Path(__file__).resolve().parent.parent / "deployment"
+sys.path.insert(0, str(DEPLOYMENT))
 FAILOVER = DEPLOYMENT / "failover.yaml"
+
+from ngrh_testing import alarms  # noqa: E402  (the replay's model of the triggers)
+
 MONITORING = DEPLOYMENT / "monitoring.yml"
 MAKEFILE = DEPLOYMENT / "Makefile"
 
@@ -279,6 +286,122 @@ def _as_list(value):
     return value if isinstance(value, list) else [value]
 
 
+# --- triggers -------------------------------------------------------------------------------------
+
+ONLY_WHEN_ENABLED = "AutomaticFailoverEnabled"
+ROLE_REGION = {"primary": "PrimaryRegion", "standby": "StandbyRegion"}
+PEER = {"primary": "standby", "standby": "primary"}
+
+
+def _triggers():
+    """The plan's triggers, from the branch that is present while automatic failover is enabled; the off branch is
+    returned separately so a test can see what the switch removes."""
+    value = PLAN.get("Triggers")
+    assert isinstance(value, dict) and set(value) == {"!If"}, f"Triggers must be one !If on the switch, found {value!r}"
+    condition, enabled, disabled = value["!If"]
+    return condition, enabled, disabled
+
+
+def _expected_triggers():
+    """(A's role, journey) -> the conditions design 5.6 gives 'deactivate A: J fails in A, confirmed from B'."""
+    out = {}
+    for a, b in PEER.items():
+        for j in JOURNEYS:
+            out[(a, j)] = [(f"journey-lcl-{j}-{a}", "red"), (f"journey-rmt-{j}-{b}", "red"), (f"region-degraded-{b}", "green")]
+    return out
+
+
+class TestTriggers:
+
+    def test_the_triggers_are_there_only_while_automatic_failover_is_enabled(self):
+        condition, enabled, disabled = _triggers()
+        assert condition == ONLY_WHEN_ENABLED
+        assert len(enabled) == 8
+        assert disabled == {"!Ref": "AWS::NoValue"}, "the off switch removes the property, leaving a plan an operator starts"
+
+    def test_the_triggers_and_the_self_start_policy_follow_the_same_condition(self):
+        # A trigger starts the plan as the execution role, so each needs the other: never triggers without the
+        # permission (they would start nothing), never the permission without triggers' switch.
+        assert _triggers()[0] == RESOURCES["RegionSwitchSelfStartPolicy"]["Condition"] == ONLY_WHEN_ENABLED
+
+    def test_one_trigger_for_each_region_and_journey(self):
+        _, enabled, _ = _triggers()
+        found = sorted((_role_of(t["TargetRegion"]), _journey_of(t)) for t in enabled)
+        assert found == sorted(_expected_triggers())
+
+    @pytest.mark.parametrize("key,conditions", sorted(_expected_triggers().items()))
+    def test_each_trigger_has_exactly_the_three_conditions(self, key, conditions):
+        role, journey = key
+        trigger = next(t for t in _triggers()[1] if _role_of(t["TargetRegion"]) == role and _journey_of(t) == journey)
+        assert [(c["AssociatedAlarmName"], c["Condition"]) for c in trigger["Conditions"]] == conditions
+        assert all(set(c) == {"AssociatedAlarmName", "Condition"} for c in trigger["Conditions"])
+
+    def test_every_trigger_deactivates_and_none_activates(self):
+        # Failing back is deliberate (make failback): nothing starts an activate on its own.
+        for trigger in _triggers()[1]:
+            assert trigger["Action"] == "deactivate"
+
+    def test_a_trigger_waits_an_hour_between_executions(self):
+        for trigger in _triggers()[1]:
+            assert trigger["MinDelayMinutesBetweenExecutions"] == 60
+
+    def test_the_hour_is_the_replays_hour(self):
+        # make ngrh-alarm-replay counts how often a trigger would start with this delay.
+        assert {t["MinDelayMinutesBetweenExecutions"] for t in _triggers()[1]} == {alarms.TRIGGER_MIN_DELAY_MINUTES}
+
+    def test_the_conditions_are_the_replays_conditions(self):
+        # The replay models the same three-part rule; if the template and the model drift, the replay stops
+        # being evidence that arming the triggers is safe.
+        model = {(t.region, t.peer, t.journey) for t in alarms.triggers("primary", "standby")}
+        template = {(role, PEER[role], journey) for role, journey in _expected_triggers()}
+        assert model == template
+
+    def test_each_condition_names_a_trigger_alarm_in_the_region_that_owns_it(self):
+        # lcl of A lives in A, rmt of B (B's view of A) lives in B, region-degraded of B lives in B. A condition on
+        # a global (application health) alarm would make a trigger wait for the recovery it is meant to start.
+        for trigger in _triggers()[1]:
+            role = _role_of(trigger["TargetRegion"])
+            for condition in trigger["Conditions"]:
+                name = condition["AssociatedAlarmName"]
+                assert name in ASSOCIATED, f"{name} is not a key of AssociatedAlarms"
+                assert ASSOCIATED[name]["AlarmType"] == "trigger", name
+                owner = name.rsplit("-", 1)[1]
+                assert owner == (role if name.startswith("journey-lcl-") else PEER[role]), (name, role)
+                assert f"${{{ROLE_REGION[owner]}}}" in ASSOCIATED[name]["ResourceIdentifier"]["!Sub"]
+
+    def test_the_other_region_must_be_healthy_and_must_agree(self):
+        # Without the peer's region-degraded green a both-Regions event deactivates a Region; without its rmt red one
+        # broken observer does.
+        for trigger in _triggers()[1]:
+            names = {c["AssociatedAlarmName"]: c["Condition"] for c in trigger["Conditions"]}
+            role = _role_of(trigger["TargetRegion"])
+            assert names[f"region-degraded-{PEER[role]}"] == "green"
+            assert sum(1 for n, c in names.items() if n.startswith("journey-rmt-") and c == "red") == 1
+            assert sum(1 for n, c in names.items() if n.startswith("journey-lcl-") and c == "red") == 1
+            assert f"region-degraded-{role}" not in names, "A is failing; its own composite adds nothing the lcl alarm lacks"
+
+    def test_a_trigger_stays_inside_arcs_limits(self):
+        for trigger in _triggers()[1]:
+            assert 1 <= len(trigger["Conditions"]) <= 10
+            assert set(trigger) == {"Action", "TargetRegion", "MinDelayMinutesBetweenExecutions", "Description", "Conditions"}
+
+    def test_the_description_names_both_regions_and_the_journey(self):
+        for trigger in _triggers()[1]:
+            text = trigger["Description"]["!Sub"]
+            assert _journey_of(trigger) in text
+            assert "${PrimaryRegion}" in text and "${StandbyRegion}" in text
+
+
+def _role_of(target):
+    """primary or standby, from a trigger's TargetRegion (!Ref PrimaryRegion or !Ref StandbyRegion)."""
+    return {"PrimaryRegion": "primary", "StandbyRegion": "standby"}[target["!Ref"]]
+
+
+def _journey_of(trigger):
+    (lcl,) = [c["AssociatedAlarmName"] for c in trigger["Conditions"] if c["AssociatedAlarmName"].startswith("journey-lcl-")]
+    return lcl.split("-")[2]
+
+
 # --- automatic failover switch and the self-start permission -------------------------------------
 
 
@@ -354,6 +477,20 @@ class TestReadme:
         assert f"recovery time objective of {PLAN['RecoveryTimeObjectiveMinutes']} minutes" in SECTION
         days = next(r for r in RESOURCES["ReportsBucket"]["Properties"]["LifecycleConfiguration"]["Rules"] if "ExpirationInDays" in r)["ExpirationInDays"]
         assert f"Reports expire after {days} days" in SECTION
+
+    def test_the_triggers_are_described_as_the_template_has_them(self):
+        _, enabled, _ = _triggers()
+        minutes = {t["MinDelayMinutesBetweenExecutions"] for t in enabled}
+        assert minutes == {60} and "not more than once in 60 minutes" in SECTION
+        assert "eight alarm triggers" in SECTION and len(enabled) == 8
+        for name in ("journey-lcl-", "journey-rmt-", "region-degraded"):
+            assert name in SECTION
+        assert "starts a graceful deactivate" in SECTION and {t["Action"] for t in enabled} == {"deactivate"}
+
+    def test_the_switch_is_described_as_the_template_does_it(self):
+        assert TEMPLATE["Parameters"]["AutomaticFailover"]["Default"] == "enabled"
+        assert "`make deploy AUTOMATIC_FAILOVER=disabled` (the default is `enabled`) leaves out the eight triggers" in SECTION
+        assert "make ngrh-alarm-replay" in SECTION
 
 
 # --- the Makefile -------------------------------------------------------------------------------

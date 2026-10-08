@@ -42,9 +42,10 @@ Parameters:
       - enabled
       - disabled
     Description: >-
-      Whether the plan may start itself. enabled lets the plan's execution role start the plan, which an alarm trigger
-      needs, because ARC starts a trigger's execution as that role. disabled removes the permission, so only an operator
-      can start an execution. The Makefile sets it from AUTOMATIC_FAILOVER. This template has no triggers yet.
+      Whether the plan may start itself. enabled adds the eight alarm triggers (a journey that fails in one Region,
+      confirmed from the other, deactivates the failing Region) and lets the plan's execution role start the plan,
+      which a trigger needs, because ARC starts a trigger's execution as that role. disabled leaves out both, so only
+      an operator can start an execution. The Makefile sets it from AUTOMATIC_FAILOVER.
 
 Conditions:
   AutomaticFailoverEnabled: !Equals [!Ref AutomaticFailover, enabled]
@@ -319,6 +320,103 @@ Resources:
         journey-global-orders-standby:
           AlarmType: applicationHealth
           ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-global-orders-${StandbyRegion}${Env}'
+      # Triggers (design 5.6), present only while AutomaticFailover is enabled. One for each Region A, its peer B and
+      # journey J: deactivate A when J fails in A (journey-lcl-J in A is red), B confirms it (journey-rmt-J in B, B's view
+      # of A, is red), and B is healthy itself (region-degraded in B is green). A both-Regions event meets none of them,
+      # because B must be green, and neither does one broken observer, because B must agree. ARC starts the execution
+      # graceful, as the plan's execution role (RegionSwitchSelfStartPolicy), and not more than once an hour for a
+      # trigger. The names in the conditions are the keys of AssociatedAlarms above.
+      Triggers: !If
+        - AutomaticFailoverEnabled
+        - - Action: deactivate
+            TargetRegion: !Ref PrimaryRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${PrimaryRegion}: its home journey fails there, and ${StandbyRegion} sees it fail too while ${StandbyRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-home-primary
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-home-standby
+                Condition: red
+              - AssociatedAlarmName: region-degraded-standby
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref PrimaryRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${PrimaryRegion}: its cart journey fails there, and ${StandbyRegion} sees it fail too while ${StandbyRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-cart-primary
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-cart-standby
+                Condition: red
+              - AssociatedAlarmName: region-degraded-standby
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref PrimaryRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${PrimaryRegion}: its catalog journey fails there, and ${StandbyRegion} sees it fail too while ${StandbyRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-catalog-primary
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-catalog-standby
+                Condition: red
+              - AssociatedAlarmName: region-degraded-standby
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref PrimaryRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${PrimaryRegion}: its orders journey fails there, and ${StandbyRegion} sees it fail too while ${StandbyRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-orders-primary
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-orders-standby
+                Condition: red
+              - AssociatedAlarmName: region-degraded-standby
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref StandbyRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${StandbyRegion}: its home journey fails there, and ${PrimaryRegion} sees it fail too while ${PrimaryRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-home-standby
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-home-primary
+                Condition: red
+              - AssociatedAlarmName: region-degraded-primary
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref StandbyRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${StandbyRegion}: its cart journey fails there, and ${PrimaryRegion} sees it fail too while ${PrimaryRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-cart-standby
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-cart-primary
+                Condition: red
+              - AssociatedAlarmName: region-degraded-primary
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref StandbyRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${StandbyRegion}: its catalog journey fails there, and ${PrimaryRegion} sees it fail too while ${PrimaryRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-catalog-standby
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-catalog-primary
+                Condition: red
+              - AssociatedAlarmName: region-degraded-primary
+                Condition: green
+          - Action: deactivate
+            TargetRegion: !Ref StandbyRegion
+            MinDelayMinutesBetweenExecutions: 60
+            Description: !Sub 'Deactivate ${StandbyRegion}: its orders journey fails there, and ${PrimaryRegion} sees it fail too while ${PrimaryRegion} is healthy'
+            Conditions:
+              - AssociatedAlarmName: journey-lcl-orders-standby
+                Condition: red
+              - AssociatedAlarmName: journey-rmt-orders-primary
+                Condition: red
+              - AssociatedAlarmName: region-degraded-primary
+                Condition: green
+        - !Ref AWS::NoValue
       Workflows:
         - WorkflowTargetAction: deactivate
           WorkflowDescription: "Scale up the remaining region, shift DNS away, then switch the catalog database over"

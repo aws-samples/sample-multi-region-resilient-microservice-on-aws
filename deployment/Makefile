@@ -2,8 +2,9 @@
 ENV=
 PRIMARY_REGION=us-east-1
 STANDBY_REGION=us-west-2
-# enabled lets the Region Switch plan start itself (its execution role may start the plan, which a failover
-# trigger needs); disabled leaves starting it to a person. See "Automatic failover and fail-back" in the README.
+# enabled adds the eight alarm triggers to the Region Switch plan and lets its execution role start the plan (a
+# trigger starts the plan as that role); disabled leaves both out, so a person starts it. See "Automatic failover
+# and fail-back" in the README.
 AUTOMATIC_FAILOVER=enabled
 ####
 
