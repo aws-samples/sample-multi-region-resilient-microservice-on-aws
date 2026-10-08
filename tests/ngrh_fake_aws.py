@@ -6,8 +6,8 @@ have (checked against resiliencehubv2 2026-02-17, arc-region-switch 2022-07-26 a
 with just enough behaviour to test the tool's decisions: Resilience Hub tests and their sources, one test
 per service and template, a run that moves through statuses as it is polled, alarms with a state, stacks
 with outputs, ECS services and task definitions, FIS experiments, ARC plan executions (listed, and started and
-polled), the plan's Route 53 health checks, Application Auto Scaling targets and the catalog Aurora global
-cluster with its switchover.
+polled), the plan itself (its triggers and scaling blocks), the plan's Route 53 health checks, Application Auto
+Scaling targets, Container Insights task counts and the catalog Aurora global cluster with its switchover.
 
 Every call is recorded in ``calls`` as (service, operation, region, params), so a test can assert what
 was written, what was not, and in which order. ``fail_on`` makes the next call to an operation raise
@@ -66,6 +66,29 @@ def db_cluster_arn(region: str, env: str = ENV, account: str = ACCOUNT) -> str:
     return f"arn:aws:rds:{region}:{account}:cluster:catalog-dbcluster-{'01' if region == PRIMARY else '02'}-{region}{env}"
 
 
+def catalog_cluster_id(region: str, env: str = ENV) -> str:
+    """The identifier of the catalog Aurora cluster of a Region (the physical id of the DBCluster in catalog-db-stack)."""
+    return f"catalog-dbcluster-{'01' if region == PRIMARY else '02'}-{region}{env}"
+
+
+def catalog_endpoint(region: str, env: str = ENV, reader: bool = False) -> str:
+    return f"{catalog_cluster_id(region, env)}.cluster-{'ro-' if reader else ''}abcdefgh.{region}.rds.amazonaws.com"
+
+
+def default_triggers(env_regions: Tuple[str, str] = (PRIMARY, STANDBY), delay: int = 60) -> List[Dict[str, Any]]:
+    """The plan's eight triggers as GetPlan returns them (failover.yaml): for each Region A, its peer B and journey J,
+    deactivate A when J fails in A, B confirms it, and B is healthy."""
+    out = []
+    for a, b, role_a, role_b in ((env_regions[0], env_regions[1], "primary", "standby"), (env_regions[1], env_regions[0], "standby", "primary")):
+        for journey in ("home", "cart", "catalog", "orders"):
+            out.append({"targetRegion": a, "action": "deactivate", "minDelayMinutesBetweenExecutions": delay,
+                        "description": f"Deactivate {a}: {journey}",
+                        "conditions": [{"associatedAlarmName": f"journey-lcl-{journey}-{role_a}", "condition": "red"},
+                                       {"associatedAlarmName": f"journey-rmt-{journey}-{role_b}", "condition": "red"},
+                                       {"associatedAlarmName": f"region-degraded-{role_b}", "condition": "green"}]})
+    return out
+
+
 def default_alarm_service_tag(name: str) -> str:
     """The ``service`` tag monitoring.yml gives an alarm: the service a hop alarm watches, orders for
     orders-created-zero, and otherwise the monitoring stack's own tag, shared."""
@@ -113,6 +136,9 @@ class FakeAws:
         self.execution_script: List[str] = ["inProgress", "completed"]  # the states successive polls of a started execution see
         self.started_executions: Dict[str, Dict[str, Any]] = {}  # execution id -> what start-plan-execution was asked
         self.scalable_targets: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (region, resource id) -> Application Auto Scaling target
+        self.plan_triggers: List[Dict[str, Any]] = default_triggers()  # what GetPlan returns; [] is a plan deployed with the switch off
+        self.plan_target_percent: Optional[int] = 200                   # TargetPercent of every ECS scaling block; None leaves it out (ARC's default is 100)
+        self.task_peaks: Dict[Tuple[str, str], float] = {}              # (region, service name) -> most tasks in 24 h (Container Insights)
         self.global_cluster_status = "available"
         self.global_writer: Optional[str] = PRIMARY  # the Region of the catalog global cluster's writer
         self.global_members: Dict[str, str] = {PRIMARY: "available", STANDBY: "available"}  # Region -> its cluster's status
@@ -141,6 +167,8 @@ class FakeAws:
             ("arc-region-switch", "list-route53-health-checks"): self._list_route53_health_checks,
             ("arc-region-switch", "start-plan-execution"): self._start_plan_execution,
             ("arc-region-switch", "get-plan-execution"): self._get_plan_execution,
+            ("arc-region-switch", "get-plan"): self._get_plan,
+            ("cloudwatch", "get-metric-statistics"): self._get_metric_statistics,
             ("ecs", "update-service"): self._update_service,
             ("application-autoscaling", "describe-scalable-targets"): self._describe_scalable_targets,
             ("application-autoscaling", "register-scalable-target"): self._register_scalable_target,
@@ -214,6 +242,7 @@ class FakeAws:
         self.ecs_services[(region, name)] = {"serviceName": name, "status": status, "taskDefinition": arn,
                                              "capacityProviderStrategy": [{"capacityProvider": p, "weight": 1} for p in providers],
                                              "enableExecuteCommand": exec_on, "desiredCount": tasks}
+        self.task_peaks[(region, name)] = float(tasks)    # Container Insights: the most tasks it ran lately
         resource_id = f"service/{CLUSTER}/{name}"       # ecs.yaml: minimum 2 and maximum 10 for every service
         self.scalable_targets[(region, resource_id)] = {"ServiceNamespace": "ecs", "ResourceId": resource_id,
                                                         "ScalableDimension": "ecs:service:DesiredCount", "MinCapacity": 2, "MaxCapacity": 10}
@@ -294,7 +323,8 @@ class FakeAws:
         return {"Stacks": [{"StackName": stack_name, "Outputs": [{"OutputKey": k, "OutputValue": v} for k, v in outputs.items()]}]}
 
     def _describe_stack_resource(self, region: Optional[str], stack_name: str, logical_resource_id: str) -> Dict[str, Any]:
-        physical = {(f"apps{self.env}", "OrdersMqBroker"): BROKER_ID, (f"apps{self.env}", "EcsCluster"): CLUSTER}.get((stack_name, logical_resource_id))
+        physical = {(f"apps{self.env}", "OrdersMqBroker"): BROKER_ID, (f"apps{self.env}", "EcsCluster"): CLUSTER,
+                    (f"catalog-db-stack{self.env}", "DBCluster"): catalog_cluster_id(region or PRIMARY, self.env)}.get((stack_name, logical_resource_id))
         if physical is None:
             raise self._error("cloudformation", "describe-stack-resource", "ValidationError", f"Resource {logical_resource_id} does not exist")
         return {"StackResourceDetail": {"LogicalResourceId": logical_resource_id, "PhysicalResourceId": physical}}
@@ -537,6 +567,9 @@ class FakeAws:
                 "deactivateRegion": other if action == "activate" else target_region}
 
     def _get_plan_execution(self, region: Optional[str], plan_arn: str, execution_id: str) -> Dict[str, Any]:
+        for listed in (x for items in self.plan_executions.values() for x in items):
+            if listed["executionId"] == execution_id:     # an execution the test put in the list: its detail is what it was given
+                return {"planArn": plan_arn, "mode": "graceful", **listed}
         e = self.started_executions[execution_id]
         state = self.execution_script[min(e["polls"], len(self.execution_script) - 1)]
         e["polls"] += 1
@@ -544,6 +577,37 @@ class FakeAws:
             self.health_checks[e["target"]] = "healthy"       # what a finished activation does to DNS
         return {"planArn": plan_arn, "executionId": execution_id, "startTime": "2026-10-08T12:00:00+00:00", "mode": e["mode"],
                 "executionState": state, "executionAction": e["action"], "executionRegion": e["target"]}
+
+    def _get_plan(self, region: Optional[str], arn: str) -> Dict[str, Any]:
+        """The plan as ARC returns it: the triggers it has now, and the deactivate workflow's parallel ECS scaling blocks."""
+        blocks = [{"name": f"scale-{name}", "executionBlockType": "ECSServiceScaling",
+                   "executionBlockConfiguration": {"ecsCapacityIncreaseConfig": {
+                       "timeoutMinutes": 15, **({} if self.plan_target_percent is None else {"targetPercent": self.plan_target_percent}),
+                       "capacityMonitoringApproach": "containerInsightsMaxInLast24Hours",
+                       "services": [{"clusterArn": f"arn:aws:ecs:{r}:{ACCOUNT}:cluster/{CLUSTER}",
+                                     "serviceArn": f"arn:aws:ecs:{r}:{ACCOUNT}:service/{CLUSTER}/{name}{self.env}"} for r in (PRIMARY, STANDBY)]}}}
+                  for name in ("ui", "catalog", "carts", "checkout", "orders", "assets")]
+        return {"plan": {"arn": arn, "name": f"mr-rs-plan{self.env}", "recoveryApproach": "activeActive", "primaryRegion": PRIMARY,
+                         "regions": [PRIMARY, STANDBY], "recoveryTimeObjectiveMinutes": 10, "associatedAlarms": {},
+                         "triggers": [dict(t) for t in self.plan_triggers],
+                         "workflows": [{"workflowTargetAction": "deactivate", "steps": [
+                             {"name": "scale-up-ecs-services", "executionBlockType": "Parallel",
+                              "executionBlockConfiguration": {"parallelConfig": {"steps": blocks}}}]},
+                             {"workflowTargetAction": "activate", "steps": []}]}}
+
+    def _get_metric_statistics(self, region: Optional[str], namespace: str, metric_name: str, dimensions: List[Dict[str, str]],
+                               start_time: str, end_time: str, period: int, statistics: List[str]) -> Dict[str, Any]:
+        """RunningTaskCount of an ECS service from Container Insights: one hourly datapoint holding the peak the test set."""
+        assert (namespace, metric_name, statistics, period) == ("ECS/ContainerInsights", "RunningTaskCount", ["Maximum"], 3600)
+        by_name = {d["Name"]: d["Value"] for d in dimensions}
+        assert by_name["ClusterName"] == CLUSTER, by_name
+        peak = self.task_peaks.get((region, by_name["ServiceName"]))
+        if peak is None:
+            return {"Label": metric_name, "Datapoints": []}
+        # An hourly maximum for each of three hours, the peak in the middle one and the others lower, in no useful order.
+        return {"Label": metric_name, "Datapoints": [{"Timestamp": start_time, "Maximum": 1.0, "Unit": "Count"},
+                                                     {"Timestamp": end_time, "Maximum": peak, "Unit": "Count"},
+                                                     {"Timestamp": start_time, "Maximum": max(1.0, peak - 1), "Unit": "Count"}]}
 
     def _update_service(self, region: Optional[str], cluster: str, service: str, desired_count: int) -> Dict[str, Any]:
         self.ecs_services[(region, service)]["desiredCount"] = int(desired_count)
@@ -581,9 +645,12 @@ class FakeAws:
         return {"GlobalClusters": [self._global_cluster()]}
 
     def _describe_db_clusters(self, region: Optional[str], db_cluster_identifier: str) -> Dict[str, Any]:
+        """By ARN or by identifier, as the real call takes either."""
         for r, status in self.global_members.items():
-            if db_cluster_arn(r, self.env) == db_cluster_identifier:
-                return {"DBClusters": [{"DBClusterArn": db_cluster_identifier, "Status": status}]}
+            if db_cluster_identifier in (db_cluster_arn(r, self.env), catalog_cluster_id(r, self.env)):
+                return {"DBClusters": [{"DBClusterArn": db_cluster_arn(r, self.env), "DBClusterIdentifier": catalog_cluster_id(r, self.env),
+                                        "Status": status, "Endpoint": catalog_endpoint(r, self.env),
+                                        "ReaderEndpoint": catalog_endpoint(r, self.env, reader=True)}]}
         raise self._error("rds", "describe-db-clusters", "DBClusterNotFoundFault", f"DBCluster {db_cluster_identifier} not found")
 
     def _switchover_global_cluster(self, region: Optional[str], global_cluster_identifier: str,

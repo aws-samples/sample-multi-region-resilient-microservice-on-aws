@@ -5,8 +5,9 @@ environment, as for the Makefile's own aws calls.
 
 Exit codes: 0 done; 1 the command could not run or failed; 2 preflight refused the run; 3 it ran and
 found something to act on (replay: a failover trigger's conditions were met; reconcile --check: the tests
-have drifted; run: the verdict was not the one the spec expects; failback: done except for what the output
-says is left to do); 130 interrupted (the run goes on)."""
+have drifted; run: the verdict was not the one the spec expects, or the fail-back after it is done except for what
+the output says is left; failback: done except for what the output says is left to do); 130 interrupted (the run
+goes on)."""
 
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
-from . import context, failback, preflight, reconcile, replay, report, run, spec
+from . import context, executions, failback, preflight, reconcile, replay, report, run, spec
 from .aws import AwsCli, AwsCliError
 from .context import ContextError, Environment, ResolvedTest, load_environment
 
@@ -26,6 +27,8 @@ EXIT_ERROR = 1
 EXIT_REFUSED = 2
 EXIT_FOUND = 3
 EXIT_INTERRUPTED = 130
+
+FAILBACK_CHOICES = ("auto", "skip")
 
 DEFAULT_SPEC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ngrh-tests.json")
 
@@ -79,6 +82,12 @@ def parser() -> argparse.ArgumentParser:
                    help="after the run ends, wait this long before writing the report, so the alarms' recovery is in it "
                         f"(default {report.AFTER.total_seconds() / 60:g}, the length of the evidence window); 0 writes it at once, "
                         "and the report then says it is early")
+    u.add_argument("--failback", choices=FAILBACK_CHOICES, default="auto",
+                   help="when the plan deactivated a Region during the run: auto, the default, waits for the Region to be healthy for "
+                        "10 minutes and then runs the fail-back; skip leaves the Region deactivated and says how to bring it back")
+    u.add_argument("--failback-wait-minutes", type=float, default=failback.SETTLE_WAIT_MINUTES,
+                   help="how long to wait for the Region's journey alarms to have been OK for 10 minutes before the fail-back gives "
+                        f"up and says so (default {failback.SETTLE_WAIT_MINUTES})")
     u.add_argument("--reports-dir", default=report.REPORT_DIR)
 
     s = commands.add_parser("stop", help="stop a test's active run (make ngrh-test-stop)")
@@ -129,13 +138,13 @@ def _wait_for_alarm_data(aws: AwsCli, env: Environment, args: argparse.Namespace
 
 
 def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep: Callable[[float], None],
-                 clock: Callable[[], float]) -> int:
+                 clock: Callable[[], float], now: Callable[[], datetime]) -> int:
     tests = spec.load(args.spec).select(args.test)
     if args.test == "all":
         raise spec.SpecError(["name one test to run, for example TEST=orders-broker-dependency"])
     if args.alarm_wait_minutes > 0:
         _wait_for_alarm_data(aws, env, args, sleep, clock)
-    checked = preflight.run_checks(aws, env, tests, preflight.LIVE)
+    checked = preflight.run_checks(aws, env, tests, preflight.LIVE, now())
     sys.stdout.write(preflight.render(checked, preflight.LIVE, [t.name for t in tests]))
     if not checked.passed:
         return EXIT_REFUSED
@@ -167,7 +176,7 @@ def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep:
             _say(f"\nInterrupted. The run has ended. Collect its report, once ten minutes have passed since it ended, with: "
                  f"make ngrh-test-report TEST={t.name} RUN={run_id}")
             return EXIT_INTERRUPTED
-    data = report.collect(aws, env, t, run_id)
+    data = report.collect(aws, env, t, run_id, now())
     json_path, md_path = report.write(data, args.reports_dir, env.invoker_role_name)
     _say(f"{t.name}: {outcome.status}. Expected {data['expected']}, observed {data['observed']}: "
          + ("as expected." if data["matches"] else "NOT as expected."))
@@ -178,7 +187,102 @@ def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep:
         sys.stderr.write(f"ngrh_testing run: gave up waiting after {int(outcome.waited_seconds // 60)} min; the run is still "
                          f"{outcome.status}.\n{later}\n")
         return EXIT_ERROR
-    return EXIT_OK if data["matches"] else EXIT_FOUND
+    code = EXIT_OK if data["matches"] else EXIT_FOUND
+    try:
+        failed_back = _fail_back_after_run(aws, env, data, args, sleep, clock, now)
+    except KeyboardInterrupt:
+        _say("\nInterrupted while failing back. Nothing is undone and every step is safe to repeat: run make failback "
+             "REGION=<the Region the plan deactivated> again.")
+        return EXIT_INTERRUPTED
+    if data.get("failbacks"):
+        report.write(data, args.reports_dir, env.invoker_role_name)  # again, with what the fail-back did
+        _say(f"Report updated with the fail-back: {md_path}")
+    return _worst(code, failed_back)
+
+
+def _worst(verdict: int, failback_code: int) -> int:
+    """The run's exit code: a fail-back that failed or was refused leaves a Region deactivated, which is an error
+    whatever the verdict was; one that finished except for what it printed is a finding, like a verdict that was not the
+    one expected."""
+    if failback_code in (EXIT_ERROR, EXIT_REFUSED):
+        return EXIT_ERROR
+    return EXIT_FOUND if failback_code == EXIT_FOUND else verdict
+
+
+def _fail_back_after_run(aws: AwsCli, env: Environment, data: dict, args: argparse.Namespace, sleep: Callable[[float], None],
+                         clock: Callable[[], float], now: Callable[[], datetime]) -> int:
+    """Bring back each Region the plan deactivated during the run (design 5.9: for a recovery test, or any run during
+    which a failover started). The fault has ended with the run, but the Region's alarms need a few minutes to settle,
+    so this waits for them instead of being refused, up to ``--failback-wait-minutes``. ``--failback skip`` only says
+    what to run. The lines of each fail-back are kept in ``data["failbacks"]`` for the report."""
+    regions = executions.deactivated_regions(data.get("planExecutions") or [])
+    code = EXIT_OK
+    data["failbacks"] = []
+    for region in regions:
+        again = f"make failback REGION={region}"
+        lines: List[str] = []
+
+        def say(text: str = "", lines: List[str] = lines) -> None:
+            _say(text)
+            lines.append(text.strip("\n"))
+
+        def err(text: str, lines: List[str] = lines) -> None:
+            sys.stderr.write(text + "\n")
+            lines.append(text)
+
+        if args.failback == "skip":
+            say(f"The plan deactivated {region} during the run, and --failback skip leaves it that way. Bring it back with: {again}")
+            data["failbacks"].append({"region": region, "lines": lines, "exit": EXIT_OK})
+            continue
+        say(f"The plan deactivated {region} during the run. Waiting up to {args.failback_wait_minutes:g} min for {region} to have been "
+            f"healthy for {failback.STABLE_MINUTES} min, then running {again}.")
+        try:
+            standing = failback.wait_until_stable(aws, env, region, args.failback_wait_minutes, say, sleep, clock, now, args.poll_seconds)
+        except AwsCliError as e:
+            err(f"ngrh_testing run: could not read the alarms to wait for {region}: {e}. Run {again} when you can.")
+            result = EXIT_ERROR
+        else:
+            if standing:
+                err(f"ngrh_testing run: {region} was still not healthy after {args.failback_wait_minutes:g} min ({'; '.join(standing)}), "
+                    f"so it was not failed back. Run {again} when it is.")
+                result = EXIT_ERROR
+            else:
+                result = _do_failback(aws, env, region, args.poll_seconds, failback.WRITER_WAIT_MINUTES, sleep, clock, now, say, err)
+        data["failbacks"].append({"region": region, "lines": lines, "exit": result})
+        if result in (EXIT_ERROR, EXIT_REFUSED):
+            code = EXIT_ERROR
+        elif result == EXIT_FOUND and code == EXIT_OK:
+            code = EXIT_FOUND
+    return code
+
+
+def _do_failback(aws: AwsCli, env: Environment, region: str, poll_seconds: float, writer_wait_minutes: float,
+                 sleep: Callable[[float], None], clock: Callable[[], float], now: Callable[[], datetime],
+                 say: Callable[[str], None], err: Callable[[str], None]) -> int:
+    """Run the fail-back and report how it went through ``say`` and ``err``; returns its exit code."""
+    again = f"make failback REGION={region}"
+    try:
+        outcome = failback.run(aws, env, region, say, sleep, clock, now, poll_seconds, writer_wait_minutes)
+    except failback.FailbackRefused as e:
+        say(f"Fail-back of {region} refused, {len(e.problems)} reason(s); nothing was changed:")
+        for problem in e.problems:
+            say(f"  {problem}")
+        return EXIT_REFUSED
+    except failback.FailbackError as e:
+        err(f"ngrh_testing failback: {e}")
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        say(f"\nInterrupted. Nothing is undone and every step is safe to repeat: run {again} again.")
+        return EXIT_INTERRUPTED
+    for line in outcome.failed:
+        err(f"ngrh_testing failback: {line}")
+    for line in outcome.left:
+        say(f"Left for you: {line}")
+    if outcome.exit_code:
+        say(f"Fail-back of {region} is not finished. Every step is safe to repeat: {again}.")
+    else:
+        say(f"Fail-back of {region} is done.")
+    return outcome.exit_code
 
 
 def _failback_command(aws: AwsCli, args: argparse.Namespace, sleep: Callable[[float], None], clock: Callable[[], float],
@@ -190,35 +294,18 @@ def _failback_command(aws: AwsCli, args: argparse.Namespace, sleep: Callable[[fl
         sys.stderr.write(f"ngrh_testing failback: the credentials do not work: {e}\n")
         return EXIT_ERROR
     env = context.load_basic_environment(aws, args.primary_region, args.standby_region, args.env)
-    again = f"make failback REGION={args.region}"
-    try:
-        outcome = failback.run(aws, env, args.region, _say, sleep, clock, now, args.poll_seconds, args.writer_wait_minutes)
-    except failback.FailbackRefused as e:
-        _say(f"Fail-back of {args.region} refused, {len(e.problems)} reason(s); nothing was changed:")
-        for problem in e.problems:
-            _say(f"  {problem}")
-        return EXIT_REFUSED
-    except failback.FailbackError as e:
-        sys.stderr.write(f"ngrh_testing failback: {e}\n")
-        return EXIT_ERROR
-    except KeyboardInterrupt:
-        _say(f"\nInterrupted. Nothing is undone and every step is safe to repeat: run {again} again.")
-        return EXIT_INTERRUPTED
-    for line in outcome.failed:
-        sys.stderr.write(f"ngrh_testing failback: {line}\n")
-    for line in outcome.left:
-        _say(f"Left for you: {line}")
-    if outcome.exit_code:
-        _say(f"Fail-back of {args.region} is not finished. Every step is safe to repeat: {again}.")
-    else:
-        _say(f"Fail-back of {args.region} is done.")
-    return outcome.exit_code
+    return _do_failback(aws, env, args.region, args.poll_seconds, args.writer_wait_minutes, sleep, clock, now, _say,
+                        lambda line: sys.stderr.write(line + "\n"))
 
 
 def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_seconds: Optional[float] = None,
          sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> int:
     args = parser().parse_args(argv)
     aws = aws or AwsCli()
+
+    def now() -> datetime:
+        return datetime.fromtimestamp(time.time() if now_seconds is None else now_seconds, tz=timezone.utc)
+
     try:
         if args.command == "replay":
             result = replay.run(aws, args.primary_region, args.standby_region, args.env, args.days,
@@ -230,8 +317,7 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
                 _say(line)
             return EXIT_OK
         if args.command == "failback":
-            return _failback_command(aws, args, sleep, clock,
-                                     lambda: datetime.fromtimestamp(time.time() if now_seconds is None else now_seconds, tz=timezone.utc))
+            return _failback_command(aws, args, sleep, clock, now)
         if args.command == "preflight":  # check 1: the credential sentinel
             try:
                 aws.account_id()
@@ -250,11 +336,11 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
             return EXIT_OK
         if args.command == "preflight":
             tests = spec.load(args.spec).select(args.test)
-            checked = preflight.run_checks(aws, env, tests, args.mode)
+            checked = preflight.run_checks(aws, env, tests, args.mode, now())
             sys.stdout.write(preflight.render(checked, args.mode, [t.name for t in tests]))
             return EXIT_OK if checked.passed else EXIT_REFUSED
         if args.command == "run":
-            return _run_command(aws, env, args, sleep, clock)
+            return _run_command(aws, env, args, sleep, clock, now)
         if args.command == "stop":
             for line in run.stop(aws, env, _one(aws, env, args), args.wait_minutes, sleep=sleep, clock=clock):
                 _say(line)

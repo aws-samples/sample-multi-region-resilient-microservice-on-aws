@@ -12,7 +12,7 @@ TESTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(TESTS))
 
 from ngrh_scenario import (  # noqa: E402
-    OBSERVABILITY, PEER_DEGRADED, STOP, SUCCESS, TEMPLATE, environment, reconciled_fake, spec_tests,
+    OBSERVABILITY, PEER_DEGRADED, STOP, SUCCESS, TEMPLATE, environment, fully_reconciled_fake, reconciled_fake, spec_tests,
 )
 from ngrh_fake_aws import CLUSTER, ENV, PLAN_ARN, PRIMARY, STANDBY, alarm_arn, service_arn  # noqa: E402
 
@@ -99,8 +99,9 @@ ARGS = ["--primary-region", PRIMARY, "--standby-region", STANDBY, f"--env={ENV}"
 class TestCommand:
 
     def test_a_ready_deployment_exits_0_with_the_summary(self, capsys):
-        assert cli.main(["preflight", *ARGS], aws=reconciled_fake()) == cli.EXIT_OK
-        assert capsys.readouterr().out == "Preflight (live) for orders-broker-dependency: all checks passed\n"
+        # The default is every test of the shipped spec, so the deployment has to be ready for the recovery test too.
+        assert cli.main(["preflight", *ARGS], aws=fully_reconciled_fake()) == cli.EXIT_OK
+        assert capsys.readouterr().out == "Preflight (live) for orders-broker-dependency, catalog-recovery: all checks passed\n"
 
     def test_a_refusal_exits_2_and_lists_the_reasons(self, capsys):
         fake = reconciled_fake()
@@ -109,7 +110,7 @@ class TestCommand:
         assert f"[4] orders-broker-dependency: success alarm {SUCCESS[0]} is ALARM, not OK" in capsys.readouterr().out
 
     def test_static_mode_is_chosen_with_mode(self, capsys):
-        fake = reconciled_fake()
+        fake = fully_reconciled_fake()
         fake.alarms[(PRIMARY, SUCCESS[0])]["state"] = "ALARM"
         assert cli.main(["preflight", *ARGS, "--mode", "static"], aws=fake) == cli.EXIT_OK
         assert capsys.readouterr().out.startswith("Preflight (static) for")

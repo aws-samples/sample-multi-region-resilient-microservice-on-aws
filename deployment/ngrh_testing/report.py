@@ -21,9 +21,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import api, spec
+from . import api, context, executions, spec
 from .aws import AwsCli, AwsCliError
 from .context import Environment, ResolvedAlarm, ResolvedTest
+from .timeutil import parse_time as _parse_time
 
 PASS, FAIL, INCONCLUSIVE = "PASS", "FAIL", "INCONCLUSIVE"
 
@@ -68,12 +69,8 @@ def matches(expected: str, seen: str) -> bool:
 
 
 def parse_time(value: Any) -> datetime:
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value, tz=timezone.utc)
-    text = str(value)
-    text = text[:-1] + "+00:00" if text.endswith("Z") else text
-    parsed = datetime.fromisoformat(text)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    """Kept here for failback and the tests; the helper itself is in timeutil."""
+    return _parse_time(value)
 
 
 def _iso(moment: datetime) -> str:
@@ -171,6 +168,20 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
     problem = fault_problem(run, experiments, events)
     if problem:
         seen = INCONCLUSIVE
+    # The plan's executions during the run (the Region Switch plan, not Resilience Hub's test): what moved the traffic,
+    # and the run-level checks the spec asks of them.
+    started_at = parse_time(run["startedAt"])
+    plan_arn = read("the Region Switch plan", lambda: context.region_switch_plan_arn(aws, env.primary_region, env.env), None)
+    found: List[Dict[str, Any]] = []
+    execution_problems: List[str] = []
+    if plan_arn:
+        found, execution_problems = executions.in_window(aws, env, plan_arn, started_at, end)
+        gaps.extend(execution_problems)
+    elif t.test.run_checks:
+        execution_problems = [f"stack region-switch{env.env} is not deployed in {env.primary_region}"]
+    checks = executions.evaluate(t, found, execution_problems)
+    if seen == PASS and any(not c.passed for c in checks):
+        seen = FAIL  # Resilience Hub passed it, but the run did not show what the test is for
     return {
         "test": t.name, "service": t.test.service, "template": t.test.template, "testRunId": run_id,
         "expected": t.test.expected, "observed": seen, "matches": matches(t.test.expected, seen),
@@ -181,6 +192,7 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
         "evidenceUntil": _iso(end), "evidenceComplete": now >= end,
         "sourceHistory": source_history,
         "events": events,
+        "planExecutions": found, "runChecks": [c.as_dict() for c in checks],
         "sources": sources, "sourceEvents": source_events,
         "resolvedTargets": read("resolved targets", lambda: hub("list-resolved-test-run-target-resources", "resolvedTargetResources"), []),
         "dependencies": read("blocked dependencies", lambda: hub("list-test-run-dependencies", "dependencies"), []),
@@ -233,6 +245,41 @@ def _evidence_lines(data: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _span(start: Any, end: Any) -> str:
+    if not start:
+        return "not started"
+    return f"{_clock(start)} to {_clock(end)}" if end else f"from {_clock(start)}, not ended"
+
+
+def _execution_lines(data: Dict[str, Any]) -> List[str]:
+    """Each plan execution that started during the run: what it did, step by step, and how long ARC says the
+    recovery took against the plan's objective."""
+    lines: List[str] = []
+    for e in data.get("planExecutions") or []:
+        head = f"- {e['executionId']}: {e['action']} {e['region']}, {e.get('mode') or 'graceful'}, {e['state']}. {_span(e['startTime'], e.get('endTime'))}"
+        if e.get("actualRecoverySeconds") is not None:
+            seconds = int(e["actualRecoverySeconds"])
+            head += f". Recovery time {seconds // 60} min {seconds % 60} s"
+            head += f" against the objective of {e['objectiveMinutes']} min" if e.get("objectiveMinutes") else ""
+        if e.get("comment"):
+            head += f". Started with the comment \"{e['comment']}\""
+        lines.append(head)
+        if e.get("steps") is None:
+            lines.append("  - its steps could not be read (see Not collected)")
+        for step in e.get("steps") or []:
+            lines.append(f"  - {step['name']}: {step['status']}, {_span(step.get('startTime'), step.get('endTime'))}")
+        for r in e.get("reports") or []:
+            lines.append("  - ARC's report: " + (f"s3 key {r['s3ObjectKey']}" if r.get("s3ObjectKey") else f"not written ({r.get('failure')})"))
+    return lines or ["- none started during the run"]
+
+
+def _failback_lines(data: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    for fb in data.get("failbacks") or []:
+        lines += ["", f"## Fail-back of {fb['region']}", "", *[f"- {line}" for line in fb["lines"] if line.strip()]]
+    return lines
+
+
 def render(data: Dict[str, Any], invoker_role: str = "") -> str:
     run = data["testRun"]
     started = parse_time(run["startedAt"])
@@ -268,6 +315,14 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
         lines += ["", f"No error message came with the run. Calls denied{who} carry none, so look for AccessDenied events in CloudTrail "
                       "around the start time."]
     lines += ["", "## What Resilience Hub watched", "", "| Alarm | Kind | Outcome | Reason | State changes (CloudWatch, UTC) |", "|---|---|---|---|---|", *_source_rows(data)]
+    checks = data.get("runChecks") or []
+    if checks:
+        failed = [c for c in checks if not c["passed"]]
+        if failed and run["status"] == "PASSED" and not problem:
+            lines += ["", f"Resilience Hub ended the run PASSED, but {'a run check' if len(failed) == 1 else 'run checks'} failed, so the run "
+                          "does not show what this test is for, and the observed result is FAIL."]
+        lines += ["", "## Run checks", "", *[f"- {'PASS' if c['passed'] else 'FAIL'} {c['name']}: {c['detail']}" for c in checks]]
+    lines += ["", "## Region Switch plan executions during the run", "", *_execution_lines(data)]
     lines += ["", "## Timeline (UTC)", "", *(_timeline(data) or ["- nothing recorded"])]
     lines += ["", "## Evidence alarms, by hop", *(_evidence_lines(data) or ["", "- none configured"])]
     targets = data["resolvedTargets"]
@@ -288,6 +343,7 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
                       + (f", s3 key {output['reportOutput']['s3ReportOutput']['s3ObjectKey']}" if (output.get("reportOutput") or {}).get("s3ReportOutput") else "")]
     if data["gaps"]:
         lines += ["", "## Not collected", "", *[f"- {g}" for g in data["gaps"]]]
+    lines += _failback_lines(data)
     return "\n".join(lines) + "\n"
 
 

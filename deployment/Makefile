@@ -960,11 +960,15 @@ ngrh-test-preflight:
 # deployment's alarms start without it, and preflight refuses a run while one is not OK (CI passes 15).
 # SETTLE_WAIT is how long to wait after the run ends before the report is written (default 10, the length of
 # the evidence window): the hop alarms often change one to three minutes after the fault stops.
+# FAILBACK is auto (the default) or skip. When the Region Switch plan deactivated a Region during the run, which the
+# recovery test makes happen, auto waits for the Region to have been healthy for ten minutes and then runs
+# `make failback` for it, and records that in the report; skip leaves it deactivated and prints the command.
 ALARM_WAIT ?= 0
 SETTLE_WAIT ?=
+FAILBACK ?=
 
 ngrh-test:
-	@python3 -m ngrh_testing run $(NGRH_TESTING_ARGS) --test "$(TEST)" --alarm-wait-minutes "$(ALARM_WAIT)"$(if $(SETTLE_WAIT), --settle-minutes "$(SETTLE_WAIT)")
+	@python3 -m ngrh_testing run $(NGRH_TESTING_ARGS) --test "$(TEST)" --alarm-wait-minutes "$(ALARM_WAIT)"$(if $(SETTLE_WAIT), --settle-minutes "$(SETTLE_WAIT)")$(if $(FAILBACK), --failback "$(FAILBACK)")
 
 # make ngrh-test-stop TEST=<name> [STOP_WAIT=<minutes>]: stop the test's active run, and with STOP_WAIT wait
 # up to that long for it to end (destroy-ngrh refuses while a run is active; CI passes 10).

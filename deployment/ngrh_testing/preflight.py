@@ -8,19 +8,24 @@ now (alarm states, active runs, FIS experiments, plan executions, and whether th
 tasks are registered with SSM), which is what CI wants right after a deploy. A check that cannot run
 because an AWS call failed is a refusal too: a preflight that cannot see is not a pass.
 
-The sentinel (check 1) is the credential lookup every command starts with. Check 8, which only the
-recovery test needs (triggers present, 60 minutes since the last execution, capacity headroom), arrives
-with that test in step 11.
+The sentinel (check 1) is the credential lookup every command starts with. Check 8 is the recovery test's
+alone (the triggers are there, the last plan execution is old enough for a trigger to fire again, and the
+scale-up fits under each service's maximum) and, like the other checks about what is happening now, a live
+preflight does it and a static one does not: CI's static preflight runs after every deploy, and an ordinary
+deploy has automatic failover off.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Sequence, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import api, context, reconcile, spec
 from .aws import AwsCli, AwsCliError
 from .context import ContextError, Environment, ResolvedTest
+from .timeutil import parse_time
 
 LIVE = "live"
 STATIC = "static"
@@ -297,11 +302,95 @@ def check_tasks_registered(aws: AwsCli, env: Environment, t: ResolvedTest) -> Li
                        f"weekly repave) and replace the service's tasks", t.name)]
 
 
+# --- 8: what only the recovery test needs ---------------------------------------------------------
+
+CAPACITY_WINDOW = timedelta(hours=24)  # ARC sizes a scale-up from the most tasks a service ran in this long
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def check_recovery(aws: AwsCli, env: Environment, t: ResolvedTest, now: datetime) -> List[Refusal]:
+    """The recovery test passes only if the plan moves the traffic by itself within the objective, so before it starts:
+
+    * the plan has a trigger that deactivates the Region the test impairs. Deployed with AUTOMATIC_FAILOVER=disabled it
+      has none, and the run would wait for a person who is not there.
+    * the last plan execution is older than the triggers' delay between executions (60 minutes). A trigger that fired
+      less than that ago will not fire again, and the run would fail for that reason alone.
+    * the scale-up fits. ARC raises each service in the recovery Region to a percentage (200) of the most tasks it ran
+      in the impaired Region in the last 24 hours, and a service can't go past its Auto Scaling maximum (10). Every
+      failover and fail-back raises the peaks, so repeated runs compound until a scale-up stalls at the maximum.
+
+    Only a live preflight can ask: all three depend on what has happened lately."""
+    region = t.fault_region
+    recovery = t.parameters["recoveryRegion"][0]
+    plan_arn = context.region_switch_plan_arn(aws, env.primary_region, env.env)
+    if not plan_arn:
+        return [Refusal(8, f"stack region-switch{env.env} is not deployed in {env.primary_region}, so there is no plan to recover with; "
+                           "deploy it first (make region-switch)", t.name)]
+    plan = api.get_plan(aws, env.primary_region, plan_arn)
+    out: List[Refusal] = []
+
+    mine = [x for x in plan.get("triggers") or [] if x.get("action") == "deactivate" and x.get("targetRegion") == region]
+    if not mine:
+        out.append(Refusal(8, f"the plan has no trigger that deactivates {region}, so nothing would move the traffic during the run. "
+                              "Automatic failover is off on this deployment (it was deployed with AUTOMATIC_FAILOVER=disabled); "
+                              "deploy with it enabled (make region-switch-plan AUTOMATIC_FAILOVER=enabled), after "
+                              "make ngrh-alarm-replay shows the triggers' conditions are not met at rest", t.name))
+    else:
+        delay = max(int(x["minDelayMinutesBetweenExecutions"]) for x in mine)
+        executions, problems = api.plan_executions(aws, plan_arn, env.regions)
+        out.extend(Refusal(8, p, t.name) for p in problems)
+        if executions:
+            last = max(executions, key=lambda e: parse_time(e["startTime"]))
+            started = parse_time(last["startTime"])
+            if now - started < timedelta(minutes=delay):
+                until = started + timedelta(minutes=delay)
+                out.append(Refusal(8, f"plan execution {last['executionId']} ({last['executionAction']} {last['executionRegion']}) started "
+                                      f"{int((now - started).total_seconds() // 60)} min ago, and a trigger starts at most one execution every "
+                                      f"{delay} min, so the trigger would not fire during this run. Wait until {until:%H:%M} UTC", t.name))
+    out.extend(_capacity_refusals(aws, env, t, plan, region, recovery, now))
+    return out
+
+
+def _capacity_refusals(aws: AwsCli, env: Environment, t: ResolvedTest, plan: Dict[str, Any], region: str, recovery: str,
+                       now: datetime) -> List[Refusal]:
+    percents = api.ecs_scale_up_percents(plan)
+    names = [spec.ECS_SERVICE_NAMES[s] + env.env for s in spec.SERVICES]
+    if not any(n in percents for n in names):
+        return []  # the plan scales nothing up, so there is no ceiling to hit
+    impaired_cluster, recovery_cluster = _ecs_cluster(aws, env, region), _ecs_cluster(aws, env, recovery)
+    targets = api.scalable_targets(aws, recovery, [f"service/{recovery_cluster}/{n}" for n in names])
+    out: List[Refusal] = []
+    for name in names:
+        if name not in percents:
+            continue
+        peak = api.running_task_peak(aws, region, impaired_cluster, name, _iso(now - CAPACITY_WINDOW), _iso(now))
+        target = targets.get(f"service/{recovery_cluster}/{name}")
+        if peak is None:
+            out.append(Refusal(8, f"no Container Insights datapoint for {name} in {region} in the last 24 hours, and ARC sizes the "
+                                  f"scale-up in {recovery} from it", t.name))
+        elif target is None:
+            out.append(Refusal(8, f"{name} has no Application Auto Scaling target in {recovery}, so the scale-up there has nothing to "
+                                  "raise", t.name))
+        else:
+            needed = math.ceil(percents[name] / 100 * peak)
+            if needed > target["MaxCapacity"]:
+                out.append(Refusal(8, f"the plan would scale {name} in {recovery} to {needed} tasks ({percents[name]}% of {peak:g}, the most it ran in "
+                                      f"{region} in the last 24 hours), past the {target['MaxCapacity']} its Auto Scaling target allows, so the "
+                                      "scale-up would stall. The peak falls out of the 24-hour window on its own: wait, or impair the other "
+                                      "Region", t.name))
+    return out
+
+
 # --- all of them -----------------------------------------------------------------------------------
 
-def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: str = LIVE) -> Result:
+def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: str = LIVE,
+               now: Optional[datetime] = None) -> Result:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {', '.join(MODES)}")
+    now = now or datetime.now(timezone.utc)
     result = Result()
     refusals = result.refusals
     try:
@@ -320,6 +409,9 @@ def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: 
     if mode == LIVE:
         for t in resolved:
             refusals.extend(_seeing(9, "whether the service's tasks are registered with SSM", lambda t=t: check_tasks_registered(aws, env, t), t.name))
+            if t.test.template == spec.RECOVERY_TEMPLATE:
+                refusals.extend(_seeing(8, "what the recovery test needs (the triggers, the last execution, the capacity)",
+                                        lambda t=t: check_recovery(aws, env, t, now), t.name))
         refusals.extend(_seeing(5, "the active test runs", lambda: check_no_active_runs(aws, env)))
         refusals.extend(_seeing(6, "the FIS experiments", lambda: check_no_fis_experiments(aws, env)))
         refusals.extend(_seeing(7, "the plan executions", lambda: check_plan_executions(aws, env, result.notes)))

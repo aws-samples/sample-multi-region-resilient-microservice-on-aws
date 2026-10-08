@@ -19,6 +19,8 @@ TERMINAL_STATUSES = ("PASSED", "FAILED", "STOPPED", "ERROR")
 # ARC Region Switch execution states (ListPlanExecutions, GetPlanExecution): a plan still working, and one that is done.
 RUNNING_PLAN = ("inProgress", "pausedByFailedStep", "pausedByOperator", "pendingManualApproval", "pending")
 FINISHED_PLAN = ("completed", "completedWithExceptions", "completedMonitoringApplicationHealth")
+# The finished states that mean every step did its work: completedWithExceptions skipped or failed one and went on.
+SUCCEEDED_PLAN = ("completed", "completedMonitoringApplicationHealth")
 
 ALARM_TYPES = ["MetricAlarm", "CompositeAlarm"]  # describe-alarms lists metric alarms only unless asked
 DESCRIBE_ALARMS_LIMIT = 100  # names per call
@@ -137,3 +139,46 @@ def alarm_state_updates(aws: AwsCli, region: str, name: str, start: str, end: st
     lists metric alarms only unless composite alarms are asked for too."""
     return aws.call("cloudwatch", "describe-alarm-history", region, alarm_name=name, alarm_types=ALARM_TYPES,
                     history_item_type="StateUpdate", start_date=start, end_date=end).get("AlarmHistoryItems", [])
+
+
+def get_plan(aws: AwsCli, region: str, plan_arn: str) -> Dict[str, Any]:
+    """The Region Switch plan as ARC holds it: its triggers, associated alarms and workflows."""
+    return aws.call("arc-region-switch", "get-plan", region, arn=plan_arn)["plan"]
+
+
+def ecs_scale_up_percents(plan: Dict[str, Any], action: str = "deactivate") -> Dict[str, int]:
+    """service name -> TargetPercent of the plan's ECS scaling blocks in the workflow for ``action``. ARC raises a
+    service to that percentage of the most tasks it ran in the other Region in the last 24 hours. A block lists the
+    service in both Regions, so the name (the last part of its ARN) identifies it."""
+    found: Dict[str, int] = {}
+
+    def walk(steps: Sequence[Dict[str, Any]]) -> None:
+        for step in steps:
+            config = step.get("executionBlockConfiguration") or {}
+            walk((config.get("parallelConfig") or {}).get("steps") or [])
+            block = config.get("ecsCapacityIncreaseConfig")
+            if block:
+                for service in block.get("services") or []:
+                    found[service["serviceArn"].rsplit("/", 1)[-1]] = int(block.get("targetPercent", 100))
+
+    for workflow in plan.get("workflows") or []:
+        if workflow.get("workflowTargetAction") == action:
+            walk(workflow.get("steps") or [])
+    return found
+
+
+def running_task_peak(aws: AwsCli, region: str, cluster: str, service: str, start: str, end: str) -> Optional[float]:
+    """The most tasks the ECS service ran at any time between two ISO-8601 times, from Container Insights (the source
+    ARC's ``containerInsightsMaxInLast24Hours`` reads); None when it has no datapoint in that time."""
+    points = aws.call("cloudwatch", "get-metric-statistics", region, namespace="ECS/ContainerInsights",
+                      metric_name="RunningTaskCount",
+                      dimensions=[{"Name": "ClusterName", "Value": cluster}, {"Name": "ServiceName", "Value": service}],
+                      start_time=start, end_time=end, period=3600, statistics=["Maximum"]).get("Datapoints", [])
+    return max(p["Maximum"] for p in points) if points else None
+
+
+def scalable_targets(aws: AwsCli, region: str, resource_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """The Application Auto Scaling targets of ECS services, by resource id."""
+    found = aws.call("application-autoscaling", "describe-scalable-targets", region, service_namespace="ecs",
+                     scalable_dimension="ecs:service:DesiredCount", resource_ids=list(resource_ids)).get("ScalableTargets", [])
+    return {t["ResourceId"]: t for t in found}

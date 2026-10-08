@@ -152,7 +152,37 @@ def mq_broker_host(aws: AwsCli, env: Environment, region: str) -> List[str]:
     return hosts
 
 
-LOOKUPS: Dict[str, Callable[[AwsCli, Environment, str], List[str]]] = {"mq-broker-host": mq_broker_host}
+def catalog_db_endpoints(aws: AwsCli, env: Environment, region: str) -> List[str]:
+    """The host names catalog reaches its database at in a Region: the writer endpoint and the reader endpoint of the
+    Aurora cluster in the Region's catalog-db-stack. The recovery test blocks them for the Region it impairs. Both
+    are read from the cluster, because the names hold an identifier that is new with every deploy."""
+    detail = aws.call("cloudformation", "describe-stack-resource", region,
+                      stack_name=f"catalog-db-stack{env.env}", logical_resource_id="DBCluster")
+    clusters = aws.call("rds", "describe-db-clusters", region,
+                        db_cluster_identifier=detail["StackResourceDetail"]["PhysicalResourceId"]).get("DBClusters", [])
+    hosts: List[str] = []
+    for key in ("Endpoint", "ReaderEndpoint"):
+        host = clusters[0].get(key) if clusters else None
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def plan_arn(aws: AwsCli, env: Environment, region: str) -> List[str]:
+    """The Region Switch plan's ARN, from the region-switch stack in the primary Region (``region`` is ignored: the plan
+    is one for the deployment). The recovery test names it so Resilience Hub can put the plan's timeline in its report."""
+    arn = region_switch_plan_arn(aws, env.primary_region, env.env)
+    if not arn:
+        raise ContextError([f"stack region-switch{env.env} is not deployed in {env.primary_region}, so there is no plan to name; "
+                            "deploy it first (make region-switch)"])
+    return [arn]
+
+
+LOOKUPS: Dict[str, Callable[[AwsCli, Environment, str], List[str]]] = {
+    "mq-broker-host": mq_broker_host,
+    "catalog-db-endpoints": catalog_db_endpoints,
+    "plan-arn": plan_arn,
+}
 
 
 # --- resolving a spec test ----------------------------------------------------------------------
@@ -214,7 +244,7 @@ def resolve(aws: AwsCli, env: Environment, test: spec.Test, problems: List[str])
                 region = env.region(value.region)
                 try:
                     found = LOOKUPS[value.lookup](aws, env, region)
-                except AwsCliError as e:
+                except (AwsCliError, ContextError) as e:
                     problems.append(f"{test.name}: lookup {value.lookup} in {region} failed: {e}")
                     continue
                 if not found:

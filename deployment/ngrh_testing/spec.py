@@ -39,11 +39,16 @@ HOP_ALARMS = tuple(f"hop-{service}-{kind}" for service in HOP_SERVICES for kind 
 ALARM_GROUPS: Dict[str, Tuple[str, ...]] = {"hop": HOP_ALARMS}
 
 # Lookups a parameter value can ask for; context.py holds the functions (a test keeps the two in step).
-KNOWN_LOOKUPS = ("mq-broker-host",)
+KNOWN_LOOKUPS = ("mq-broker-host", "catalog-db-endpoints", "plan-arn")
 
-# Run-level checks beyond NGRH's verdict (design 5.8). None exist yet: steps 11 and 12 add each
-# name together with the code that evaluates it, so a spec can't name a check that silently never runs.
-KNOWN_RUN_CHECKS: Tuple[str, ...] = ()
+# Run-level checks beyond NGRH's verdict (design 5.8); executions.py evaluates each one, and a test keeps the two in
+# step, so a spec can't name a check that silently never runs. deactivate-completed: a deactivate of the impaired
+# Region started during the run and completed (the recovery test). Step 12 adds the isolation test's two.
+KNOWN_RUN_CHECKS: Tuple[str, ...] = ("deactivate-completed",)
+
+# The template that impairs a Region and waits for another to recover. A test that uses it needs the automatic
+# failover to be armed, which preflight check 8 looks at.
+RECOVERY_TEMPLATE = "aws-multi-region-recovery:rtmr002"
 
 # NGRH's limits: five sources (success plus observability) per test; FIS allows five stop conditions
 # per experiment template. The design keeps every parameter to ten values at most.
@@ -363,7 +368,7 @@ def _parse_test(index: int, data: Any, problems: List[str]) -> Optional[Test]:
         checks = []
     for check in checks:
         if check not in KNOWN_RUN_CHECKS:
-            problems.append(f"{where}: unknown run check {check!r}; none are implemented yet")
+            problems.append(f"{where}: unknown run check {check!r}; known: {', '.join(KNOWN_RUN_CHECKS)}")
 
     valid_template = isinstance(template, str) and template in TEMPLATES
     parameters: Mapping[str, Tuple[ParameterValue, ...]] = {}

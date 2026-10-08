@@ -15,6 +15,10 @@ How to read a result:
 
 A run that ends `ERROR` or `STOPPED` is neither: the test did not finish, and the report says why.
 
+A test can also name **run checks**, which look at what the run did beyond what Resilience Hub reports. A run
+Resilience Hub ends `PASSED` is observed **FAIL** when one of its run checks fails: the run did not show what
+the test is for. The report lists each check with its reason.
+
 A run that ends `FAILED` or `PASSED` can also be **INCONCLUSIVE**: when FIS could not inject the fault (an
 experiment that ended `failed`, or an `action_failed` event), nothing was done to the sample, so what the run
 says about it is nothing. Resilience Hub still ends such a run `FAILED`. The report heads it "INCONCLUSIVE, the
@@ -67,6 +71,74 @@ call to orders reached the 3-second Service Connect limit first, checkout return
 page inside the canary's 30-second run, and `orders-created-zero` stayed `OK` because the order was saved first.
 If the journeys fail again with the broker cut, compare with this: it is the signature of a publish back on the
 request path. The run's timeline is under Runs.
+
+## catalog-recovery
+
+**Test:** the catalog service, multi-Region recovery. For 20 minutes FIS drops catalog's traffic to its Aurora
+cluster in us-east-1, the writer endpoint and the reader endpoint, both read from the cluster in that Region's
+`catalog-db-stack`. The test names the Region Switch plan so Resilience Hub's report can carry its timeline, but
+the plan is started by its own alarm triggers, not by the test. The success alarms are the four global journeys
+(`journey-global-*` in us-east-1): they enter through the Route 53 name, so they go green again only once traffic
+has moved to us-west-2. The observability alarm is `hop-catalog-slow`. There is no stop condition: stopping the
+fault cannot help if us-west-2 fails after DNS has moved, and a guard on us-east-1's own journeys would trip on the
+brief catalog pause during the switchover and end the run early. The report's evidence also lists the triggers'
+inputs, the four `journey-lcl-*` alarms of us-east-1 and the four `journey-rmt-*` alarms of us-west-2, and both
+`region-degraded` alarms, so a run that does not fail over shows which condition was not met.
+
+Expected result: PASS
+
+**Why:** the fault touches only catalog's tasks in us-east-1. Catalog can no longer read its database, so the
+catalog journey and the home journey, which both call catalog through ui, fail from us-east-1 after two of three
+one-minute canary runs. That meets one trigger: `journey-lcl-<journey>` for us-east-1 is red, `journey-rmt-<journey>`
+for us-west-2 (its view of us-east-1) is red, and `region-degraded` for us-west-2 is `OK`, because the fault does
+not reach it. The plan then scales the six services up in us-west-2 to twice their 24-hour peak in us-east-1,
+moves DNS, and switches the catalog database over to us-west-2, in that order. The global journeys recover once
+the new DNS answers reach their canaries. Resilience Hub passes the run when all four are back to `OK` within the
+10 minutes of the multi-Region objective in the resiliency policy and stay there.
+
+**Run check `deactivate-completed`:** a deactivate of us-east-1 started during the run and ended `completed`.
+Without it a run could pass because the fault did not bite, or because a person moved the traffic by hand, and
+show nothing about the triggers. An execution that ended `completedWithExceptions` (a step was skipped or failed
+and the run went on) or paused does not count.
+
+**What confirms it:** the run ends `PASSED`, the run check passes, and the report's plan execution shows the
+deactivate starting a few minutes after the fault, its three steps completed, and ARC's own recovery time under
+the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be healthy for ten minutes and runs
+`make failback REGION=us-east-1`, which the report records.
+
+**What would contradict it:**
+
+- The run ends `FAILED` although the deactivate completed: the global alarms came back after the 10 minutes. The
+  budget is tight (the design estimates 6.5 to 11.5 minutes: 3 to 4 to detect, a minute to scale up, up to a minute
+  for the DNS change, up to a minute and a half for the next canary run, 3 to 4 for the alarms to clear), and ARC
+  adds two delays it does not publish, from the alarms to the start of the plan and from the plan to the health
+  checks. The report's timeline shows where the time went. Either the alarms or the plan get faster, or the
+  expectation changes to what the run shows.
+- The run check fails with no deactivate: no trigger fired. The evidence alarms say which of the three conditions
+  was missing. If the plan has no triggers the deployment was made with `AUTOMATIC_FAILOVER=disabled`, and
+  preflight refuses the run before it starts.
+- The deactivate paused: the switchover could not finish, most likely because the fault also slowed the primary
+  database, and the execution waits in `pausedByFailedStep` with traffic already moved. The README's runbook has the
+  three ways out, and `make failback` refuses until the execution is resolved.
+
+**Not known before the first run:**
+
+- Whether Resilience Hub only records the plan named in `regionSwitchPlan` (current documentation) or starts it
+  itself (the template's own description says "to execute during the test"). The report lists every execution that
+  started during the run with its mode and comment, and a second execution started a moment after the first would
+  be this.
+- What `executionRegion` means in `list-plan-executions` and `get-plan-execution`. The API documents it only as "the
+  Region for a plan execution". The run check, the choice of which Region `run` fails back and the live preflight
+  all read it as the Region the execution targets, so a deactivate of us-east-1 has `executionRegion` us-east-1,
+  which is how `StartPlanExecution`'s `targetRegion` reads. If it is the Region whose endpoint ran the execution, the
+  check fails a correct run, and the fix is one line in `executions.py`. The timed, operator-started failover that
+  comes before this test settles it.
+- Whether `completedMonitoringApplicationHealth` or `completed` is the state a trigger-started execution ends in;
+  both count.
+- What comment, if any, ARC records on an execution its triggers started. Nothing reads it; the report prints it.
+
+**Confidence:** none yet. No run exists, and the plan's triggers, the order of its steps and the preflight have
+only been tested against a fake of the AWS calls. The first live run is the check.
 
 ## Runs
 

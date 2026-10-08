@@ -39,6 +39,7 @@ from .report import parse_time
 
 POLL_SECONDS = 15
 STABLE_MINUTES = 10  # how long the Region's alarms must have been OK before traffic goes back
+SETTLE_WAIT_MINUTES = 30  # how long `make ngrh-test` waits for them to have been OK that long, after a run, before it gives up
 ACTIVATE_WAIT_MINUTES = 10  # the activate workflow is one DNS step with a 5-minute limit
 WRITER_WAIT_MINUTES = 45  # how long to wait for the old primary to rejoin and catch up (design 5.10)
 SWITCHOVER_WAIT_MINUTES = 20  # how long to wait for a switchover Aurora accepted
@@ -50,7 +51,7 @@ ECS_SERVICES = tuple(spec.ECS_SERVICE_NAMES.values())  # ui, catalog, carts, che
 SCALABLE_DIMENSION = "ecs:service:DesiredCount"
 
 # ARC execution states (GetPlanExecution). The others are still going.
-SUCCEEDED = ("completed", "completedMonitoringApplicationHealth")
+SUCCEEDED = api.SUCCEEDED_PLAN
 PAUSED = ("pausedByFailedStep", "pausedByOperator", "pendingManualApproval")
 ENDED_BADLY = ("failed", "canceled", "planExecutionTimedOut", "completedWithExceptions")
 
@@ -327,6 +328,26 @@ def _wait_for_switchover(aws: AwsCli, env: Environment, progress: Callable[[str]
                     f"in {writer or 'no Region'} after {SWITCHOVER_WAIT_MINUTES} min; check it with: aws rds describe-global-clusters "
                     f"--global-cluster-identifier {global_cluster_id(env)} --region {env.primary_region}")
             return "the catalog switchover has not finished", left
+        sleep(poll_seconds)
+
+
+def wait_until_stable(aws: AwsCli, env: Environment, region: str, minutes: float, progress: Callable[[str], None],
+                      sleep: Callable[[float], None], clock: Callable[[], float], now: Callable[[], datetime],
+                      poll_seconds: float = POLL_SECONDS) -> List[str]:
+    """Wait up to ``minutes`` for the Region's own journey alarms, and the other Region's view of it, to have been OK for
+    ten minutes, which is what preflight asks of a fail-back. A test run ends with the fault, but the alarms need a few
+    minutes to settle after it, so the run waits here instead of being refused. Returns what still stands in the way
+    when the time is up (empty when the Region settled)."""
+    began, told = clock(), None
+    while True:
+        problems = alarm_problems(aws, env, region, now())
+        if not problems:
+            return []
+        if problems != told:
+            progress(f"Waiting for {region} to have been healthy for {STABLE_MINUTES} min: " + "; ".join(problems))
+            told = problems
+        if clock() - began >= minutes * 60:
+            return problems
         sleep(poll_seconds)
 
 

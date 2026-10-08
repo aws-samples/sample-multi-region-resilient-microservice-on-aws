@@ -27,6 +27,43 @@
       ],
       "runChecks": [],
       "expected": "PASS"
+    },
+    {
+      "name": "catalog-recovery",
+      "service": "catalog",
+      "template": "aws-multi-region-recovery:rtmr002",
+      "parameters": {
+        "impairedRegion": ["primary"],
+        "recoveryRegion": ["standby"],
+        "regionSwitchPlan": [{"lookup": "plan-arn", "region": "primary"}],
+        "dependencies": [{"lookup": "catalog-db-endpoints", "region": "primary"}],
+        "duration": ["20"]
+      },
+      "successAlarms": [
+        {"name": "journey-global-home", "region": "primary"},
+        {"name": "journey-global-cart", "region": "primary"},
+        {"name": "journey-global-catalog", "region": "primary"},
+        {"name": "journey-global-orders", "region": "primary"}
+      ],
+      "observabilityAlarms": [
+        {"name": "hop-catalog-slow", "region": "primary"}
+      ],
+      "stopAlarms": [],
+      "evidenceAlarms": [
+        {"name": "region-degraded", "region": "primary"},
+        {"name": "region-degraded", "region": "standby"},
+        {"name": "journey-lcl-home", "region": "primary"},
+        {"name": "journey-lcl-cart", "region": "primary"},
+        {"name": "journey-lcl-catalog", "region": "primary"},
+        {"name": "journey-lcl-orders", "region": "primary"},
+        {"name": "journey-rmt-home", "region": "standby"},
+        {"name": "journey-rmt-cart", "region": "standby"},
+        {"name": "journey-rmt-catalog", "region": "standby"},
+        {"name": "journey-rmt-orders", "region": "standby"},
+        {"group": "hop", "region": "primary"}
+      ],
+      "runChecks": ["deactivate-completed"],
+      "expected": "PASS"
     }
   ]
 }
