@@ -48,6 +48,58 @@ The sample application is an e-commerce platform. The front-end runs as a servic
 
 5. An operator uses the SSM runbook to recover a copy of the old primary database from a snapshot and compare the data in the new primary database to the old and create a missing transaction report
 
+The numbers label the diagram. The plan runs them in the order 1, 2, 4, 3: it moves DNS as soon as the remaining Region has scaled up, and switches the database over last. [Automatic failover and fail-back](#3-automatic-failover-and-fail-back) says why.
+
+### 3. Automatic failover and fail-back
+
+The Region Switch plan in [`deployment/failover.yaml`](deployment/failover.yaml) moves traffic away from a Region, and `make failback` brings the Region back.
+
+**What the plan does when it deactivates a Region**, in this order:
+
+1. It scales up the ECS services of the Region that stays, all six in parallel, to twice the highest count they reached in the last 24 hours (15 minutes allowed).
+2. It moves DNS. The plan's Route 53 health check for the Region goes unhealthy, so the application's name resolves only to the Region that stays (5 minutes allowed).
+3. It switches the catalog database over. The writer of the Aurora global database moves to the Region that stays (10 minutes allowed). This is a switchover, which loses no data.
+
+An operator starts it, at the Region that stays, because the Region being drained may be the impaired one:
+
+```
+aws arc-region-switch start-plan-execution --plan-arn <RegionSwitchPlanArn> --action deactivate \
+  --target-region <Region to move away from> --mode graceful --region <the other Region>
+```
+
+> **Why traffic moves before the catalog database.** The failover plan moves traffic as soon as the healthy Region has scaled up, and only then switches the catalog database's writer to that Region. That order is acceptable because catalog is a low-write database. Shoppers only read it, and each Region reads from its own copy, so the healthy Region serves catalog pages without the writer. Its only writes are the schema and sample product data that the catalog service loads when it first starts, so nothing needs the writer during a failover. If a workload like this one does need to accept writes during an outage, it can queue them and apply them after recovery.
+>
+> The switchover loses no data. If it can't finish, for example because the primary database is down, the plan pauses with traffic already moved, and a person decides whether to retry it, skip it, or fail over with possible data loss. The automation never makes that trade on its own.
+
+**If the switchover pauses the run.** The execution waits in the state `pausedByFailedStep`, and a paused execution holds the plan: a new execution and `make failback` both wait until a person resolves it. There are three ways out, and only the last can lose data:
+
+- **Retry.** The API has no retry for a failed step. Once the database is healthy, cancel the paused execution (`aws arc-region-switch cancel-plan-execution`) and start the deactivate again. That repeats the scale-up too, which asks for more tasks the second time because ARC sizes it from the highest count of the last 24 hours (never past each service's maximum of 10). This path has not been tried on this sample.
+- **Skip the step.** `aws arc-region-switch update-plan-execution-step --step-name switch-over-catalog-db --action-to-take skip --comment <why>` lets the run finish. The writer stays where it is. Each Region keeps reading its own cluster, so only catalog writes wait. `make failback` moves the writer to the primary Region once its database is available.
+- **Switch the run to ungraceful.** `aws arc-region-switch update-plan-execution-step --step-name switch-over-catalog-db --action-to-take switchToUngraceful --comment <why>` fails the database over to the Region that stays, and can lose the catalog writes the old primary had not yet replicated. Choose it only when the primary database is not coming back soon and losing those writes is acceptable.
+
+**Failing a Region back.** When the Region is healthy again, run:
+
+```
+make failback REGION=<Region>
+```
+
+`REGION` is required and must be on the command line. The command needs no Resilience Hub stack. It does these in order and stops where the next step depends on the last:
+
+| Step | What it does |
+|---|---|
+| Preflight | Refuses, and lists every reason, unless the Region's own journey alarms and the other Region's view of it have been `OK` for 10 minutes, no plan execution is going or paused, and the plan's Route 53 health checks are not all unhealthy. It also refuses a Region that is serving while the other one is the Region DNS moved away from. |
+| Activate | Starts the plan's activate workflow for the Region, graceful, at that Region's endpoint, and waits (10 minutes at most). A Region whose health check is healthy already is not activated again. If the execution fails, pauses or runs out of time, the command stops: capacity and the writer are left alone while DNS is in doubt. |
+| Capacity | The failover scaled the remaining Region up and nothing scales it down again, so this sets every service's desired count and Auto Scaling minimum back to 2 in both Regions, the values `ecs.yaml` declares. The maximum is left as it is. |
+| Writer | If the catalog writer is not in `PRIMARY_REGION`, switches the global database over to the cluster there, and waits for it. After a person chose to fail the database over, the old primary has to rejoin and catch up first, so this waits up to 45 minutes. If it has not by then the writer stays where it is, which is safe, and the command prints what to run to finish. |
+
+Every step reads before it writes, so running the command again after a partial failure repeats nothing that is done. It exits 0 when done, 1 when a step failed, 2 when preflight refused (nothing was changed), and 3 when it finished except for what it says is left for you. The credentials need to read CloudWatch alarms, start and read plan executions, update ECS services and their Application Auto Scaling targets, and switch over the Aurora global database.
+
+Activating the Region in the ARC console runs only the DNS step. It does not put the capacity back or move the writer, so use `make failback`.
+
+**Measurement and reports.** The plan has a recovery time objective of 10 minutes. ARC measures it from the start of an execution until the application health alarms, the `journey-global-*` alarms of both Regions, are green, and writes a report of each execution (the step timeline, the alarms' states and the recovery time against the objective) to the stack's reports bucket, named in the output `ReportsBucketName`, under `executions/`. Reports expire after 90 days. The plan also lists the other journey alarms (`journey-lcl-*`, `journey-rmt-*` and `region-degraded`) as trigger alarms.
+
+**The automatic-failover switch.** `make deploy AUTOMATIC_FAILOVER=disabled` (the default is `enabled`) leaves out the permission that lets the plan's execution role start the plan, which an execution started by an alarm needs. The plan has no alarm triggers yet, so today only an operator starts it.
+
 
 ## Resilience Modeling with AWS Resilience Hub
 

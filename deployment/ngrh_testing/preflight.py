@@ -31,9 +31,6 @@ SIDECAR = "amazon-ssm-agent"  # the FIS SSM agent sidecar container in every tas
 SSM_TASK_TAG = "ECS_TASK_ARN"  # the tag the sidecar puts on the managed instance it registers, which FIS finds a task by
 
 ACTIVE_FIS = ("pending", "initiating", "running", "stopping")
-# ARC Region Switch execution states (ListPlanExecutions): a plan still working, and one that is done.
-RUNNING_PLAN = ("inProgress", "pausedByFailedStep", "pausedByOperator", "pendingManualApproval", "pending")
-FINISHED_PLAN = ("completed", "completedWithExceptions", "completedMonitoringApplicationHealth")
 
 
 @dataclass(frozen=True)
@@ -202,26 +199,19 @@ def check_no_fis_experiments(aws: AwsCli, env: Environment) -> List[Refusal]:
 def check_plan_executions(aws: AwsCli, env: Environment, notes: List[str]) -> List[Refusal]:
     """No plan execution in progress at either Regional endpoint, and no Region left deactivated by an
     earlier one. ``executionRegion`` is read as the Region the execution activated or deactivated."""
-    outputs = context.stack_outputs(aws, env.primary_region, f"region-switch{env.env}")
-    plan_arn = (outputs or {}).get("RegionSwitchPlanArn")
+    plan_arn = context.region_switch_plan_arn(aws, env.primary_region, env.env)
     if not plan_arn:
         notes.append(f"stack region-switch{env.env} is not deployed in {env.primary_region}: no plan executions to check")
         return []
     out: List[Refusal] = []
-    executions: Dict[str, Dict[str, str]] = {}
-    for region in env.regions:
-        try:
-            items = aws.call("arc-region-switch", "list-plan-executions", region, plan_arn=plan_arn).get("items", [])
-        except AwsCliError as e:
-            out.append(Refusal(7, f"could not list plan executions at the {region} endpoint: {e}"))
-            continue
-        executions.update({e["executionId"]: e for e in items})
-    for e in sorted(executions.values(), key=lambda e: str(e["startTime"])):
-        if e["executionState"] in RUNNING_PLAN:
+    executions, problems = api.plan_executions(aws, plan_arn, env.regions)
+    out.extend(Refusal(7, p) for p in problems)
+    for e in executions:
+        if e["executionState"] in api.RUNNING_PLAN:
             out.append(Refusal(7, f"plan execution {e['executionId']} ({e['executionAction']} {e['executionRegion']}) is {e['executionState']}"))
     state: Dict[str, Dict[str, str]] = {}
-    for e in sorted(executions.values(), key=lambda e: str(e["startTime"])):
-        if e["executionState"] in FINISHED_PLAN and e["executionAction"] in ("activate", "deactivate"):
+    for e in executions:
+        if e["executionState"] in api.FINISHED_PLAN and e["executionAction"] in ("activate", "deactivate"):
             state[e["executionRegion"]] = e
     for region, e in sorted(state.items()):
         if e["executionAction"] == "deactivate":
@@ -233,8 +223,7 @@ def check_plan_executions(aws: AwsCli, env: Environment, notes: List[str]) -> Li
 # --- 9: the service under test -------------------------------------------------------------------
 
 def _ecs_cluster(aws: AwsCli, env: Environment, region: str) -> str:
-    return aws.call("cloudformation", "describe-stack-resource", region, stack_name=f"apps{env.env}",
-                    logical_resource_id="EcsCluster")["StackResourceDetail"]["PhysicalResourceId"]
+    return api.ecs_cluster(aws, region, env.env)
 
 
 def check_service_configuration(aws: AwsCli, env: Environment, t: ResolvedTest) -> List[Refusal]:

@@ -5,7 +5,8 @@ environment, as for the Makefile's own aws calls.
 
 Exit codes: 0 done; 1 the command could not run or failed; 2 preflight refused the run; 3 it ran and
 found something to act on (replay: a failover trigger's conditions were met; reconcile --check: the tests
-have drifted; run: the verdict was not the one the spec expects); 130 interrupted (the run goes on)."""
+have drifted; run: the verdict was not the one the spec expects; failback: done except for what the output
+says is left to do); 130 interrupted (the run goes on)."""
 
 from __future__ import annotations
 
@@ -13,9 +14,10 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
-from . import context, preflight, reconcile, replay, report, run, spec
+from . import context, failback, preflight, reconcile, replay, report, run, spec
 from .aws import AwsCli, AwsCliError
 from .context import ContextError, Environment, ResolvedTest, load_environment
 
@@ -90,6 +92,14 @@ def parser() -> argparse.ArgumentParser:
     _add_spec(t)
     t.add_argument("--run", default="", help="the run's id; the test's latest run by default")
     t.add_argument("--reports-dir", default=report.REPORT_DIR)
+
+    b = commands.add_parser("failback", help="serve from a Region again after the failover plan moved traffic away from it (make failback)")
+    _add_deployment(b)
+    b.add_argument("--region", required=True, help="the Region to fail back: the primary or the standby")
+    b.add_argument("--poll-seconds", type=float, default=failback.POLL_SECONDS)
+    b.add_argument("--writer-wait-minutes", type=float, default=failback.WRITER_WAIT_MINUTES,
+                   help="how long to wait for the old primary database to rejoin and catch up before giving up on moving "
+                        f"the writer back (default {failback.WRITER_WAIT_MINUTES})")
     return p
 
 
@@ -171,6 +181,40 @@ def _run_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep:
     return EXIT_OK if data["matches"] else EXIT_FOUND
 
 
+def _failback_command(aws: AwsCli, args: argparse.Namespace, sleep: Callable[[float], None], clock: Callable[[], float],
+                      now: Callable[[], datetime]) -> int:
+    """Fail a Region back. It needs no ngrh stack, only the plan: a deployment that never ran make ngrh can use it."""
+    try:
+        aws.account_id()
+    except AwsCliError as e:
+        sys.stderr.write(f"ngrh_testing failback: the credentials do not work: {e}\n")
+        return EXIT_ERROR
+    env = context.load_basic_environment(aws, args.primary_region, args.standby_region, args.env)
+    again = f"make failback REGION={args.region}"
+    try:
+        outcome = failback.run(aws, env, args.region, _say, sleep, clock, now, args.poll_seconds, args.writer_wait_minutes)
+    except failback.FailbackRefused as e:
+        _say(f"Fail-back of {args.region} refused, {len(e.problems)} reason(s); nothing was changed:")
+        for problem in e.problems:
+            _say(f"  {problem}")
+        return EXIT_REFUSED
+    except failback.FailbackError as e:
+        sys.stderr.write(f"ngrh_testing failback: {e}\n")
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        _say(f"\nInterrupted. Nothing is undone and every step is safe to repeat: run {again} again.")
+        return EXIT_INTERRUPTED
+    for line in outcome.failed:
+        sys.stderr.write(f"ngrh_testing failback: {line}\n")
+    for line in outcome.left:
+        _say(f"Left for you: {line}")
+    if outcome.exit_code:
+        _say(f"Fail-back of {args.region} is not finished. Every step is safe to repeat: {again}.")
+    else:
+        _say(f"Fail-back of {args.region} is done.")
+    return outcome.exit_code
+
+
 def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_seconds: Optional[float] = None,
          sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> int:
     args = parser().parse_args(argv)
@@ -185,6 +229,9 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
             for line in reconcile.delete_tests(aws, args.primary_region, args.env):
                 _say(line)
             return EXIT_OK
+        if args.command == "failback":
+            return _failback_command(aws, args, sleep, clock,
+                                     lambda: datetime.fromtimestamp(time.time() if now_seconds is None else now_seconds, tz=timezone.utc))
         if args.command == "preflight":  # check 1: the credential sentinel
             try:
                 aws.account_id()

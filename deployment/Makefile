@@ -3,7 +3,7 @@ ENV=
 PRIMARY_REGION=us-east-1
 STANDBY_REGION=us-west-2
 # enabled lets the Region Switch plan start itself (its execution role may start the plan, which a failover
-# trigger needs); disabled leaves starting it to a person.
+# trigger needs); disabled leaves starting it to a person. See "Automatic failover and fail-back" in the README.
 AUTOMATIC_FAILOVER=enabled
 ####
 
@@ -975,6 +975,23 @@ ngrh-test-stop:
 # make ngrh-test-report TEST=<name> [RUN=<id>]: collect a run's report (the test's latest run by default).
 ngrh-test-report:
 	@python3 -m ngrh_testing report $(NGRH_TESTING_ARGS) --test "$(TEST)" $(if $(RUN),--run "$(RUN)")
+
+####
+# Fail-back (design 5.10): make failback REGION=<Region> serves from a Region again after the Region Switch
+# plan moved traffic away from it. It checks the Region has been healthy for ten minutes and no plan execution
+# is going; starts the plan's activate workflow for the Region and waits; puts every service's desired count and
+# Auto Scaling minimum back to 2 in both Regions (the failover scaled the other Region up and nothing scales it
+# down); and switches the catalog database's writer back to PRIMARY_REGION (a switchover, no data loss), waiting
+# up to 45 minutes for an old primary to rejoin after a person failed the database over. Every step is safe to
+# repeat. REGION must be given on the command line: an environment variable of that name would be picked up
+# otherwise. It needs no ngrh stack. Exits 0 when done, 2 when it refused (nothing changed), 3 when it finished
+# except for what it says is left to do.
+####
+failback:
+	@if [ "$(origin REGION)" != "command line" ]; then \
+		echo "usage: make failback REGION=<Region>, for example REGION=$(PRIMARY_REGION)" >&2; exit 2; \
+	fi
+	@python3 -m ngrh_testing failback $(NGRH_TESTING_ARGS) --region "$(REGION)"
 
 # Deleting a service that still has tests is not documented to work, so the tests go first. The tool
 # refuses while a test run is active, and does nothing if the ngrh stack is already gone.

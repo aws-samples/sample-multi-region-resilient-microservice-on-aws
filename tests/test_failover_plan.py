@@ -313,6 +313,49 @@ class TestAutomaticFailoverSwitch:
         assert holders == ["RegionSwitchSelfStartPolicy"]
 
 
+# --- the README ----------------------------------------------------------------------------------
+
+README = (DEPLOYMENT.parent / "README.md").read_text()
+SECTION = README[README.index("### 3. Automatic failover and fail-back"):]
+SECTION = SECTION[:SECTION.index("\n## ")]
+
+
+class TestReadme:
+    """The README describes the plan's order, limits and runbook. What it says has to be what the template does."""
+
+    def test_the_numbered_steps_are_in_the_plans_order(self):
+        order = [SECTION.index(text) for text in ("It scales up the ECS services", "It moves DNS.", "It switches the catalog database over.")]
+        assert order == sorted(order)
+
+    def test_the_stated_limits_are_the_templates(self):
+        steps = _workflow("deactivate")["Steps"]
+        scale = steps[0]["ExecutionBlockConfiguration"]["ParallelConfig"]["Steps"][0]["ExecutionBlockConfiguration"]["EcsCapacityIncreaseConfig"]
+        dns = steps[1]["ExecutionBlockConfiguration"]["Route53HealthCheckConfig"]
+        database = steps[2]["ExecutionBlockConfiguration"]["GlobalAuroraConfig"]
+        assert f"to twice the highest count they reached in the last 24 hours ({scale['TimeoutMinutes']} minutes allowed)" in SECTION
+        assert scale["TargetPercent"] == 200
+        assert f"({dns['TimeoutMinutes']} minutes allowed)" in SECTION and f"({database['TimeoutMinutes']} minutes allowed)" in SECTION
+
+    def test_the_runbook_names_the_plans_database_step_and_the_api_actions(self):
+        names = [s["Name"] for s in _workflow("deactivate")["Steps"]]
+        used = re.findall(r"--step-name ([a-z-]+)", SECTION)
+        assert used and set(used) == {"switch-over-catalog-db"} and "switch-over-catalog-db" in names
+        for action in ("cancel-plan-execution", "--action-to-take skip", "--action-to-take switchToUngraceful"):
+            assert action in SECTION
+
+    def test_the_rationale_for_moving_traffic_first_is_there(self):
+        assert "**Why traffic moves before the catalog database.**" in SECTION
+        assert "The automation never makes that trade on its own." in SECTION
+
+    def test_the_numbers_note_under_the_diagram_gives_the_real_order(self):
+        assert "The plan runs them in the order 1, 2, 4, 3" in README
+
+    def test_the_stated_objective_and_retention_are_the_templates(self):
+        assert f"recovery time objective of {PLAN['RecoveryTimeObjectiveMinutes']} minutes" in SECTION
+        days = next(r for r in RESOURCES["ReportsBucket"]["Properties"]["LifecycleConfiguration"]["Rules"] if "ExpirationInDays" in r)["ExpirationInDays"]
+        assert f"Reports expire after {days} days" in SECTION
+
+
 # --- the Makefile -------------------------------------------------------------------------------
 
 

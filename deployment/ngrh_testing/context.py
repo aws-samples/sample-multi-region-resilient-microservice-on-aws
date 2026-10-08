@@ -122,6 +122,18 @@ def load_environment(aws: AwsCli, primary_region: str, standby_region: str, env:
     return Environment(primary_region, standby_region, env, identity["Account"], identity["Arn"].split(":")[1], outputs)
 
 
+def load_basic_environment(aws: AwsCli, primary_region: str, standby_region: str, env: str) -> Environment:
+    """The deployment without the ngrh stack, for a command that has nothing to do with Resilience Hub:
+    fail-back must work on a deployment that never ran make ngrh."""
+    identity = aws.call("sts", "get-caller-identity")
+    return Environment(primary_region, standby_region, env, identity["Account"], identity["Arn"].split(":")[1], {})
+
+
+def region_switch_plan_arn(aws: AwsCli, region: str, env: str) -> Optional[str]:
+    """The Region Switch plan's ARN, from the region-switch<ENV> stack, or None when that stack is not deployed."""
+    return (stack_outputs(aws, region, f"region-switch{env}") or {}).get("RegionSwitchPlanArn")
+
+
 # --- lookups ----------------------------------------------------------------------------------
 
 def mq_broker_host(aws: AwsCli, env: Environment, region: str) -> List[str]:

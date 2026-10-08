@@ -5,7 +5,9 @@ the services the tool uses: the same operation and response names the real CLI's
 have (checked against resiliencehubv2 2026-02-17, arc-region-switch 2022-07-26 and fis 2020-12-01),
 with just enough behaviour to test the tool's decisions: Resilience Hub tests and their sources, one test
 per service and template, a run that moves through statuses as it is polled, alarms with a state, stacks
-with outputs, ECS services and task definitions, FIS experiments and ARC plan executions.
+with outputs, ECS services and task definitions, FIS experiments, ARC plan executions (listed, and started and
+polled), the plan's Route 53 health checks, Application Auto Scaling targets and the catalog Aurora global
+cluster with its switchover.
 
 Every call is recorded in ``calls`` as (service, operation, region, params), so a test can assert what
 was written, what was not, and in which order. ``fail_on`` makes the next call to an operation raise
@@ -36,6 +38,7 @@ CLUSTER = f"apps{ENV}-EcsCluster-AbCdEfGh1234"
 WRITE_OPERATIONS = frozenset({
     "create-test", "update-test", "put-test-sources", "delete-test-sources", "delete-test",
     "start-test-run", "stop-test-run",
+    "start-plan-execution", "update-service", "register-scalable-target", "switchover-global-cluster",
 })
 
 TERMINAL = ("PASSED", "FAILED", "STOPPED", "ERROR")
@@ -56,6 +59,11 @@ def alarm_arn(name: str, region: str = PRIMARY, account: str = ACCOUNT) -> str:
 
 def task_definition_arn(service: str, region: str = PRIMARY, revision: int = 7) -> str:
     return f"arn:aws:ecs:{region}:{ACCOUNT}:task-definition/apps{ENV}-{service}:{revision}"
+
+
+def db_cluster_arn(region: str, env: str = ENV, account: str = ACCOUNT) -> str:
+    """The catalog Aurora cluster of a Region, as databases.yaml names it."""
+    return f"arn:aws:rds:{region}:{account}:cluster:catalog-dbcluster-{'01' if region == PRIMARY else '02'}-{region}{env}"
 
 
 def default_alarm_service_tag(name: str) -> str:
@@ -101,6 +109,17 @@ class FakeAws:
         self.roles = {f"ngrh-test-experiment{env}", f"ngrh-invoker{env}"}
         self.fis: Dict[str, List[Dict[str, Any]]] = {PRIMARY: [], STANDBY: []}  # Region -> experiment summaries
         self.plan_executions: Dict[str, List[Dict[str, Any]]] = {PRIMARY: [], STANDBY: []}  # Region endpoint -> executions
+        self.health_checks: Dict[str, str] = {PRIMARY: "healthy", STANDBY: "healthy"}  # ARC's Route 53 health check status by Region
+        self.execution_script: List[str] = ["inProgress", "completed"]  # the states successive polls of a started execution see
+        self.started_executions: Dict[str, Dict[str, Any]] = {}  # execution id -> what start-plan-execution was asked
+        self.scalable_targets: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (region, resource id) -> Application Auto Scaling target
+        self.global_cluster_status = "available"
+        self.global_writer: Optional[str] = PRIMARY  # the Region of the catalog global cluster's writer
+        self.global_members: Dict[str, str] = {PRIMARY: "available", STANDBY: "available"}  # Region -> its cluster's status
+        self.switchover_script: List[str] = ["switching-over", "available"]  # global cluster statuses successive polls see after a switchover
+        self._switchover: Optional[Dict[str, Any]] = None
+        self._global_polls = 0
+        self._global_changes: List[Tuple[int, Callable[[], None]]] = []
         self.ecs_services: Dict[Tuple[str, str], Dict[str, Any]] = {}  # (region, service name) -> service
         self.ecs_tasks: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, service name) -> running tasks
         self.ssm_instances: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, task ARN) -> instances tagged with it
@@ -119,6 +138,15 @@ class FakeAws:
             ("fis", "list-experiments"): self._list_experiments,
             ("fis", "get-experiment"): self._get_experiment,
             ("arc-region-switch", "list-plan-executions"): self._list_plan_executions,
+            ("arc-region-switch", "list-route53-health-checks"): self._list_route53_health_checks,
+            ("arc-region-switch", "start-plan-execution"): self._start_plan_execution,
+            ("arc-region-switch", "get-plan-execution"): self._get_plan_execution,
+            ("ecs", "update-service"): self._update_service,
+            ("application-autoscaling", "describe-scalable-targets"): self._describe_scalable_targets,
+            ("application-autoscaling", "register-scalable-target"): self._register_scalable_target,
+            ("rds", "describe-global-clusters"): self._describe_global_clusters,
+            ("rds", "describe-db-clusters"): self._describe_db_clusters,
+            ("rds", "switchover-global-cluster"): self._switchover_global_cluster,
             ("ecs", "describe-services"): self._describe_services,
             ("ecs", "list-tasks"): self._list_tasks,
             ("ecs", "describe-tasks"): self._describe_tasks,
@@ -185,7 +213,10 @@ class FakeAws:
                                       **({"pidMode": pid_mode} if pid_mode else {})}
         self.ecs_services[(region, name)] = {"serviceName": name, "status": status, "taskDefinition": arn,
                                              "capacityProviderStrategy": [{"capacityProvider": p, "weight": 1} for p in providers],
-                                             "enableExecuteCommand": exec_on}
+                                             "enableExecuteCommand": exec_on, "desiredCount": tasks}
+        resource_id = f"service/{CLUSTER}/{name}"       # ecs.yaml: minimum 2 and maximum 10 for every service
+        self.scalable_targets[(region, resource_id)] = {"ServiceNamespace": "ecs", "ResourceId": resource_id,
+                                                        "ScalableDimension": "ecs:service:DesiredCount", "MinCapacity": 2, "MaxCapacity": 10}
         for old in self.ecs_tasks.get((region, name), []):   # replacing a service replaces its tasks and what they registered
             self.ssm_instances.pop((region, old["taskArn"]), None)
         self.ecs_tasks[(region, name)] = []
@@ -210,6 +241,10 @@ class FakeAws:
             self.ssm_instances.setdefault((region, task_arn), []).append({"InstanceId": f"mi-{task_id[:17]}", "PingStatus": ping})
         return task_arn
 
+    def at_global_poll(self, polls: int, change: Callable[[], None]) -> None:
+        """Run ``change`` on the ``polls``-th describe-global-clusters call: the old primary rejoining, or becoming available."""
+        self._global_changes.append((polls, change))
+
     def fail_on(self, service: str, operation: str, message: str, times: int = 1) -> None:
         self._errors.setdefault((service, operation), []).extend([message] * times)
 
@@ -223,7 +258,7 @@ class FakeAws:
 
     # --- the AwsCli interface ---------------------------------------------------------------
 
-    def call(self, service: str, operation: str, region: Optional[str] = None, **params: Any) -> Dict[str, Any]:
+    def call(self, service: str, operation: str, region: Optional[str] = None, /, **params: Any) -> Dict[str, Any]:
         self.calls.append((service, operation, region, params))
         queued = self._errors.get((service, operation))
         if queued:
@@ -486,6 +521,81 @@ class FakeAws:
 
     def _list_dependencies(self, region: Optional[str], service_arn: str, test_run_id: str) -> Dict[str, Any]:
         return {"dependencies": list(self.dependencies)}
+
+    def _list_route53_health_checks(self, region: Optional[str], arn: str) -> Dict[str, Any]:
+        return {"healthChecks": [{"hostedZoneId": "Z0000000000000", "recordName": f"store.demo{self.env}.io", "healthCheckId": f"hc-{r}",
+                                  "status": status, "region": r} for r, status in self.health_checks.items()]}
+
+    def _start_plan_execution(self, region: Optional[str], plan_arn: str, target_region: str, action: str,
+                              mode: str = "graceful", comment: Optional[str] = None) -> Dict[str, Any]:
+        execution_id = self._id("exec")
+        self.started_executions[execution_id] = {"action": action, "target": target_region, "mode": mode, "polls": 0,
+                                                 "endpoint": region, "comment": comment}
+        other = STANDBY if target_region == PRIMARY else PRIMARY
+        return {"executionId": execution_id, "plan": plan_arn, "planVersion": "1",
+                "activateRegion": target_region if action == "activate" else other,
+                "deactivateRegion": other if action == "activate" else target_region}
+
+    def _get_plan_execution(self, region: Optional[str], plan_arn: str, execution_id: str) -> Dict[str, Any]:
+        e = self.started_executions[execution_id]
+        state = self.execution_script[min(e["polls"], len(self.execution_script) - 1)]
+        e["polls"] += 1
+        if state in ("completed", "completedMonitoringApplicationHealth") and e["action"] == "activate":
+            self.health_checks[e["target"]] = "healthy"       # what a finished activation does to DNS
+        return {"planArn": plan_arn, "executionId": execution_id, "startTime": "2026-10-08T12:00:00+00:00", "mode": e["mode"],
+                "executionState": state, "executionAction": e["action"], "executionRegion": e["target"]}
+
+    def _update_service(self, region: Optional[str], cluster: str, service: str, desired_count: int) -> Dict[str, Any]:
+        self.ecs_services[(region, service)]["desiredCount"] = int(desired_count)
+        return {"service": self.ecs_services[(region, service)]}
+
+    def _describe_scalable_targets(self, region: Optional[str], service_namespace: str, scalable_dimension: str,
+                                   resource_ids: List[str]) -> Dict[str, Any]:
+        return {"ScalableTargets": [dict(self.scalable_targets[(region, r)]) for r in resource_ids if (region, r) in self.scalable_targets]}
+
+    def _register_scalable_target(self, region: Optional[str], service_namespace: str, scalable_dimension: str,
+                                  resource_id: str, min_capacity: int, max_capacity: int) -> Dict[str, Any]:
+        self.scalable_targets[(region, resource_id)].update(MinCapacity=int(min_capacity), MaxCapacity=int(max_capacity))
+        return {"ScalableTargetARN": f"arn:aws:application-autoscaling:{region}:{ACCOUNT}:scalable-target/0123456789"}
+
+    def _global_cluster(self) -> Dict[str, Any]:
+        return {"GlobalClusterIdentifier": f"catalog-global-db-cluster{self.env}", "Status": self.global_cluster_status,
+                "GlobalClusterMembers": [{"DBClusterArn": db_cluster_arn(r, self.env), "IsWriter": r == self.global_writer}
+                                         for r in self.global_members]}
+
+    def _describe_global_clusters(self, region: Optional[str], global_cluster_identifier: str) -> Dict[str, Any]:
+        if global_cluster_identifier != f"catalog-global-db-cluster{self.env}":
+            raise self._error("rds", "describe-global-clusters", "GlobalClusterNotFoundFault", "Global cluster not found")
+        self._global_polls += 1
+        for polls, change in self._global_changes:
+            if polls == self._global_polls:
+                change()
+        if self._switchover is not None:                  # a switchover moves one step with every look at the cluster
+            step = self._switchover
+            status = self.switchover_script[min(step["polls"], len(self.switchover_script) - 1)]
+            step["polls"] += 1
+            self.global_cluster_status = status
+            if status == "available":
+                self.global_writer = step["target"]
+                self._switchover = None
+        return {"GlobalClusters": [self._global_cluster()]}
+
+    def _describe_db_clusters(self, region: Optional[str], db_cluster_identifier: str) -> Dict[str, Any]:
+        for r, status in self.global_members.items():
+            if db_cluster_arn(r, self.env) == db_cluster_identifier:
+                return {"DBClusters": [{"DBClusterArn": db_cluster_identifier, "Status": status}]}
+        raise self._error("rds", "describe-db-clusters", "DBClusterNotFoundFault", f"DBCluster {db_cluster_identifier} not found")
+
+    def _switchover_global_cluster(self, region: Optional[str], global_cluster_identifier: str,
+                                   target_db_cluster_identifier: str) -> Dict[str, Any]:
+        target = next((r for r in self.global_members if db_cluster_arn(r, self.env) == target_db_cluster_identifier), None)
+        if target is None:
+            raise self._error("rds", "switchover-global-cluster", "DBClusterNotFoundFault", "DBCluster not found")
+        if self.global_cluster_status != "available" or self.global_members[target] != "available":
+            raise self._error("rds", "switchover-global-cluster", "InvalidGlobalClusterStateFault",
+                              "The global cluster is in an invalid state and can't perform the requested operation.")
+        self._switchover = {"target": target, "polls": 0}
+        return {"GlobalCluster": self._global_cluster()}
 
     @staticmethod
     def _camel(name: str) -> str:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from .aws import AwsCli
+from .aws import AwsCli, AwsCliError
 from .context import SOURCE_OBSERVABILITY, SOURCE_SUCCESS
 
 SERVICE = "resiliencehubv2"
@@ -15,6 +15,10 @@ SERVICE = "resiliencehubv2"
 # TestRun statuses (GetTestRun): a run is active until it reaches one of the terminal ones.
 ACTIVE_STATUSES = ("INITIALIZING", "RUNNING", "STOPPING")
 TERMINAL_STATUSES = ("PASSED", "FAILED", "STOPPED", "ERROR")
+
+# ARC Region Switch execution states (ListPlanExecutions, GetPlanExecution): a plan still working, and one that is done.
+RUNNING_PLAN = ("inProgress", "pausedByFailedStep", "pausedByOperator", "pendingManualApproval", "pending")
+FINISHED_PLAN = ("completed", "completedWithExceptions", "completedMonitoringApplicationHealth")
 
 ALARM_TYPES = ["MetricAlarm", "CompositeAlarm"]  # describe-alarms lists metric alarms only unless asked
 DESCRIBE_ALARMS_LIMIT = 100  # names per call
@@ -96,3 +100,40 @@ def alarm_tags(aws: AwsCli, region: str, alarm_arn: str) -> Dict[str, str]:
     """The tags on a CloudWatch alarm."""
     tags = aws.call("cloudwatch", "list-tags-for-resource", region, resource_arn=alarm_arn).get("Tags", [])
     return {tag["Key"]: tag["Value"] for tag in tags}
+
+
+def ecs_cluster(aws: AwsCli, region: str, env_suffix: str) -> str:
+    """The apps stack's ECS cluster in a Region: its physical name, which ECS and Application Auto Scaling accept."""
+    return aws.call("cloudformation", "describe-stack-resource", region, stack_name=f"apps{env_suffix}",
+                    logical_resource_id="EcsCluster")["StackResourceDetail"]["PhysicalResourceId"]
+
+
+def plan_executions(aws: AwsCli, plan_arn: str, regions: Sequence[str]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Every execution of the plan, merged from the endpoint of each Region and oldest first, and one line for
+    each endpoint that could not be read. ARC lists an execution at both endpoints, so the merge is by id."""
+    executions: Dict[str, Dict[str, Any]] = {}
+    problems: List[str] = []
+    for region in regions:
+        try:
+            items = aws.call("arc-region-switch", "list-plan-executions", region, plan_arn=plan_arn).get("items", [])
+        except AwsCliError as e:
+            problems.append(f"could not list plan executions at the {region} endpoint: {e}")
+            continue
+        executions.update({e["executionId"]: e for e in items})
+    return sorted(executions.values(), key=lambda e: str(e["startTime"])), problems
+
+
+def route53_health_checks(aws: AwsCli, plan_arn: str, region: str) -> Dict[str, List[str]]:
+    """The statuses (healthy, unhealthy or unknown) of the Route 53 health checks the plan vends, by the Region
+    each one stands for. DNS answers with a Region only while its checks are healthy."""
+    found: Dict[str, List[str]] = {}
+    for check in aws.call("arc-region-switch", "list-route53-health-checks", region, arn=plan_arn).get("healthChecks", []):
+        found.setdefault(check["region"], []).append(check["status"])
+    return found
+
+
+def alarm_state_updates(aws: AwsCli, region: str, name: str, start: str, end: str) -> List[Dict[str, Any]]:
+    """The alarm's state changes between two ISO-8601 times, as CloudWatch's history items. describe-alarm-history
+    lists metric alarms only unless composite alarms are asked for too."""
+    return aws.call("cloudwatch", "describe-alarm-history", region, alarm_name=name, alarm_types=ALARM_TYPES,
+                    history_item_type="StateUpdate", start_date=start, end_date=end).get("AlarmHistoryItems", [])

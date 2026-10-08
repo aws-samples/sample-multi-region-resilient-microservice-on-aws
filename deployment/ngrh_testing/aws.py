@@ -46,9 +46,11 @@ class AwsCli:
         self._max_delay = max_delay_seconds
 
     @staticmethod
-    def command(service: str, operation: str, region: Optional[str] = None, **params: Any) -> List[str]:
+    def command(service: str, operation: str, region: Optional[str] = None, /, **params: Any) -> List[str]:
         """The argument list for one call. Keyword names become flags (scan_by -> --scan-by);
-        strings pass as they are, anything else as JSON, which the CLI accepts for structures."""
+        strings pass as they are, anything else as JSON, which the CLI accepts for structures.
+        The service, operation and Region are positional-only so that no option can collide with them:
+        ``ecs update-service`` has an option called --service."""
         args = ["aws", service, operation, "--output", "json", "--no-cli-pager"]
         if region:
             args += ["--region", region]
@@ -56,7 +58,7 @@ class AwsCli:
             args += ["--" + name.replace("_", "-"), value if isinstance(value, str) else json.dumps(value)]
         return args
 
-    def call(self, service: str, operation: str, region: Optional[str] = None, **params: Any) -> Dict[str, Any]:
+    def call(self, service: str, operation: str, region: Optional[str] = None, /, **params: Any) -> Dict[str, Any]:
         args = self.command(service, operation, region, **params)
         where = f" in {region}" if region else ""
         for attempt in range(1, self._attempts + 1):
