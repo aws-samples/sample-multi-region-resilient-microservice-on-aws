@@ -35,8 +35,70 @@ Parameters:
   HostedZoneId:
     Type: String
     Description: Route 53 hosted zone ID for DNS failover
+  AutomaticFailover:
+    Type: String
+    Default: enabled
+    AllowedValues:
+      - enabled
+      - disabled
+    Description: >-
+      Whether the plan may start itself. enabled lets the plan's execution role start the plan, which an alarm trigger
+      needs, because ARC starts a trigger's execution as that role. disabled removes the permission, so only an operator
+      can start an execution. The Makefile sets it from AUTOMATIC_FAILOVER. This template has no triggers yet.
+
+Conditions:
+  AutomaticFailoverEnabled: !Equals [!Ref AutomaticFailover, enabled]
 
 Resources:
+  # Where ARC writes the report of each plan execution (the step timeline and the alarm states, against the recovery
+  # time objective). Reports are small and expire after 90 days. The bucket mirrors ngrh.yaml's, and
+  # destroy-region-switch empties it first: a stack can't delete a bucket that holds reports.
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        LogFilePrefix: access-logs/
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-after-90-days
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+            ExpiredObjectDeleteMarker: true
+
+  ReportsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ReportsBucket.Arn
+              - !Sub '${ReportsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
   RegionSwitchExecutionRole:
     Type: AWS::IAM::Role
     Metadata:
@@ -127,6 +189,27 @@ Resources:
                   - "route53:GetHealthCheck"
                   - "route53:UpdateHealthCheck"
                 Resource: "arn:aws:route53:::healthcheck/*"
+              # ARC writes each execution's report with this role.
+              - Effect: Allow
+                Action: "s3:PutObject"
+                Resource: !Sub '${ReportsBucket.Arn}/executions/*'
+
+  # A trigger starts a plan execution as the execution role, so the role needs to be allowed to start the plan it
+  # belongs to. The plan needs the role first, so the permission can't sit in the role's own policy: it is a separate
+  # policy that names the plan, and only while automatic failover is enabled.
+  RegionSwitchSelfStartPolicy:
+    Type: AWS::IAM::Policy
+    Condition: AutomaticFailoverEnabled
+    Properties:
+      PolicyName: StartThisPlan
+      Roles:
+        - !Ref RegionSwitchExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: "arc-region-switch:StartPlanExecution"
+            Resource: !Ref RegionSwitchPlan
 
   RegionSwitchPlan:
     Type: AWS::ARCRegionSwitch::Plan
@@ -143,9 +226,102 @@ Resources:
       Regions:
         - !Ref PrimaryRegion
         - !Ref StandbyRegion
+      # ARC reports each execution against this objective: the time from the start of the execution until the
+      # application health alarms below are green.
+      RecoveryTimeObjectiveMinutes: 10
+      ReportConfiguration:
+        ReportOutput:
+          # The bucket and prefix ReportsBucket holds; the execution role may write under executions/.
+          - S3Configuration:
+              BucketOwner: !Ref AWS::AccountId
+              BucketPath: !Sub '${ReportsBucket}/executions'
+      AssociatedAlarms:
+        # Trigger alarms. lcl: a Region's canaries against its own load balancer. rmt: its canaries against the other
+        # Region's. region-degraded: any lcl journey of the Region is failing. The key is the alarm's base name and
+        # the role of its Region (a map key can't hold the Env or a Region parameter); the ARN holds both.
+        journey-lcl-home-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-lcl-home-${PrimaryRegion}${Env}'
+        journey-lcl-cart-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-lcl-cart-${PrimaryRegion}${Env}'
+        journey-lcl-catalog-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-lcl-catalog-${PrimaryRegion}${Env}'
+        journey-lcl-orders-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-lcl-orders-${PrimaryRegion}${Env}'
+        journey-rmt-home-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-rmt-home-${PrimaryRegion}${Env}'
+        journey-rmt-cart-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-rmt-cart-${PrimaryRegion}${Env}'
+        journey-rmt-catalog-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-rmt-catalog-${PrimaryRegion}${Env}'
+        journey-rmt-orders-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-rmt-orders-${PrimaryRegion}${Env}'
+        region-degraded-primary:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:region-degraded-${PrimaryRegion}${Env}'
+        journey-lcl-home-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-lcl-home-${StandbyRegion}${Env}'
+        journey-lcl-cart-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-lcl-cart-${StandbyRegion}${Env}'
+        journey-lcl-catalog-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-lcl-catalog-${StandbyRegion}${Env}'
+        journey-lcl-orders-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-lcl-orders-${StandbyRegion}${Env}'
+        journey-rmt-home-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-rmt-home-${StandbyRegion}${Env}'
+        journey-rmt-cart-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-rmt-cart-${StandbyRegion}${Env}'
+        journey-rmt-catalog-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-rmt-catalog-${StandbyRegion}${Env}'
+        journey-rmt-orders-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-rmt-orders-${StandbyRegion}${Env}'
+        region-degraded-standby:
+          AlarmType: trigger
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:region-degraded-${StandbyRegion}${Env}'
+        # Application health alarms: the global canaries. They reach the application by its Route 53 name, so they
+        # go green only once traffic has moved. ARC reads them after an execution to measure the recovery time.
+        journey-global-home-primary:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-global-home-${PrimaryRegion}${Env}'
+        journey-global-cart-primary:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-global-cart-${PrimaryRegion}${Env}'
+        journey-global-catalog-primary:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-global-catalog-${PrimaryRegion}${Env}'
+        journey-global-orders-primary:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${PrimaryRegion}:${AWS::AccountId}:alarm:journey-global-orders-${PrimaryRegion}${Env}'
+        journey-global-home-standby:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-global-home-${StandbyRegion}${Env}'
+        journey-global-cart-standby:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-global-cart-${StandbyRegion}${Env}'
+        journey-global-catalog-standby:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-global-catalog-${StandbyRegion}${Env}'
+        journey-global-orders-standby:
+          AlarmType: applicationHealth
+          ResourceIdentifier: !Sub 'arn:${AWS::Partition}:cloudwatch:${StandbyRegion}:${AWS::AccountId}:alarm:journey-global-orders-${StandbyRegion}${Env}'
       Workflows:
         - WorkflowTargetAction: deactivate
-          WorkflowDescription: "Scale up remaining region, failover catalog database, shift DNS away"
+          WorkflowDescription: "Scale up the remaining region, shift DNS away, then switch the catalog database over"
           Steps:
             - Name: scale-up-ecs-services
               ExecutionBlockType: Parallel
@@ -260,18 +436,6 @@ Resources:
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
                           TimeoutMinutes: 15
-            - Name: failover-catalog-db
-              ExecutionBlockType: AuroraGlobalDatabase
-              ExecutionBlockConfiguration:
-                GlobalAuroraConfig:
-                  GlobalClusterIdentifier: !Sub 'catalog-global-db-cluster${Env}'
-                  DatabaseClusterArns:
-                    - !Ref PrimaryCatalogDbArn
-                    - !Ref StandbyCatalogDbArn
-                  Behavior: switchoverOnly
-                  Ungraceful:
-                    Ungraceful: failover
-                  TimeoutMinutes: 20
             - Name: shift-dns-traffic-away
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:
@@ -284,6 +448,22 @@ Resources:
                     - RecordSetIdentifier: StandbyRegion
                       Region: !Ref StandbyRegion
                   TimeoutMinutes: 5
+            # Last, after traffic has moved. The switchover loses no data. If it can't finish, for example because the
+            # primary database is down, the run pauses with traffic already moved, and a person decides whether to
+            # retry it, skip it, or switch the run to ungraceful, which fails the database over and can lose data.
+            # Ungraceful applies only if a person makes that choice: Behavior stays switchoverOnly.
+            - Name: switch-over-catalog-db
+              ExecutionBlockType: AuroraGlobalDatabase
+              ExecutionBlockConfiguration:
+                GlobalAuroraConfig:
+                  GlobalClusterIdentifier: !Sub 'catalog-global-db-cluster${Env}'
+                  DatabaseClusterArns:
+                    - !Ref PrimaryCatalogDbArn
+                    - !Ref StandbyCatalogDbArn
+                  Behavior: switchoverOnly
+                  Ungraceful:
+                    Ungraceful: failover
+                  TimeoutMinutes: 10
         - WorkflowTargetAction: activate
           WorkflowDescription: "Re-enable region in DNS"
           Steps:
@@ -307,3 +487,6 @@ Outputs:
   RegionSwitchExecutionRoleArn:
     Description: ARN of the Region Switch Execution Role
     Value: !GetAtt RegionSwitchExecutionRole.Arn
+  ReportsBucketName:
+    Description: Bucket that holds the plan's execution reports under executions/ (destroy-region-switch empties it)
+    Value: !Ref ReportsBucket

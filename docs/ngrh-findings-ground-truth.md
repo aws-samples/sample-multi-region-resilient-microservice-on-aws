@@ -24,7 +24,7 @@
 
 - **Deployment**: Active/Active, us-east-1 (primary) + us-west-2 (standby)
 - **Compute**: ECS Fargate (FARGATE_SPOT only — design choice for cost, not production recommendation)
-- **ARC Region Switch**: Automated triggers via composite alarm (opt-in via `ENABLE_TRIGGERS=true`)
+- **ARC Region Switch**: the plan scales up the remaining Region, moves DNS, then switches the catalog database over (no data loss). An operator starts it: alarm triggers are not defined, and `AUTOMATIC_FAILOVER` (default `enabled`) only decides whether the plan's role may start the plan, which triggers will need
 - **Pre-scaling**: 200% of containerInsightsMaxInLast24Hours before failover proceeds
 - **Data**: Aurora Global DB (catalog), DynamoDB Global Table (cart), Aurora DSQL (orders), ElastiCache Redis (checkout, ephemeral), RabbitMQ (orders, SINGLE_INSTANCE)
 

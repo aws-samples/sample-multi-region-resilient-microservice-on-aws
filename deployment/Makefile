@@ -2,6 +2,9 @@
 ENV=
 PRIMARY_REGION=us-east-1
 STANDBY_REGION=us-west-2
+# enabled lets the Region Switch plan start itself (its execution role may start the plan, which a failover
+# trigger needs); disabled leaves starting it to a person.
+AUTOMATIC_FAILOVER=enabled
 ####
 
 ####
@@ -26,7 +29,7 @@ endif
 
 deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_infrastructure standby_ecs global_routing \
 	canaries_primary canaries_standby restore-reconciliation monitoring \
-	region-switch secrets-rotation chaos-engineering ngrh
+	region-switch arc-dns-status secrets-rotation chaos-engineering ngrh
 
 deploy-primary: test-creds create-peer primary_infrastructure primary_ecs
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
@@ -232,7 +235,10 @@ global_routing: standby_ecs primary_ecs
 	VpcIdPrimary=$(_GR_VPC_P) VpcIdStandby=$(_GR_VPC_S) \
 	--tags service=shared
 
-region-switch-plan: global_routing
+# The plan names the journey alarms monitoring.yml defines (as associated alarms), so both Regions' monitoring
+# stacks come first. monitoring used to wait for arc-dns-status, which waits for the plan: nothing in monitoring.yml
+# needs it (the dashboard only charts the metrics the Lambda publishes), and the plan now needs monitoring.
+region-switch-plan: global_routing monitoring
 	@echo "Deploy the ARC Region Switch Plan"
 	$(eval PRIMARY_CLUSTER_ARN:=$(shell aws secretsmanager get-secret-value \
 		--secret-id mr-app/ecs-cluster-arn-$(PRIMARY_REGION)$(ENV) \
@@ -254,7 +260,7 @@ region-switch-plan: global_routing
 	--parameter-overrides Env=${ENV} DomainName=demo${ENV}.io \
 	PrimaryClusterArn=$(PRIMARY_CLUSTER_ARN) StandbyClusterArn=$(STANDBY_CLUSTER_ARN) \
 	PrimaryCatalogDbArn=$(_PRIMARY_CATALOG_DB) StandbyCatalogDbArn=$(_STANDBY_CATALOG_DB) \
-	HostedZoneId=$(_HOSTED_ZONE_ID) \
+	HostedZoneId=$(_HOSTED_ZONE_ID) AutomaticFailover=$(AUTOMATIC_FAILOVER) \
 	--tags service=shared
 
 region-switch: region-switch-plan
@@ -476,7 +482,7 @@ restore-reconciliation: primary_infrastructure standby_infrastructure standby_re
 	@aws cloudformation package --template-file ./database/crdr-reconciliation/src/restore-reconcile-catalog-ssm.yaml --region ${STANDBY_REGION} --s3-bucket $(result) --output-template-file ./database/crdr-reconciliation/src/out.yaml
 	@aws cloudformation deploy --template-file ./database/crdr-reconciliation/src/out.yaml --stack-name reconciliation-catalog-ssm${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} KmsKey=retail-store-ar${ENV} VpcId=$(_RECON_VPC)
 
-monitoring: restore-reconciliation arc-dns-status
+monitoring: restore-reconciliation
 	@echo "Deploy the Monitoring Dashboard"
 	$(eval _PRIMARY_CLUSTER:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id EcsCluster --region $(PRIMARY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
 	$(eval _STANDBY_CLUSTER:=$(shell aws cloudformation describe-stack-resource --stack-name apps$(ENV) --logical-resource-id EcsCluster --region $(STANDBY_REGION) --query 'StackResourceDetail.PhysicalResourceId' --output text))
@@ -782,6 +788,11 @@ destroy-canaries-primary:
 	@aws cloudformation wait stack-delete-complete --stack-name canaries${ENV} --region ${PRIMARY_REGION}
 
 destroy-region-switch:
+	@echo "Emptying the Region Switch reports bucket before the stack delete..."
+	$(eval REPORTS_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name region-switch$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='ReportsBucketName'].OutputValue" --output text 2>/dev/null))
+	@if [ -n "$(REPORTS_BUCKET)" ] && [ "$(REPORTS_BUCKET)" != "None" ]; then \
+		./cleanup.sh $(REPORTS_BUCKET); \
+	fi
 	@echo "Deleting region switch plan..."
 	@aws cloudformation delete-stack --stack-name region-switch${ENV} --region ${PRIMARY_REGION}
 	@aws cloudformation wait stack-delete-complete --stack-name region-switch${ENV} --region ${PRIMARY_REGION}
