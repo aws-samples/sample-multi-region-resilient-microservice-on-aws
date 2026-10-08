@@ -158,8 +158,12 @@ at 17:02Z, and Resilience Hub accepted its parameters as written (the plan ARN, 
 the impaired and recovery Regions, the log group, no stop condition) and its five alarm sources. A second reconcile
 found nothing to change, the static preflight passes, and the live preflight refuses the test only at check 8,
 because test2's plan has no triggers yet; its capacity part ran on the real numbers (the most tasks any service ran
-in us-east-1 in 24 hours was 4, so the scale-up asks for at most 8 of 10). No run exists, and the plan's triggers
-and the order of its steps have only been tested against a fake of the AWS calls. The first live run is the check.
+in us-east-1 in 24 hours was 4, so the scale-up asks for at most 8 of 10). Test2's plan was then updated to this branch's
+step order, without triggers (2026-10-08 18:23Z, plan version 2 to 3, same ARN): ARC accepted the workflow, the
+10-minute objective, the 26 associated alarms and the reports bucket, and its own evaluation passed at both endpoints
+with no warnings. No execution has run that workflow yet, the triggers have not been deployed to test2, and no run of
+this test exists, so the triggers and the plan's behaviour under load have only been tested against a fake of the AWS
+calls. The first live run is the check.
 
 ## Runs
 
