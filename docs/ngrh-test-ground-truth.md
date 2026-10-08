@@ -136,9 +136,20 @@ the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be hea
 - Whether `completedMonitoringApplicationHealth` or `completed` is the state a trigger-started execution ends in;
   both count.
 - What comment, if any, ARC records on an execution its triggers started. Nothing reads it; the report prints it.
+- Whether `StartTestRun` accepts the five source alarms. The API says only alarms found during a service assessment
+  can be test sources, and catalog's latest assessment (2026-09-08) is older than all five alarms (created
+  2026-10-06). For orders an assessment was neither needed nor enough to explain a refusal (a mis-tagged alarm was
+  the cause), so a stale assessment alone is untested. If the run is refused with "alarms not discovered" and the
+  preflight shows the tags are right, run an assessment of catalog (about 15 minutes, nothing is injected) and try
+  again.
 
-**Confidence:** none yet. No run exists, and the plan's triggers, the order of its steps and the preflight have
-only been tested against a fake of the AWS calls. The first live run is the check.
+**Confidence:** some for the setup, none for the result. `make ngrh-tests` created the test in test2 on 2026-10-08
+at 17:02Z, and Resilience Hub accepted its parameters as written (the plan ARN, both database endpoints, 20 minutes,
+the impaired and recovery Regions, the log group, no stop condition) and its five alarm sources. A second reconcile
+found nothing to change, the static preflight passes, and the live preflight refuses the test only at check 8,
+because test2's plan has no triggers yet; its capacity part ran on the real numbers (the most tasks any service ran
+in us-east-1 in 24 hours was 4, so the scale-up asks for at most 8 of 10). No run exists, and the plan's triggers
+and the order of its steps have only been tested against a fake of the AWS calls. The first live run is the check.
 
 ## Runs
 
