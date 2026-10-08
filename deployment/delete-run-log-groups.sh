@@ -99,10 +99,16 @@ LISTED=""
 # Puts the names of the log groups the service matches, one per line, in LISTED. A listing
 # that fails is a leak the caller must see, and the ones after it would fail the same way,
 # so the caller stops listing and deletes what it already has.
+#
+# The filter goes in as one word, --flag=value. The suffix starts with a dash (-a1802e5), and
+# the AWS CLI reads a separate value that starts with a dash as the next option, unless it
+# looks like a negative number: "argument --log-group-name-pattern: expected one argument",
+# exit 252. Run 37679210579 listed nothing in either Region for that reason, and its log
+# groups stayed.
 list_groups() {
     local label=$1 flag=$2 value=$3 raw
     LISTED=""
-    if ! raw=$(aws logs describe-log-groups --region "$REGION" "$flag" "$value" \
+    if ! raw=$(aws logs describe-log-groups --region "$REGION" "${flag}=${value}" \
             --query 'logGroups[].logGroupName' --output text); then
         echo "$REGION: could not list the log groups of $label (see the error above); they may be leaking"
         return 1

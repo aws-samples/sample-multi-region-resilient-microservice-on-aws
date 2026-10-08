@@ -131,8 +131,27 @@ state = json.load(open(state_path))
 def save():
     json.dump(state, open(state_path, "w"))
 
+NEGATIVE_NUMBER = re.compile(r"^-\d+$|^-\d*\.\d+$")
+
 def opt(name):
-    return argv[argv.index(name) + 1] if name in argv else None
+    """The value of an option, read the way the real CLI reads it: `--name=value`, or `--name value`.
+
+    The real CLI (argparse) takes a separate value that starts with "-" for the next option, unless it
+    looks like a negative number, so `--log-group-name-pattern -a1802e5` fails with exit 252 and
+    "expected one argument" while `--log-group-name-pattern=-a1802e5` works. A stub that returned
+    argv[index + 1] whatever it held passed the first form for as long as the helper used it, and the
+    e2e run that finally met the real CLI left its log groups behind.
+    """
+    for i, arg in enumerate(argv):
+        if arg.startswith(name + "="):
+            return arg[len(name) + 1:]
+        if arg == name:
+            value = argv[i + 1] if i + 1 < len(argv) else None
+            if value is None or (value.startswith("-") and not NEGATIVE_NUMBER.match(value)):
+                sys.stderr.write("\naws: [ERROR]: An error occurred (ParamValidation): argument %s: expected one argument\n" % name)
+                sys.exit(252)
+            return value
+    return None
 
 def fail(msg, code=254):
     sys.stderr.write("\nAn error occurred " + msg + "\n")
@@ -1020,8 +1039,65 @@ def _log_ops(log: Path):
     return [c[1] for c in _calls(log) if c[0] == "logs"]
 
 
+def _describe_calls(log: Path):
+    return [c for c in _calls(log) if c[:2] == ["logs", "describe-log-groups"]]
+
+
+def _option(call, name):
+    """The value a recorded call gives an option, as `--name=value` or `--name value`; None if it has none."""
+    for i, arg in enumerate(call):
+        if arg.startswith(name + "="):
+            return arg[len(name) + 1:]
+        if arg == name:
+            return call[i + 1]
+    return None
+
+
+CLI_NEGATIVE_NUMBER = re.compile(r"^-\d+$|^-\d*\.\d+$")     # the one kind of dash value argparse takes as a value
+
+
+def _dash_values_given_separately(call):
+    """The `--option value` pairs of a recorded call whose value starts with a dash. The real CLI reads such a
+    value as the next option (unless it is a negative number), so these calls fail with exit 252."""
+    return [(before, word) for before, word in zip(call, call[1:])
+            if before.startswith("--") and "=" not in before
+            and word.startswith("-") and not word.startswith("--") and not CLI_NEGATIVE_NUMBER.match(word)]
+
+
 def _groups_left(state: Path):
     return json.loads(state.read_text())["log_groups"]
+
+
+class TestStubAwsReadsOptionsLikeTheRealCli:
+    """The log group tests are worth only as much as the stub is faithful, and the stub once took what the
+    CLI refuses. Each case here was run against aws-cli 2.36.47 and gave the result asserted (exit 252 and
+    "expected one argument" for a parse failure; for the others the call got as far as the endpoint)."""
+
+    def _aws(self, env, *args):
+        return subprocess.run(["aws", "logs", "describe-log-groups", "--region", PRIMARY, *args],
+                              env=env, capture_output=True, text=True, timeout=30)
+
+    @pytest.mark.parametrize("value", ["-a1802e5", "-3c7091f", "-12e4567"])
+    def test_a_separate_value_that_starts_with_a_dash_is_refused(self, stub_env, value):
+        env, state, log = stub_env
+        state.write_text(_log_group_state([]))
+        r = self._aws(env, "--log-group-name-pattern", value)
+        assert r.returncode == 252
+        assert "argument --log-group-name-pattern: expected one argument" in r.stderr
+
+    def test_an_option_with_no_value_after_it_is_refused(self, stub_env):
+        env, state, log = stub_env
+        state.write_text(_log_group_state([]))
+        r = self._aws(env, "--log-group-name-pattern")
+        assert r.returncode == 252 and "expected one argument" in r.stderr
+
+    @pytest.mark.parametrize("words", [["--log-group-name-pattern=-a1802e5"],
+                                       ["--log-group-name-pattern", "-1234567"]])
+    def test_the_equals_form_and_a_negative_number_get_through(self, stub_env, words):
+        env, state, log = stub_env
+        state.write_text(_log_group_state([]))
+        r = self._aws(env, *words)
+        assert r.returncode == 0, r.stderr
 
 
 class TestDeleteRunLogGroups:
@@ -1043,22 +1119,54 @@ class TestDeleteRunLogGroups:
         env, state, log = stub_env
         state.write_text(_log_group_state(RUN_LOG_GROUPS))
         _run_delete_log_groups(env)
-        describes = [c for c in _calls(log) if c[:2] == ["logs", "describe-log-groups"]]
-        patterns = [c for c in describes if "--log-group-name-pattern" in c]
-        prefixes = [c[c.index("--log-group-name-prefix") + 1] for c in describes if "--log-group-name-prefix" in c]
+        describes = _describe_calls(log)
+        patterns = [c for c in describes if _option(c, "--log-group-name-pattern") is not None]
+        prefixes = [_option(c, "--log-group-name-prefix") for c in describes
+                    if _option(c, "--log-group-name-prefix") is not None]
         # One substring listing for the suffix, then one prefix listing per canary; the service
         # rejects a request that carries both filters, so no call does.
-        assert len(patterns) == 1 and patterns[0][patterns[0].index("--log-group-name-pattern") + 1] == ENV_SUFFIX
+        assert len(patterns) == 1 and _option(patterns[0], "--log-group-name-pattern") == ENV_SUFFIX
         assert len(describes) == len(patterns) + len(prefixes)
-        assert "--log-group-name-prefix" not in patterns[0]
+        assert _option(patterns[0], "--log-group-name-prefix") is None
         assert all(p.startswith("/aws/lambda/cwsyn-") and len(p) > len("/aws/lambda/cwsyn-") for p in prefixes)
+
+    def test_a_value_that_starts_with_a_dash_is_sent_joined_to_its_option(self, stub_env):
+        # The suffix is "-<sha>". The real CLI reads `--log-group-name-pattern -a1802e5` as an option
+        # followed by another option and refuses it ("expected one argument", exit 252). Run 37679210579
+        # met that: the listing failed in both Regions, the step only warned, and the run's log groups
+        # stayed. No test caught it because the stub took the separate form, so the form is pinned on
+        # the wire as well: no logs call gives a value that starts with a dash as a separate word.
+        env, state, log = stub_env
+        state.write_text(_log_group_state(RUN_LOG_GROUPS))
+        _run_delete_log_groups(env)
+        calls = [c for c in _calls(log) if c[0] == "logs"]
+        assert calls
+        for call in calls:
+            assert _dash_values_given_separately(call) == [], " ".join(call)
+        assert "--log-group-name-pattern=" + ENV_SUFFIX in [word for c in _describe_calls(log) for word in c]
+
+    @pytest.mark.parametrize("suffix", ["-a1802e5", "-3c7091f", "-398824f", "-1234567",
+                                        "-0123456789abcdef0123456789abcdef01234567"])
+    def test_every_sha_shaped_suffix_is_listed_and_deleted(self, stub_env, suffix):
+        # Letter first, digit first, digits only (the CLI takes that for a negative number, so it
+        # passed in either form) and the 40-character form.
+        env, state, log = stub_env
+        groups = ["/aws/codebuild/mr-app-docker-build" + suffix,
+                  "/aws/service-events/carts" + suffix,
+                  "/aws/rds/cluster/catalog-dbcluster-01-us-east-1" + suffix + "/error"]
+        groups += [_canary_group(name, suffix, n=i + 1) for i, name in enumerate(_canary_names())]
+        state.write_text(_log_group_state(groups + OTHER_LOG_GROUPS))
+        r = _run_delete_log_groups(env, suffix=suffix)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "deleted %d of %d log groups of %s" % (len(groups), len(groups), suffix) in r.stdout
+        assert _groups_left(state)[PRIMARY] == OTHER_LOG_GROUPS
 
     def test_each_canary_is_listed_under_the_exact_name_synthetics_gives_its_function(self, stub_env):
         env, state, log = stub_env
         state.write_text(_log_group_state(RUN_LOG_GROUPS))
         _run_delete_log_groups(env)
-        prefixes = sorted(c[c.index("--log-group-name-prefix") + 1] for c in _calls(log)
-                          if c[:2] == ["logs", "describe-log-groups"] and "--log-group-name-prefix" in c)
+        prefixes = sorted(_option(c, "--log-group-name-prefix") for c in _describe_calls(log)
+                          if _option(c, "--log-group-name-prefix") is not None)
         assert prefixes == sorted("/aws/lambda/cwsyn-%s-" % (name + ENV_SUFFIX)[:CANARY_NAME_KEPT]
                                   for name in _canary_names())
         assert any(ENV_SUFFIX not in p for p in prefixes), "no canary name is cut; the premise of this rule is gone"
@@ -1186,8 +1294,8 @@ class TestDeleteRunLogGroups:
         assert "ThrottlingException" in r.stderr                       # the cause is in the log
         assert "could not list the log groups of canary lcl-rgnl-orders" in r.stdout and "may be leaking" in r.stdout
         assert "deleted 7 of 7 log groups" in r.stdout                  # the suffix listing had already found these
-        prefixes = [c[c.index("--log-group-name-prefix") + 1] for c in _calls(log)
-                    if c[:2] == ["logs", "describe-log-groups"] and "--log-group-name-prefix" in c]
+        prefixes = [_option(c, "--log-group-name-prefix") for c in _describe_calls(log)
+                    if _option(c, "--log-group-name-prefix") is not None]
         assert prefixes[-1].startswith("/aws/lambda/cwsyn-lcl-rgnl-orders")     # nothing was listed after it
         assert _groups_left(state)[PRIMARY] == _broker_groups(BROKER_RUN)
 
