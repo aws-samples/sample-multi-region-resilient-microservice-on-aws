@@ -337,8 +337,8 @@ execution is a finding, because the cut alone should start none.
   replica in each Region as an `AWS::DynamoDB::Table`. Resilience Hub's service model accepts a CloudFormation stack ARN
   as an input source (`cfnStackArn`, next to `resourceTags` in the same union), which would put the stack itself in the
   service. That discovery then lists an `AWS::DynamoDB::GlobalTable`, and that the pause then takes it as its target,
-  are both untested. The cost of trying is one change to the cart service, a new assessment of about 15 minutes, and a
-  second run of about 36 minutes; the DynamoDB pause is the part that can make the expected result `FAIL`.
+  are both untested: finding out takes a change to the cart service, a new assessment and a second run. The DynamoDB
+  pause is the part that can make the expected result `FAIL`.
 - If the table cannot be reached that way, the test is the route cut alone. What the first run showed is then the
   expected result: the Region keeps serving, the eight cross-Region views go red, no trigger is met and no failover
   starts, so the expected result becomes `PASS` and the paragraphs above about the table move to a note on what the
