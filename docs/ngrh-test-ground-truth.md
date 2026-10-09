@@ -280,7 +280,18 @@ execution is a finding, because the cut alone should start none.
 **Not known before the first run:**
 
 - Which resources the fault reaches. The carts table is tagged `service=cart` and `ChaosAllowed=true` in both Regions
-  (read 2026-10-09), but the routes, peering, endpoints and buckets depend on the discovery of the cart service.
+  (read 2026-10-09). The cart service's discovery (24 resources, read after the assessment) lists three kinds of
+  resource the template's actions act on: six subnets (three per Region), one S3 bucket, and the carts table as two
+  `AWS::DynamoDB::Table` entries, one per Region. The bucket is the failover plan's reports bucket (it takes the plan
+  stack's `service=shared` tag, so every service discovers it, and it has no replication rule). Discovery lists no
+  `AWS::DynamoDB::GlobalTable`, no Transit Gateway and no VPC endpoint. Resilience Hub's page for this test says an
+  action with no resource of its target type is skipped, so the DynamoDB pause, which the expected result rests on,
+  would be skipped if it matched on the listed type alone. The orders run suggests it does not: orders is listed with
+  ECS services and task definitions and no `AWS::ECS::Task`, and the task action still ran against its tasks. The
+  report's "What the fault reached" decides. If the DynamoDB pause did not run, expect `PASSED`: the route cut alone is
+  not expected to stop a Region that serves from local endpoints. What FIS does with the reports bucket is also
+  unknown: FIS's own cross-Region scenario targets only buckets that replicate to the destination, and skips the action
+  when none does.
 - Whether an omitted `dependencies` list stays empty. If Resilience Hub fills it from discovery, the ECS action would
   drop traffic from cart's tasks to those names (mostly unrelated), and the report lists them under "Dependencies
   blocked". The fix would be to name the list, empty or chosen, in the spec.
