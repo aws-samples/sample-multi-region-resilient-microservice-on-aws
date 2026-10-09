@@ -289,9 +289,12 @@ execution is a finding, because the cut alone should start none.
   refuse the rest. The report lists every execution that started, and `make ngrh-test` fails each deactivated Region
   back once.
 - Which endpoint a trigger-started deactivate runs at, and what its comment says (only activates have been seen).
-- Whether Resilience Hub accepts the five source alarms. The API takes only alarms found in a failure-mode assessment
-  of the service as test sources, and the alarms were created on 2026-10-06; run an assessment of the cart service
-  before the first run, as was needed for orders and catalog.
+- Whether Resilience Hub accepts the five source alarms when a run starts. The API takes only alarms found in a
+  failure-mode assessment of the service as test sources, and the alarms were created on 2026-10-06. The cart service
+  was assessed again on 2026-10-09 (13:35 to 13:50Z), and CloudTrail shows the discovery session asking CloudWatch about
+  all five during it (`hop-carts-errors` and the four `journey-lcl-*` alarms of us-east-1). Orders' first run was
+  refused until its service had been assessed after its alarms existed, and once more for one alarm tagged outside its
+  scope, which the preflight now checks. Only a run shows that the assessment was enough here.
 - Control-plane calls on the table, such as `UpdateTable`, are blocked in every Region while the pause lasts (the
   blog), and FIS allows at most 5,040 minutes of this action per MRSC table in a rolling seven days. Do not deploy the
   table during a run; the limit allows over a hundred 30-minute runs a week.
@@ -302,8 +305,16 @@ eventually consistent read when a strongly consistent one fails (the blog sugges
 the price of strong consistency, so the cart and orders journeys would still fail locally.
 
 **Confidence:** inferred from AWS's documentation and the repository's code, with the table's mode and the Region's
-health read from test2; no run exists, and `make ngrh-tests` has not created this test yet. That ui calls carts on every
-page is what makes all four journeys fail rather than only the two that add to a cart.
+health read from test2; no run exists. `make ngrh-tests` created the test in test2 on 2026-10-09 at 13:35Z, and
+Resilience Hub accepted its parameters as written (both Regions, 30 minutes, the log group, the stop condition) and its
+five alarm sources. It echoes no `dependencies` list, which says that none was stored, not what a run does with none. A
+second reconcile found nothing to change, the static preflight passes, and the live preflight refuses the test only at
+check 8, because test2's plan has no triggers yet. The experiment role in test2 already has every permission the FIS
+documentation lists for this action, including `dynamodb:InjectError` for multi-Region strong consistency tables. That
+statement is conditioned on `dynamodb:FisActionId`, a key the DynamoDB service reference does define for `InjectError`;
+that the request carries it with this action's name is assumed by analogy with the EC2 example in the FIS
+documentation, and a run is what tests it. That ui calls carts on every page is what makes all four journeys fail
+rather than only the two that add to a cart.
 
 ## Runs
 
