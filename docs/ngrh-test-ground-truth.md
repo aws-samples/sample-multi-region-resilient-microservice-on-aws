@@ -196,7 +196,10 @@ finish. The first live run is the check.
 cross-Region routes of the subnets it reaches, the Transit Gateway peering and the cross-Region VPC endpoints, and
 pauses replication of the S3 buckets, the DynamoDB global table (carts) and any MemoryDB multi-Region cluster it
 reaches. The test gives no `dependencies`, so the template's three actions that drop traffic to a DNS name (SSM, ECS
-tasks, EKS pods) have nothing to drop. What the fault reaches is decided by Resilience Hub's discovery of the cart
+tasks, EKS pods) should have nothing to drop: the documentation says an API caller supplies the list explicitly, but the
+template's own parameter text says it is "auto-populated from dependency discovery if enabled" (each service shows 67
+discovered dependencies, mostly unrelated traffic), and no run has shown what an omitted list does. The report's
+"Dependencies blocked" section settles it. What the fault reaches is decided by Resilience Hub's discovery of the cart
 service (resources tagged `service` `cart` or `shared`), and the report lists it under "What the fault reached". The
 success alarms are the four local journeys of us-east-1 (`journey-lcl-*`): they go through the Region's own load
 balancer and never leave it, so a Region that can serve alone keeps them `OK` for the whole run. The observability
@@ -278,6 +281,9 @@ execution is a finding, because the cut alone should start none.
 
 - Which resources the fault reaches. The carts table is tagged `service=cart` and `ChaosAllowed=true` in both Regions
   (read 2026-10-09), but the routes, peering, endpoints and buckets depend on the discovery of the cart service.
+- Whether an omitted `dependencies` list stays empty. If Resilience Hub fills it from discovery, the ECS action would
+  drop traffic from cart's tasks to those names (mostly unrelated), and the report lists them under "Dependencies
+  blocked". The fix would be to name the list, empty or chosen, in the spec.
 - How long after the action begins the errors start (FIS says up to five minutes) and how long after the stop they go on.
 - What ARC does with four triggers that are met in the same minutes: start one execution, start four, or start one and
   refuse the rest. The report lists every execution that started, and `make ngrh-test` fails each deactivated Region
