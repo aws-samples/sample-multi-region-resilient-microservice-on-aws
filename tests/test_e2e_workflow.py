@@ -27,10 +27,12 @@ SPEC = REPO / "deployment" / "ngrh-tests.json"
 MAKEFILE = REPO / "deployment" / "Makefile"
 
 sys.path.insert(0, str(REPO / "deployment"))
-from ngrh_testing import report  # noqa: E402
+from ngrh_testing import report, spec  # noqa: E402
 
 JOB_VARIABLES = ("ENV", "AWS_REGION", "STANDBY_REGION", "NGRH_TEST", "AUTOMATIC_FAILOVER")
 RECOVERY_TEMPLATE = "aws-multi-region-recovery:rtmr002"
+ISOLATION_TEMPLATE = "aws-multi-region-isolation:rtmr001"
+PROJENRC = REPO / ".projenrc.ts"
 REAL_MAKE = shutil.which("make")
 
 DEPLOY = "Deploy (full multi-region)"
@@ -177,23 +179,31 @@ def automatic_failover_given(chosen):
 
 
 class TestAutomaticFailoverInCi:
-    """Step 11 (design 5.12). With the plan's triggers armed, a journey that fails in one Region while the other is healthy,
-    as it can while a deployment is still coming up, would fail the deployment over before the smoke test. So only the run
-    somebody started by hand to test recovery arms them."""
+    """Step 11 (design 5.12), extended by step 12. With the plan's triggers armed, a journey that fails in one Region while
+    the other is healthy, as it can while a deployment is still coming up, would fail the deployment over before the smoke
+    test. So only the run somebody started by hand to test recovery or isolation arms them: both can end with the plan
+    failing a Region over, and the isolation test's "no failover started" means something only if one could have started."""
 
     def _tests(self):
         return json.loads(SPEC.read_text())["tests"]
 
-    def test_the_spec_has_a_recovery_test_so_the_cases_below_mean_something(self):
+    def test_the_spec_has_a_recovery_test_and_an_isolation_test_so_the_cases_below_mean_something(self):
         assert [t["name"] for t in self._tests() if t["template"] == RECOVERY_TEMPLATE]
+        assert [t["name"] for t in self._tests() if t["template"] == ISOLATION_TEMPLATE]
+
+    def test_the_templates_that_arm_the_triggers_are_the_ones_the_tool_expects_to_fail_over(self):
+        # .projenrc.ts decides which manual runs deploy with the triggers; ngrh_testing/spec.py decides which tests get
+        # preflight check 8 (the triggers exist, the last execution is old enough). They must name the same templates.
+        listed = re.search(r"const FAILOVER_TEMPLATES: string\[\] = \[([^\]]*)\]", PROJENRC.read_text()).group(1)
+        assert set(re.findall(r"'([^']+)'", listed)) == set(spec.FAILOVER_TEMPLATES) == {RECOVERY_TEMPLATE, ISOLATION_TEMPLATE}
 
     @pytest.mark.parametrize("chosen", [None, "none"])
     def test_a_run_nobody_started_and_the_default_choice_deploy_with_it_off(self, chosen):
         assert automatic_failover_given(chosen) == "disabled"
 
-    def test_only_the_manual_run_of_a_recovery_test_deploys_with_it_on(self):
+    def test_only_the_manual_run_of_a_test_that_can_fail_a_region_over_deploys_with_it_on(self):
         for t in self._tests():
-            expected = "enabled" if t["template"] == RECOVERY_TEMPLATE else "disabled"
+            expected = "enabled" if t["template"] in spec.FAILOVER_TEMPLATES else "disabled"
             assert automatic_failover_given(t["name"]) == expected, t["name"]
 
     def test_it_is_in_the_job_environment_so_every_step_sees_one_value(self):
@@ -263,6 +273,12 @@ class TestReadme:
         readme = (REPO / "README.md").read_text()
         ci = next(p for p in readme.split("\n\n") if p.startswith("**In GitHub Actions**"))
         assert "`AUTOMATIC_FAILOVER=disabled`" in ci and "`enabled`" in ci
-        assert "`catalog-recovery`" in ci, "it says which manual run is the exception"
-        recovery = next(p for p in readme.split("\n\n") if p.startswith("**The recovery test needs the plan's triggers.**"))
+        assert "`catalog-recovery`" in ci and "`cart-isolation`" in ci, "it says which manual runs are the exception"
+        sentence = next(s for s in re.split(r"(?<=;) |(?<=\.) ", ci) if "deploys with it `enabled`" in s)
+        for t in json.loads(SPEC.read_text())["tests"]:
+            if t["template"] in spec.FAILOVER_TEMPLATES:
+                assert f"`{t['name']}`" in sentence, f"the sentence that says which runs arm the triggers does not name {t['name']}"
+            else:
+                assert f"`{t['name']}`" not in sentence, f"{t['name']} does not arm the triggers"
+        recovery = next(p for p in readme.split("\n\n") if p.startswith("**The recovery and isolation tests need the plan's triggers.**"))
         assert "`AUTOMATIC_FAILOVER=disabled`" in recovery, "it says why a deployment without the switch is refused"

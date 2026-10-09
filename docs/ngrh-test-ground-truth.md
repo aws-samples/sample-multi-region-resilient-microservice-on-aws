@@ -17,7 +17,8 @@ A run that ends `ERROR` or `STOPPED` is neither: the test did not finish, and th
 
 A test can also name **run checks**, which look at what the run did beyond what Resilience Hub reports. A run
 Resilience Hub ends `PASSED` is observed **FAIL** when one of its run checks fails: the run did not show what
-the test is for. The report lists each check with its reason.
+the test is for. (A test that expects FAIL keeps the `PASSED` it was given, which already contradicts the
+expectation.) The report lists each check with its reason.
 
 A run that ends `FAILED` or `PASSED` can also be **INCONCLUSIVE**: when FIS could not inject the fault (an
 experiment that ended `failed`, or an `action_failed` event), nothing was done to the sample, so what the run
@@ -188,6 +189,115 @@ No trigger has been deployed to test2, no run of `catalog-recovery` exists, and 
 alarm, so what is still untested against the real service is: that the eight triggers start the plan, which endpoint
 an alarm-started deactivate runs at, how long it takes from the fault, and whether the fault leaves the plan able to
 finish. The first live run is the check.
+
+## cart-isolation
+
+**Test:** the cart service, multi-Region isolation. For 30 minutes FIS cuts us-east-1 off from us-west-2: it blocks the
+cross-Region routes of the subnets it reaches, the Transit Gateway peering and the cross-Region VPC endpoints, and
+pauses replication of the S3 buckets, the DynamoDB global table (carts) and any MemoryDB multi-Region cluster it
+reaches. The test gives no `dependencies`, so the template's three actions that drop traffic to a DNS name (SSM, ECS
+tasks, EKS pods) have nothing to drop. What the fault reaches is decided by Resilience Hub's discovery of the cart
+service (resources tagged `service` `cart` or `shared`), and the report lists it under "What the fault reached". The
+success alarms are the four local journeys of us-east-1 (`journey-lcl-*`): they go through the Region's own load
+balancer and never leave it, so a Region that can serve alone keeps them `OK` for the whole run. The observability
+alarm is `hop-carts-errors`. The stop condition is `region-degraded` for us-east-1: FIS ends the fault when one of
+those journeys fails, which is the user impact the test would otherwise go on causing for 30 minutes. The report's
+evidence also lists `dynamodb-errors` in us-east-1, `region-degraded` in both Regions, the four `journey-rmt-*` alarms
+of us-west-2 (its view of us-east-1, which the cut turns red whatever else happens) and the ten hop alarms.
+
+Expected result: FAIL
+
+**Why:** the sample does not keep serving in us-east-1 when its carts table loses the other Regions, because of four
+facts.
+
+- The table is a multi-Region strong consistency table. `deployment/database/dynamodb/global-table.yml` sets
+  `MultiRegionConsistency: STRONG` with a witness Region, and test2's `cartsTable-dev` has replicas in us-east-1 and
+  us-west-2 and a witness in us-east-2 (read 2026-10-09).
+- FIS's `aws:dynamodb:global-table-pause-replication` on such a table pauses replication between the experiment
+  Region and every other Region, and AWS's own post on the subject (AWS Database Blog, 20 May 2026, "Best practices
+  for Amazon DynamoDB Global Tables, Part 3: Validating regional resilience with AWS Fault Injection Service") says
+  the isolated replica then answers writes and strongly consistent reads with HTTP 500 errors, because cross-Region
+  consensus cannot be reached, while eventually consistent reads still work. Those induced errors also count as
+  `SystemErrors`, so `dynamodb-errors` fires.
+- Carts reads with strong consistency everywhere: `DynamoDBConfiguration` sets the mapper's reads to `CONSISTENT`, and
+  `DynamoDBCartService` sets `ConsistentRead` on its query. So every call to carts fails in the isolated Region, not
+  only the writes.
+- ui asks carts for the cart on every page (`BaseController.populateCommon`), and a carts error fails the page (test2,
+  2026-10-05, with one of two carts tasks stalled: home failed about half its runs and the cart and orders journeys
+  nearly all). So all four local journeys fail in us-east-1.
+
+The alarms should change in this order: `dynamodb-errors` first (one 60-second period), then `hop-carts-errors` and the
+journeys (two failed minutes out of three), then `region-degraded`, which stops the experiment. FIS documents that
+replication may go on for up to five minutes after the action begins, so the first errors can come that late. Nothing
+should change in us-west-2: the pause isolates us-east-1's replica, and us-west-2's replica and the witness still form
+the quorum, so us-west-2 keeps serving and its `region-degraded` stays `OK`. (The blog's example has three replicas;
+that a witness in the place of the third replica gives the same result is inferred.)
+
+**What the plan does about it:** the live preflight requires the triggers (check 8), so a journey that fails locally can
+start a failover. Each of the four triggers that deactivate us-east-1 needs its journey red in us-east-1, red in
+us-west-2's view of us-east-1, and `region-degraded` for us-west-2 `OK`. The first holds, the second holds because of
+the cut itself, and the third by the paragraph above, so a trigger should fire and the plan should fail us-east-1 over to
+us-west-2 (graceful, with the catalog switchover last). `make ngrh-test` then waits for us-east-1 to be healthy for ten
+minutes and runs `make failback`. How the stop condition and the triggers race each other is not known: DynamoDB says
+the induced errors continue "briefly" after an experiment ends, which keeps us-east-1's journeys red a little longer,
+and the cut ends with the experiment, which turns the `rmt` views green again within minutes.
+
+**Run checks:** `no-plan-execution`, no execution of the plan started during the run or in the ten minutes after it
+(the report reads that far), and `destination-stayed-ok`, `region-degraded` in us-west-2 stayed `OK` over the same
+window. They decide a run that Resilience Hub passes (a `PASSED` run with a failed check is observed FAIL), and the
+report lists them for every run. For a run that is `FAILED` as expected they are information: an execution is the plan
+doing its job, and the trigger's description in its comment names the journey that failed locally. For a `PASSED` run an
+execution is a finding, because the cut alone should start none.
+
+**What confirms it:**
+
+- The run ends `FAILED` before the 30 minutes are up, with `region-degraded-us-east-1` among the alarms that changed and
+  the FIS experiment `stopped`.
+- `dynamodb-errors-us-east-1` is the first alarm to change, or moves within a minute of `hop-carts-errors`, and the
+  carts table (`AWS::DynamoDB::GlobalTable`) is among what the fault reached.
+- `destination-stayed-ok` passes.
+- Normally `no-plan-execution` fails by listing one or more deactivates of us-east-1, started by triggers, whose steps
+  completed and whose recovery time ARC reports.
+- `make ngrh-test` brings us-east-1 back, and the report records the fail-back.
+
+**What would contradict it:**
+
+- The run ends `PASSED`: the fault did not reach the table, or carts has a way to keep serving that the code does not
+  show. Look at "What the fault reached" first, then at `FaultInjectionServiceInducedErrors` for `cartsTable-dev` in
+  CloudWatch, which says whether the DynamoDB action injected anything.
+- The run ends `FAILED` and `dynamodb-errors` never fired, or fired after the journeys: something else broke the Region (the
+  routes, the VPC endpoints). The timeline says which alarm moved first.
+- The run ends `FAILED` with no execution: the stop condition ended the fault before a trigger's three conditions held
+  together. The evidence alarms say which was missing (most likely the `rmt` view of us-east-1, or us-west-2 not green).
+  That is a finding about the triggers, not about the sample.
+- `destination-stayed-ok` fails: the pause reached us-west-2's replica too, or the failover itself unsettled us-west-2.
+- The run is `INCONCLUSIVE`: FIS refused an action. The experiment role carries `dynamodb:InjectError` conditioned on
+  `dynamodb:FisActionId`, as `ngrh.yaml` has it; whether the request carries that key is untested.
+
+**Not known before the first run:**
+
+- Which resources the fault reaches. The carts table is tagged `service=cart` and `ChaosAllowed=true` in both Regions
+  (read 2026-10-09), but the routes, peering, endpoints and buckets depend on the discovery of the cart service.
+- How long after the action begins the errors start (FIS says up to five minutes) and how long after the stop they go on.
+- What ARC does with four triggers that are met in the same minutes: start one execution, start four, or start one and
+  refuse the rest. The report lists every execution that started, and `make ngrh-test` fails each deactivated Region
+  back once.
+- Which endpoint a trigger-started deactivate runs at, and what its comment says (only activates have been seen).
+- Whether Resilience Hub accepts the five source alarms. The API takes only alarms found in a failure-mode assessment
+  of the service as test sources, and the alarms were created on 2026-10-06; run an assessment of the cart service
+  before the first run, as was needed for orders and catalog.
+- Control-plane calls on the table, such as `UpdateTable`, are blocked in every Region while the pause lasts (the
+  blog), and FIS allows at most 5,040 minutes of this action per MRSC table in a rolling seven days. Do not deploy the
+  table during a run; the limit allows over a hundred 30-minute runs a week.
+
+**What it would mean:** a `FAILED` run as expected says that us-east-1 cannot serve on its own while its carts table
+cannot reach the quorum, and that the failover is what keeps users served. Reads could continue if carts fell back to an
+eventually consistent read when a strongly consistent one fails (the blog suggests this); writes could not, which is
+the price of strong consistency, so the cart and orders journeys would still fail locally.
+
+**Confidence:** inferred from AWS's documentation and the repository's code, with the table's mode and the Region's
+health read from test2; no run exists, and `make ngrh-tests` has not created this test yet. That ui calls carts on every
+page is what makes all four journeys fail rather than only the two that add to a cart.
 
 ## Runs
 

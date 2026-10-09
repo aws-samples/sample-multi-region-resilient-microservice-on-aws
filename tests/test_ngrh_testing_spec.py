@@ -46,7 +46,7 @@ class TestShippedSpec:
 
     def test_it_parses_and_holds_the_orders_dependency_test(self):
         parsed = spec.load(str(SPEC_FILE))
-        assert parsed.names() == ["orders-broker-dependency", "catalog-recovery"]
+        assert parsed.names() == ["orders-broker-dependency", "catalog-recovery", "cart-isolation"]
         test = parsed.tests[0]
         assert (test.service, test.template) == ("orders", "aws-dependency-validation:rtdep001")
         assert test.duration_minutes == 15
@@ -141,8 +141,11 @@ def _mutations():
         ("unknown evidence group", test_key("evidenceAlarms", [{"group": "all", "region": "primary"}]), "unknown group 'all'"),
         ("evidence with name and group",
          test_key("evidenceAlarms", [{"name": "x", "group": "hop", "region": "primary"}]), "either 'name' or 'group'"),
-        ("run check nothing implements", test_key("runChecks", ["no-plan-execution"]), "unknown run check 'no-plan-execution'; known: deactivate-completed"),
+        ("run check nothing implements", test_key("runChecks", ["no-such-check"]),
+         "unknown run check 'no-such-check'; known: deactivate-completed, no-plan-execution, destination-stayed-ok"),
         ("run checks that are not a list", test_key("runChecks", "none"), "runChecks must be a list"),
+        ("a check that reads the destination, on a template with none",
+         test_key("runChecks", ["destination-stayed-ok"]), "destination-stayed-ok needs a destinationRegion"),
     ]
 
 

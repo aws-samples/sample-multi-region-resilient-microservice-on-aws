@@ -42,13 +42,23 @@ ALARM_GROUPS: Dict[str, Tuple[str, ...]] = {"hop": HOP_ALARMS}
 KNOWN_LOOKUPS = ("mq-broker-host", "catalog-db-endpoints", "plan-arn")
 
 # Run-level checks beyond NGRH's verdict (design 5.8); executions.py evaluates each one, and a test keeps the two in
-# step, so a spec can't name a check that silently never runs. deactivate-completed: a deactivate of the impaired
-# Region started during the run and completed (the recovery test). Step 12 adds the isolation test's two.
-KNOWN_RUN_CHECKS: Tuple[str, ...] = ("deactivate-completed",)
+# step, so a spec can't name a check that silently never runs.
+#   deactivate-completed: a deactivate of the impaired Region started during the run and completed (the recovery test).
+#   no-plan-execution: no plan execution started during the run (the isolation test: cutting a Region off from its peer
+#     is no reason to fail it over unless a journey fails in it).
+#   destination-stayed-ok: region-degraded in the destination Region stayed OK through the run and the window after it
+#     (the isolation test). It reads that alarm's history from the evidence, so a test that names this check must list
+#     the alarm there (parse enforces it).
+KNOWN_RUN_CHECKS: Tuple[str, ...] = ("deactivate-completed", "no-plan-execution", "destination-stayed-ok")
 
-# The template that impairs a Region and waits for another to recover. A test that uses it needs the automatic
-# failover to be armed, which preflight check 8 looks at.
+# The template that impairs a Region and waits for another to recover, and the one that cuts a Region off from its peer.
 RECOVERY_TEMPLATE = "aws-multi-region-recovery:rtmr002"
+ISOLATION_TEMPLATE = "aws-multi-region-isolation:rtmr001"
+
+# The templates whose runs can end with the plan failing a Region over. A test that uses one needs the automatic
+# failover to be armed, which preflight check 8 looks at: the recovery test passes only if the plan moves the traffic,
+# and the isolation test's "no failover started" means something only if a failover could have started.
+FAILOVER_TEMPLATES = (RECOVERY_TEMPLATE, ISOLATION_TEMPLATE)
 
 # NGRH's limits: five sources (success plus observability) per test; FIS allows five stop conditions
 # per experiment template. The design keeps every parameter to ten values at most.
@@ -71,13 +81,15 @@ REGION_PARAMETERS = ("region", "isolatedRegion", "destinationRegion", "impairedR
 class TemplateShape:
     """What a test template accepts: its parameters (NGRH's names), which are required, which
     take a list, which parameter names the Region the fault lands in, and the duration NGRH
-    uses when a test gives none."""
+    uses when a test gives none. ``peer_parameter`` names the other Region of a template that has one: where the
+    traffic is meant to go in a recovery test, what the isolated Region is cut off from in an isolation test."""
 
     parameters: Tuple[str, ...]
     required: Tuple[str, ...]
     multi_valued: Tuple[str, ...]
     fault_region: str
     default_duration: int
+    peer_parameter: Optional[str] = None
 
 
 # The templates the suite uses (research 01). AZ recovery is not among them: the workload's single
@@ -90,19 +102,21 @@ TEMPLATES: Dict[str, TemplateShape] = {
         fault_region="region",
         default_duration=30,
     ),
-    "aws-multi-region-isolation:rtmr001": TemplateShape(
+    ISOLATION_TEMPLATE: TemplateShape(
         parameters=("isolatedRegion", "destinationRegion", "dependencies", "duration"),
         required=("isolatedRegion", "destinationRegion"),
         multi_valued=("dependencies",),
         fault_region="isolatedRegion",
         default_duration=180,
+        peer_parameter="destinationRegion",
     ),
-    "aws-multi-region-recovery:rtmr002": TemplateShape(
+    RECOVERY_TEMPLATE: TemplateShape(
         parameters=("impairedRegion", "recoveryRegion", "regionSwitchPlan", "dependencies", "duration"),
         required=("impairedRegion", "recoveryRegion"),
         multi_valued=("dependencies",),
         fault_region="impairedRegion",
         default_duration=30,
+        peer_parameter="recoveryRegion",
     ),
 }
 
@@ -374,6 +388,17 @@ def _parse_test(index: int, data: Any, problems: List[str]) -> Optional[Test]:
     parameters: Mapping[str, Tuple[ParameterValue, ...]] = {}
     if valid_template:
         parameters = _parameters(f"{where}: parameters", template, data.get("parameters", {}), problems)
+    if valid_template and "destination-stayed-ok" in checks:
+        # The check reads region-degraded in the destination Region from the evidence the report collects, so a test
+        # that names it has to have a destination and has to list that alarm. Said here, it costs nothing; found out
+        # after a 30-minute fault, it costs the run.
+        destination = [v for v in parameters.get("destinationRegion", ()) if isinstance(v, str)]
+        if not destination:
+            problems.append(f"{where}: run check destination-stayed-ok needs a destinationRegion parameter, which "
+                            f"{template} does not take or the test does not give")
+        elif not any(e.name == "region-degraded" and e.region == destination[0] for e in evidence):
+            problems.append(f"{where}: run check destination-stayed-ok reads region-degraded in {destination[0]}, so evidenceAlarms "
+                            f"must list {{\"name\": \"region-degraded\", \"region\": \"{destination[0]}\"}}")
     if not isinstance(name, str) or service not in SERVICES or not valid_template:
         return None
     return Test(

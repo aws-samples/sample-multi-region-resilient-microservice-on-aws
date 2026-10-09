@@ -101,7 +101,7 @@ class TestCommand:
     def test_a_ready_deployment_exits_0_with_the_summary(self, capsys):
         # The default is every test of the shipped spec, so the deployment has to be ready for the recovery test too.
         assert cli.main(["preflight", *ARGS], aws=fully_reconciled_fake()) == cli.EXIT_OK
-        assert capsys.readouterr().out == "Preflight (live) for orders-broker-dependency, catalog-recovery: all checks passed\n"
+        assert capsys.readouterr().out == "Preflight (live) for orders-broker-dependency, catalog-recovery, cart-isolation: all checks passed\n"
 
     def test_a_refusal_exits_2_and_lists_the_reasons(self, capsys):
         fake = reconciled_fake()

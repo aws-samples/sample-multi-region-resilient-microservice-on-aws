@@ -213,6 +213,15 @@ class ResolvedTest:
     def name(self) -> str:
         return self.test.name
 
+    @property
+    def peer_region(self) -> str:
+        """The other Region of a test whose template has one: where the traffic is meant to go in a recovery test, what
+        the isolated Region is cut off from in an isolation test."""
+        parameter = self.test.shape.peer_parameter
+        if parameter is None:
+            raise ValueError(f"{self.test.template} has no second Region, so test {self.name} has no peer")
+        return self.parameters[parameter][0]
+
     def sources(self) -> Set[Tuple[str, str]]:
         """What PutTestSources should hold: (kind, alarm ARN)."""
         return ({(SOURCE_SUCCESS, a.arn) for a in self.success}

@@ -179,9 +179,12 @@ def collect(aws: AwsCli, env: Environment, t: ResolvedTest, run_id: str, now: Op
         gaps.extend(execution_problems)
     elif t.test.run_checks:
         execution_problems = [f"stack region-switch{env.env} is not deployed in {env.primary_region}"]
-    checks = executions.evaluate(t, found, execution_problems)
-    if seen == PASS and any(not c.passed for c in checks):
-        seen = FAIL  # Resilience Hub passed it, but the run did not show what the test is for
+    checks = executions.evaluate(t, found, execution_problems, evidence)
+    if seen == PASS and t.test.expected != FAIL and any(not c.passed for c in checks):
+        # Resilience Hub passed it, but the run did not show what the test is for. A test that expects to fail is left as
+        # Resilience Hub saw it: its PASS already contradicts the expectation, and turning it into the FAIL that was expected
+        # would record a surprising run as an unsurprising one. The checks are listed in the report either way.
+        seen = FAIL
     return {
         "test": t.name, "service": t.test.service, "template": t.test.template, "testRunId": run_id,
         "expected": t.test.expected, "observed": seen, "matches": matches(t.test.expected, seen),
@@ -318,7 +321,7 @@ def render(data: Dict[str, Any], invoker_role: str = "") -> str:
     checks = data.get("runChecks") or []
     if checks:
         failed = [c for c in checks if not c["passed"]]
-        if failed and run["status"] == "PASSED" and not problem:
+        if failed and run["status"] == "PASSED" and data["observed"] == FAIL and not problem:
             lines += ["", f"Resilience Hub ended the run PASSED, but {'a run check' if len(failed) == 1 else 'run checks'} failed, so the run "
                           "does not show what this test is for, and the observed result is FAIL."]
         lines += ["", "## Run checks", "", *[f"- {'PASS' if c['passed'] else 'FAIL'} {c['name']}: {c['detail']}" for c in checks]]

@@ -26,6 +26,7 @@ on:
           - none
           - orders-broker-dependency
           - catalog-recovery
+          - cart-isolation
 concurrency:
   group: e2e-deploy
   cancel-in-progress: false
@@ -40,7 +41,7 @@ jobs:
       AWS_REGION: us-east-1
       STANDBY_REGION: us-west-2
       NGRH_TEST: ${{ inputs.ngrh_test || 'none' }}
-      AUTOMATIC_FAILOVER: ${{ (inputs.ngrh_test == 'catalog-recovery') && 'enabled' || 'disabled' }}
+      AUTOMATIC_FAILOVER: ${{ (inputs.ngrh_test == 'catalog-recovery' || inputs.ngrh_test == 'cart-isolation') && 'enabled' || 'disabled' }}
     if: github.actor != 'dependabot[bot]'
     steps:
       - name: Checkout

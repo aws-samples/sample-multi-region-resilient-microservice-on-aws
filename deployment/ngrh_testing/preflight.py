@@ -8,11 +8,11 @@ now (alarm states, active runs, FIS experiments, plan executions, and whether th
 tasks are registered with SSM), which is what CI wants right after a deploy. A check that cannot run
 because an AWS call failed is a refusal too: a preflight that cannot see is not a pass.
 
-The sentinel (check 1) is the credential lookup every command starts with. Check 8 is the recovery test's
-alone (the triggers are there, the last plan execution is old enough for a trigger to fire again, and the
-scale-up fits under each service's maximum) and, like the other checks about what is happening now, a live
-preflight does it and a static one does not: CI's static preflight runs after every deploy, and an ordinary
-deploy has automatic failover off.
+The sentinel (check 1) is the credential lookup every command starts with. Check 8 belongs to the tests that can end with
+the plan failing a Region over, the recovery test and the isolation test (the triggers are there, the last plan
+execution is old enough for a trigger to fire again, and the scale-up fits under each service's maximum) and, like the
+other checks about what is happening now, a live preflight does it and a static one does not: CI's static preflight runs
+after every deploy, and an ordinary deploy has automatic failover off.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import api, context, reconcile, spec
+from . import api, context, executions, reconcile, spec
 from .aws import AwsCli, AwsCliError
 from .context import ContextError, Environment, ResolvedTest
 from .timeutil import parse_time
@@ -137,6 +137,13 @@ def check_alarms(aws: AwsCli, tests: Sequence[ResolvedTest], live: bool) -> List
                     state = states.get((alarm.region, alarm.name))
                     if state is not None and state != "OK":
                         out.append(Refusal(4, f"{kind} alarm {alarm.name} is {state}, not OK, in {alarm.region}", t.name))
+            # The run check destination-stayed-ok asks whether the destination's health alarm stays OK. An alarm that
+            # is already not OK has no change to show, so the check would read that as staying OK.
+            destination = executions.destination_alarm(t) if "destination-stayed-ok" in t.test.run_checks else None
+            state = states.get((destination.region, destination.name)) if destination else None
+            if destination and state is not None and state != "OK":
+                out.append(Refusal(4, f"alarm {destination.name} is {state}, not OK, in {destination.region}; the run check "
+                                      "destination-stayed-ok asks whether it stays OK, which an alarm that starts out of OK can't show", t.name))
     return out
 
 
@@ -312,19 +319,21 @@ def _iso(moment: datetime) -> str:
 
 
 def check_recovery(aws: AwsCli, env: Environment, t: ResolvedTest, now: datetime) -> List[Refusal]:
-    """The recovery test passes only if the plan moves the traffic by itself within the objective, so before it starts:
+    """What a test that can end with the plan failing a Region over needs. The recovery test passes only if the plan moves
+    the traffic by itself within the objective; the isolation test's answer "no failover started" means something only
+    if a failover could have started when a journey failed. So before either starts:
 
-    * the plan has a trigger that deactivates the Region the test impairs. Deployed with AUTOMATIC_FAILOVER=disabled it
-      has none, and the run would wait for a person who is not there.
+    * the plan has a trigger that deactivates the Region the test impairs or isolates. Deployed with
+      AUTOMATIC_FAILOVER=disabled it has none, and the run would wait for a person who is not there.
     * the last plan execution is older than the triggers' delay between executions (60 minutes). A trigger that fired
-      less than that ago will not fire again, and the run would fail for that reason alone.
-    * the scale-up fits. ARC raises each service in the recovery Region to a percentage (200) of the most tasks it ran
+      less than that ago will not fire again, and the run would fail (or pass) for that reason alone.
+    * the scale-up fits. ARC raises each service in the other Region to a percentage (200) of the most tasks it ran
       in the impaired Region in the last 24 hours, and a service can't go past its Auto Scaling maximum (10). Every
       failover and fail-back raises the peaks, so repeated runs compound until a scale-up stalls at the maximum.
 
     Only a live preflight can ask: all three depend on what has happened lately."""
     region = t.fault_region
-    recovery = t.parameters["recoveryRegion"][0]
+    recovery = t.peer_region
     plan_arn = context.region_switch_plan_arn(aws, env.primary_region, env.env)
     if not plan_arn:
         return [Refusal(8, f"stack region-switch{env.env} is not deployed in {env.primary_region}, so there is no plan to recover with; "
@@ -409,8 +418,8 @@ def run_checks(aws: AwsCli, env: Environment, tests: Sequence[spec.Test], mode: 
     if mode == LIVE:
         for t in resolved:
             refusals.extend(_seeing(9, "whether the service's tasks are registered with SSM", lambda t=t: check_tasks_registered(aws, env, t), t.name))
-            if t.test.template == spec.RECOVERY_TEMPLATE:
-                refusals.extend(_seeing(8, "what the recovery test needs (the triggers, the last execution, the capacity)",
+            if t.test.template in spec.FAILOVER_TEMPLATES:
+                refusals.extend(_seeing(8, "what the test needs to fail a Region over (the triggers, the last execution, the capacity)",
                                         lambda t=t: check_recovery(aws, env, t, now), t.name))
         refusals.extend(_seeing(5, "the active test runs", lambda: check_no_active_runs(aws, env)))
         refusals.extend(_seeing(6, "the FIS experiments", lambda: check_no_fis_experiments(aws, env)))

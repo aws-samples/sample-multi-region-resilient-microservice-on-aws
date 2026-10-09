@@ -64,6 +64,40 @@
       ],
       "runChecks": ["deactivate-completed"],
       "expected": "PASS"
+    },
+    {
+      "name": "cart-isolation",
+      "service": "cart",
+      "template": "aws-multi-region-isolation:rtmr001",
+      "parameters": {
+        "isolatedRegion": ["primary"],
+        "destinationRegion": ["standby"],
+        "duration": ["30"]
+      },
+      "successAlarms": [
+        {"name": "journey-lcl-home", "region": "primary"},
+        {"name": "journey-lcl-cart", "region": "primary"},
+        {"name": "journey-lcl-catalog", "region": "primary"},
+        {"name": "journey-lcl-orders", "region": "primary"}
+      ],
+      "observabilityAlarms": [
+        {"name": "hop-carts-errors", "region": "primary"}
+      ],
+      "stopAlarms": [
+        {"name": "region-degraded", "region": "primary"}
+      ],
+      "evidenceAlarms": [
+        {"name": "region-degraded", "region": "primary"},
+        {"name": "region-degraded", "region": "standby"},
+        {"name": "dynamodb-errors", "region": "primary"},
+        {"name": "journey-rmt-home", "region": "standby"},
+        {"name": "journey-rmt-cart", "region": "standby"},
+        {"name": "journey-rmt-catalog", "region": "standby"},
+        {"name": "journey-rmt-orders", "region": "standby"},
+        {"group": "hop", "region": "primary"}
+      ],
+      "runChecks": ["no-plan-execution", "destination-stayed-ok"],
+      "expected": "FAIL"
     }
   ]
 }

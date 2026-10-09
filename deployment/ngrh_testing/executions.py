@@ -4,8 +4,10 @@
 Resilience Hub's verdict says whether the success alarms recovered; it does not say how. The recovery test
 means to show that the plan moved the traffic, so the report lists every plan execution that started while the
 run was going, with its steps and ARC's own measurement of the recovery time, and the run-level checks the spec
-names look at that list. ``run`` also reads it to know which Regions the run's failover deactivated, so that
-``make failback`` can bring them back.
+names look at that list. The isolation test means to show that a Region keeps serving when cut off from its peer,
+so its checks are that no execution started and that the peer's own health alarm stayed OK, which reads the
+evidence alarms' history as well. ``run`` also reads the executions to know which Regions the run's failover
+deactivated, so that ``make failback`` can bring them back.
 
 An endpoint lists only the executions that ran at it (api.plan_executions reads every endpoint and merges). A deactivate
 of A runs at the endpoint of the Region that stays, B, and an activate of A at A's own: of 56 distinct executions in two
@@ -27,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import api
 from .aws import AwsCli, AwsCliError
-from .context import Environment, ResolvedTest
+from .context import Environment, ResolvedAlarm, ResolvedTest
 from .timeutil import parse_time
 
 # An execution can start a moment before the run's own start time says: the two clocks are not the same.
@@ -131,7 +133,18 @@ def _minutes(seconds: float) -> str:
     return f"{int(seconds // 60)} min {int(seconds % 60)} s"
 
 
-def deactivate_completed(t: ResolvedTest, found: Sequence[Dict[str, Any]], problems: Sequence[str]) -> CheckResult:
+def _at(moment: Any) -> str:
+    return parse_time(moment).strftime("%H:%M:%S")
+
+
+# What ARC wrote as the comment of the executions its triggers started in test4 (read 2026-10-08): this fixed text and
+# the trigger's description in square brackets. Only activates have been seen, so a trigger-started deactivate may differ,
+# and a comment that does not match is described as it stands instead of being called a person's.
+TRIGGER_COMMENT = re.compile(r"^Execution started by automated trigger \[(.*)\]$", re.S)
+
+
+def deactivate_completed(t: ResolvedTest, found: Sequence[Dict[str, Any]], problems: Sequence[str],
+                         evidence: Sequence[Dict[str, Any]] = ()) -> CheckResult:
     """A deactivate of the impaired Region started during the run and completed. The recovery test passes when the
     success alarms come back in time; without this check a run could pass because the fault did not bite, or because a
     person moved the traffic by hand, and show nothing about the triggers."""
@@ -157,11 +170,77 @@ def deactivate_completed(t: ResolvedTest, found: Sequence[Dict[str, Any]], probl
     return CheckResult(name, True, f"execution {e['executionId']} deactivated {region} ({e['mode'] or 'graceful'}) and {e['state']}{took}")
 
 
-CHECKS: Dict[str, Callable[[ResolvedTest, Sequence[Dict[str, Any]], Sequence[str]], CheckResult]] = {
+def _how_it_started(e: Dict[str, Any]) -> str:
+    comment = e.get("comment") or ""
+    trigger = TRIGGER_COMMENT.match(comment)
+    if trigger:
+        return f"started by the trigger [{trigger.group(1)}]"
+    return f"started with the comment \"{comment}\"" if comment else "started without a comment"
+
+
+def no_plan_execution(t: ResolvedTest, found: Sequence[Dict[str, Any]], problems: Sequence[str],
+                      evidence: Sequence[Dict[str, Any]] = ()) -> CheckResult:
+    """No plan execution started during the run. The isolation test cuts a Region off from its peer, which turns only the
+    peer's view of it red (the rmt journey alarms); a trigger needs the Region's own journeys red too. So a run that shows
+    the Region keeps serving starts no execution. One that does start one is either the plan doing its job (a journey
+    failed locally, a trigger fired, and the run is FAILED as well: the comment names the journey) or a finding (the run
+    passed and something started the plan anyway). The detail says which executions and how they started, and the report
+    lists their steps."""
+    name = "no-plan-execution"
+    if problems:
+        return CheckResult(name, False, "could not read the plan's executions, so this is not known: " + "; ".join(problems))
+    if not found:
+        return CheckResult(name, True, "no plan execution started during the run, so no failover started")
+    lines = [f"execution {e['executionId']} ({e['action']} {e['region']}, {e['mode'] or 'graceful'}, {e['state']}) at "
+             f"{_at(e['startTime'])}, {_how_it_started(e)}" for e in found]
+    head = "a plan execution started during the run: " if len(found) == 1 else f"{len(found)} plan executions started during the run: "
+    return CheckResult(name, False, head + "; ".join(lines) + ". If the isolated Region's own journeys failed, this is the plan doing its job "
+                                    "and the trigger's description names the journey; if they stayed OK, nothing should have started it")
+
+
+def destination_alarm(t: ResolvedTest) -> Optional[ResolvedAlarm]:
+    """region-degraded in the destination Region, the alarm the check below reads; None when the test has no destination or
+    does not list the alarm as evidence (spec.parse refuses a spec that names the check without it)."""
+    values = t.parameters.get("destinationRegion") or []
+    if not values:
+        return None
+    return next((a for a in t.evidence if a.region == values[0] and a.name.startswith("region-degraded-")), None)
+
+
+def destination_stayed_ok(t: ResolvedTest, found: Sequence[Dict[str, Any]], problems: Sequence[str],
+                          evidence: Sequence[Dict[str, Any]] = ()) -> CheckResult:
+    """region-degraded in the destination Region stayed OK: the Region the isolated one was cut off from is the one traffic
+    would move to, so if the cut or the failover it starts unsettled it, the test says nothing about the isolated Region
+    alone. The history is the evidence the report reads, from a minute before the run until ten minutes after it ended. A
+    history with no change in it means the alarm stayed in the state it started in, which a live preflight requires to be
+    OK (check 4), so no change is read as OK."""
+    name = "destination-stayed-ok"
+    alarm = destination_alarm(t)
+    if alarm is None:
+        return CheckResult(name, False, "this test lists no region-degraded alarm for its destination Region, so there is nothing to read")
+    row = next((r for r in evidence if r.get("alarm") == alarm.name and r.get("region") == alarm.region), None)
+    if row is None or row.get("transitions") is None:
+        return CheckResult(name, False, f"the history of {alarm.name} could not be read, so this is not known")
+    transitions = row["transitions"]
+    states = ([transitions[0]["from"]] + [tr["to"] for tr in transitions]) if transitions else ["OK"]
+    if all(s == "OK" for s in states):
+        return CheckResult(name, True, f"{alarm.name} stayed OK through the run and the window after it")
+    changes = "; ".join(f"{tr['from']} -> {tr['to']} at {_at(tr['time'])}" for tr in transitions)
+    return CheckResult(name, False, f"{alarm.name} did not stay OK: {changes}. {alarm.region} is where the isolated Region's traffic would "
+                                    "go, so it has to be healthy for this test to show anything about the isolated one")
+
+
+Check = Callable[[ResolvedTest, Sequence[Dict[str, Any]], Sequence[str], Sequence[Dict[str, Any]]], CheckResult]
+
+CHECKS: Dict[str, Check] = {
     "deactivate-completed": deactivate_completed,
+    "no-plan-execution": no_plan_execution,
+    "destination-stayed-ok": destination_stayed_ok,
 }
 
 
-def evaluate(t: ResolvedTest, found: Sequence[Dict[str, Any]], problems: Sequence[str]) -> List[CheckResult]:
-    """The test's run-level checks, in the order the spec lists them."""
-    return [CHECKS[name](t, found, problems) for name in t.test.run_checks]
+def evaluate(t: ResolvedTest, found: Sequence[Dict[str, Any]], problems: Sequence[str],
+             evidence: Sequence[Dict[str, Any]] = ()) -> List[CheckResult]:
+    """The test's run-level checks, in the order the spec lists them. ``evidence`` is the report's evidence rows (an alarm,
+    its Region and its state changes), for the checks that read alarm history."""
+    return [CHECKS[name](t, found, problems, evidence) for name in t.test.run_checks]

@@ -166,8 +166,8 @@ class TestSpecEntry:
             assert (f"journey-rmt-{t.journey}", "standby") in shown
         assert ("region-degraded", "standby") in shown and ("region-degraded", "primary") in shown
 
-    def test_the_spec_names_two_tests_and_all_selects_both(self):
-        assert [t.name for t in all_spec_tests()] == ["orders-broker-dependency", RECOVERY]
+    def test_the_spec_names_three_tests_and_all_selects_every_one(self):
+        assert [t.name for t in all_spec_tests()] == ["orders-broker-dependency", RECOVERY, "cart-isolation"]
 
     def test_a_recovery_test_must_use_the_recovery_template_constant(self):
         assert spec.RECOVERY_TEMPLATE == "aws-multi-region-recovery:rtmr002"
@@ -256,12 +256,12 @@ class TestReconcile:
         plans, lines = reconcile.reconcile(fake, environment(fake), all_spec_tests())
         assert all(p.in_sync for p in plans) and fake.writes() == []
 
-    def test_both_tests_exist_after_reconciling_the_whole_spec(self):
+    def test_all_three_tests_exist_after_reconciling_the_whole_spec(self):
         fake = deployed_fake()
         _, lines = reconcile.reconcile(fake, environment(fake), all_spec_tests())
-        assert [line.split(":")[0] for line in lines] == ["orders-broker-dependency", RECOVERY]
+        assert [line.split(":")[0] for line in lines] == ["orders-broker-dependency", RECOVERY, "cart-isolation"]
         assert sorted(t["testTemplateArn"].rsplit("/", 1)[-1] for t in fake.tests.values()) == sorted(
-            ["aws-dependency-validation:rtdep001", "aws-multi-region-recovery:rtmr002"])
+            ["aws-dependency-validation:rtdep001", "aws-multi-region-recovery:rtmr002", "aws-multi-region-isolation:rtmr001"])
 
     def test_a_changed_database_endpoint_is_drift_to_update(self):
         fake = fully_reconciled_fake()
@@ -525,7 +525,7 @@ class TestRecoveryPreflight:
         fake = fully_reconciled_fake()
         fake.fail_on(service, operation, "ThrottlingException")
         result = preflight.run_checks(fake, environment(fake), recovery_tests(), preflight.LIVE, NOW)
-        assert any(r.check == 8 and "could not check what the recovery test needs" in r.reason for r in result.refusals)
+        assert any(r.check == 8 and "could not check what the test needs to fail a Region over" in r.reason for r in result.refusals)
 
     def test_the_rendered_refusal_carries_the_check_number_and_the_test(self):
         fake = fully_reconciled_fake()
@@ -759,7 +759,7 @@ class TestDeactivateCompleted:
 
     def test_a_test_with_no_run_checks_has_none_evaluated(self):
         fake = deployed_fake()
-        (resolved,) = context.resolve_all(fake, environment(fake), [t for t in all_spec_tests() if t.name != RECOVERY])
+        (resolved,) = context.resolve_all(fake, environment(fake), [t for t in all_spec_tests() if t.name == "orders-broker-dependency"])
         assert executions.evaluate(resolved, [], []) == []
 
 

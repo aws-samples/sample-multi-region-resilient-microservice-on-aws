@@ -52,6 +52,25 @@ RECOVERY_SUCCESS = [f"journey-global-{j}-{PRIMARY}{ENV}" for j in JOURNEYS]
 RECOVERY_OBSERVABILITY = [f"hop-catalog-slow-{PRIMARY}{ENV}"]
 LCL = [f"journey-lcl-{j}-{PRIMARY}{ENV}" for j in JOURNEYS]          # the primary's own view of each journey
 RMT = [f"journey-rmt-{j}-{STANDBY}{ENV}" for j in JOURNEYS]          # the standby's view of the primary's journeys
+
+# The isolation test: the primary is cut off from the standby, and cart's table (a multi-Region strong consistency table in
+# test2) cannot reach its quorum. It is judged by the primary's own four journeys, and by what the plan did about them.
+ISOLATION = "cart-isolation"
+ISOLATION_TEMPLATE = "aws-multi-region-isolation:rtmr001"
+ISOLATION_SUCCESS = LCL
+ISOLATION_OBSERVABILITY = [f"hop-carts-errors-{PRIMARY}{ENV}"]
+DYNAMODB_ERRORS = f"dynamodb-errors-{PRIMARY}{ENV}"
+ISOLATION_DESIRED = {
+    "service_arn": service_arn("cart"),
+    "test_template_arn": template_arn(ISOLATION_TEMPLATE),
+    "parameters": {"isolatedRegion": [PRIMARY], "destinationRegion": [STANDBY], "duration": ["30"]},
+    "role_name": f"ngrh-test-experiment{ENV}",
+    "logging_configuration": {"cloudWatchLogGroupArn": f"arn:aws:logs:{PRIMARY}:{ACCOUNT}:log-group:/aws/fis/ngrh-tests{ENV}"},
+    "stop_conditions": [{"source": "aws:cloudwatch:alarm", "value": alarm_arn(STOP)}],
+}
+ISOLATION_SOURCES = sorted(
+    [("SUCCESS_CRITERIA", alarm_arn(n)) for n in ISOLATION_SUCCESS] + [("OBSERVABILITY", alarm_arn(n, PRIMARY)) for n in ISOLATION_OBSERVABILITY]
+)
 RECOVERY_DESIRED = {
     "service_arn": service_arn("catalog"),
     "test_template_arn": template_arn(RECOVERY_TEMPLATE),
@@ -68,7 +87,7 @@ RECOVERY_SOURCES = sorted(
 def deployed_fake() -> FakeAws:
     """Every alarm, template, role and stack the shipped spec refers to, nothing reconciled yet."""
     fake = FakeAws()
-    for name in SUCCESS + OBSERVABILITY + HOPS + RECOVERY_SUCCESS + LCL:
+    for name in SUCCESS + OBSERVABILITY + HOPS + RECOVERY_SUCCESS + LCL + [DYNAMODB_ERRORS]:
         fake.add_alarm(name)
     for name in RMT:
         fake.add_alarm(name, STANDBY)
@@ -94,6 +113,10 @@ def all_spec_tests():
 
 def recovery_tests():
     return spec.load(str(SPEC_FILE)).select(RECOVERY)
+
+
+def isolation_tests():
+    return spec.load(str(SPEC_FILE)).select(ISOLATION)
 
 
 def recovery_fake() -> FakeAws:
