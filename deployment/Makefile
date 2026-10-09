@@ -889,13 +889,23 @@ destroy-client-standby:
 # Builds policies + system + user journeys + services with TAG-BASED input
 # sources (service tag in {<name>, shared}) spanning both regions. Run AFTER
 # `make deploy` (the app stacks must be deployed WITH the service tags).
+# The cart service also reads the stack that creates the carts DynamoDB global
+# table (carts-db-stack<ENV>, in PRIMARY_REGION): tag discovery lists a global
+# table as plain tables, and the isolation test's DynamoDB pause needs the global
+# table. The target looks the stack's ARN up and passes it; without that stack
+# the cart service discovers by tag alone. Run `make ngrh` again after the
+# carts-db stack has been recreated, because its ARN changes.
 ####
 
 ngrh:
-	@echo "Deploying tag-based NGRH model (resources discovered by service tag)..."
-	@aws cloudformation deploy --template ./ngrh.yaml --region $(PRIMARY_REGION) \
+	@carts_db_stack_arn=$$(aws cloudformation describe-stacks --stack-name carts-db-stack$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].StackId" --output text 2>/dev/null) || carts_db_stack_arn=""; \
+	if [ -z "$$carts_db_stack_arn" ]; then \
+		echo "WARNING: stack carts-db-stack$(ENV) was not found in $(PRIMARY_REGION): the cart service will discover by tag only, and the isolation test will not pause the carts table."; \
+	fi; \
+	echo "Deploying tag-based NGRH model (resources discovered by service tag, plus the carts table's stack for the cart service)..."; \
+	aws cloudformation deploy --template ./ngrh.yaml --region $(PRIMARY_REGION) \
 	--stack-name ngrh$(ENV) --capabilities CAPABILITY_NAMED_IAM \
-	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION)
+	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION) "CartsDbStackArn=$$carts_db_stack_arn"
 	@echo "NGRH model deployed (stack ngrh$(ENV)). Run 'make ngrh-assess' to run failure-mode assessments."
 
 ngrh-assess:

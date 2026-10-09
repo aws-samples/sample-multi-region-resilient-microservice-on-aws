@@ -5,13 +5,18 @@ Description: >
   four User Journeys, and six Services. Each Service discovers its resources by
   TAG (input source `service` in {<service-name>, shared}) rather than by
   CloudFormation stack, so a service only sees the resources it actually uses
-  plus shared infrastructure. DependencyDiscovery stays ENABLED so each service
+  plus shared infrastructure. The one exception is the cart service, which also
+  reads the stack that creates the carts DynamoDB global table (parameter
+  CartsDbStackArn), because tag discovery lists a global table as plain tables.
+  DependencyDiscovery stays ENABLED so each service
   is registered as a traffic source and its dependency graph is expanded from the
   tagged seed. Assessment execution is imperative (see `make ngrh-assess`).
 
 # ---------------------------------------------------------------------------
-# Parameters. Resource discovery is tag-based (key "service"), so no per-stack
-# ARNs are required, so this template is portable across any account/Env.
+# Parameters. Resource discovery is tag-based (key "service"), so the only
+# stack ARN the template takes is the optional CartsDbStackArn; left empty,
+# every service discovers by tag alone and the template is portable across any
+# account/Env.
 # ---------------------------------------------------------------------------
 Parameters:
   Env:
@@ -24,6 +29,22 @@ Parameters:
   StandbyRegion:
     Type: String
     Default: us-west-2
+  CartsDbStackArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-z-]*:cloudformation:[a-z0-9-]+:[0-9]{12}:stack/[A-Za-z0-9-]+/[A-Za-z0-9-]+$"
+    ConstraintDescription: Empty, or the ARN of a CloudFormation stack (its StackId).
+    Description: >-
+      ARN (StackId) of the stack that creates the carts DynamoDB global table
+      (carts-db-stack<Env>, in PrimaryRegion). When set, the cart service reads
+      it as a second input source, so discovery lists the table as an
+      AWS::DynamoDB::GlobalTable, the resource type the multi-Region isolation
+      test's DynamoDB pause acts on; discovery by tag lists a global table's
+      replicas as one plain AWS::DynamoDB::Table per Region, and that action is
+      then skipped. `make ngrh` fills it in. Empty means tag discovery only.
+
+Conditions:
+  HasCartsDbStack: !Not [!Equals [!Ref CartsDbStackArn, ""]]
 
 Resources:
 
@@ -432,6 +453,12 @@ Resources:
   # expanded along real dependency edges and the service is registered as a
   # traffic source. Only genuine compensating-control / strategy assertions
   # are retained.
+  #
+  # The cart service has a second input source, the stack that creates the
+  # carts table (CartsDbStackArn). The table is an AWS::DynamoDB::GlobalTable,
+  # and tag discovery lists a global table's replicas as one plain
+  # AWS::DynamoDB::Table per Region; only a stack source lists the global table,
+  # the resource type the multi-Region isolation test's DynamoDB pause acts on.
   # -------------------------------------------------------------------------
   UiService:
     Type: AWS::ResilienceHubV2::Service
@@ -557,6 +584,13 @@ Resources:
                 Values:
                   - cart
                   - shared
+        # The carts table, discovered as an AWS::DynamoDB::GlobalTable (see
+        # CartsDbStackArn); omitted when the parameter is empty.
+        - !If
+          - HasCartsDbStack
+          - ResourceConfiguration:
+              CfnStackArn: !Ref CartsDbStackArn
+          - !Ref AWS::NoValue
       Assertions:
         - Text: >-
             Regional failover is automated via ARC Region Switch plan

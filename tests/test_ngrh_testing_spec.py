@@ -283,8 +283,11 @@ class TestSpecAgainstTemplates:
         scope = {}
         for name, resource in _template("ngrh.yaml")["Resources"].items():
             if resource["Type"] == "AWS::ResilienceHubV2::Service":
+                # Only the tag sources scope alarms; the cart service's second source (the carts table's stack, behind
+                # a condition) names no tags.
                 filters = [(tag["Key"], set(tag["Values"]))
                            for source in resource["Properties"]["InputSources"]
+                           if "ResourceTags" in source.get("ResourceConfiguration", {})
                            for tag in source["ResourceConfiguration"]["ResourceTags"]]
                 scope[name[: -len("Service")].lower()] = filters
         alarm_tags = {}

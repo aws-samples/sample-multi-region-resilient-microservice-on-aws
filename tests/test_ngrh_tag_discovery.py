@@ -2,7 +2,10 @@
 
 Each NGRH service in deployment/ngrh.yaml discovers its resources through one
 input source: resources whose ``service`` tag is the service's own name or
-``shared``. Discovery is only as good as the tags, so these tests pin them:
+``shared``. (The cart service also reads the stack that creates the carts
+global table, an optional second source pinned in
+tests/test_ngrh_cart_stack_source.py.) Discovery is only as good as the tags,
+so these tests pin them:
 
 * every ``service`` tag value is one of the six NGRH service names or
   ``shared`` (a typo such as ``carts`` silently drops the resource from
@@ -282,15 +285,17 @@ def test_each_service_discovers_by_its_tag_and_shared(lid):
     props = _ngrh_services()[lid]["Properties"]
     name = props["Name"].replace("${Env}", "")
     sources = props["InputSources"]
-    assert len(sources) == 1, f"{lid}: expected one input source, got {sources}"
+    # The cart service has a second, optional source (the carts table's stack); see test_ngrh_cart_stack_source.py.
+    assert len(sources) == (2 if lid == "CartService" else 1), f"{lid}: unexpected input sources {sources}"
     config = sources[0]["ResourceConfiguration"]
     assert "CfnStackArn" not in config
     assert config["ResourceTags"] == [{"Key": "service", "Values": [name, "shared"]}]
 
 
-def test_ngrh_template_takes_no_stack_arn_parameters():
+def test_ngrh_template_takes_one_optional_stack_arn_parameter():
     params = _load_template(DEPLOYMENT / "ngrh.yaml")["Parameters"]
-    assert set(params) == {"Env", "PrimaryRegion", "StandbyRegion"}
+    assert set(params) == {"Env", "PrimaryRegion", "StandbyRegion", "CartsDbStackArn"}
+    assert params["CartsDbStackArn"]["Default"] == "", "left empty, every service discovers by tag alone"
 
 
 def test_ngrh_outputs_one_arn_per_service():
