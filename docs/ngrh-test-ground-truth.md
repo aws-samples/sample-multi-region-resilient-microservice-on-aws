@@ -198,8 +198,8 @@ pauses replication of the S3 buckets, the DynamoDB global table (carts) and any 
 reaches. The test gives no `dependencies`, so the template's three actions that drop traffic to a DNS name (SSM, ECS
 tasks, EKS pods) should have nothing to drop: the documentation says an API caller supplies the list explicitly, but the
 template's own parameter text says it is "auto-populated from dependency discovery if enabled" (each service shows 67
-discovered dependencies, mostly unrelated traffic), and no run has shown what an omitted list does. The report's
-"Dependencies blocked" section settles it. What the fault reaches is decided by Resilience Hub's discovery of the cart
+discovered dependencies, mostly unrelated traffic), and the first run settled it: the report's "Dependencies blocked"
+section was empty, so an omitted list stays empty. What the fault reaches is decided by Resilience Hub's discovery of the cart
 service (resources tagged `service` `cart` or `shared`), and the report lists it under "What the fault reached". The
 success alarms are the four local journeys of us-east-1 (`journey-lcl-*`): they go through the Region's own load
 balancer and never leave it, so a Region that can serve alone keeps them `OK` for the whole run. The observability
@@ -210,8 +210,19 @@ of us-west-2 (its view of us-east-1, which the cut turns red whatever else happe
 
 Expected result: FAIL
 
-**Why:** the sample does not keep serving in us-east-1 when its carts table loses the other Regions, because of four
-facts.
+**First run (2026-10-09, run `2ede1ccb`): `PASSED`, not as expected, because the DynamoDB pause did not run.** FIS ran
+one of the template's nine actions, the route cut on three subnets of us-east-1, and skipped the other eight with
+"Target resolution returned empty set". One of them was the DynamoDB global table pause that the expected result rests
+on: FIS resolved no `aws:dynamodb:global-table` for the cart service. The four local journeys stayed `OK` for the whole
+30 minutes, no plan execution started, and both run checks passed. What the route cut alone did was turn all eight
+`journey-rmt-*` alarms red, four in each Region, from 18:29:32 to 18:29:47 (about eight minutes after the action began)
+until 2 to 8 minutes after it ended. The run is under Runs. The expectation stays `FAIL` for now: the run contradicts
+it because the fault did not reach the table, not because the sample behaved differently, and the page and the spec
+change together once it is decided how to close that gap (see "What the first run leaves open"). The paragraphs below
+are the reasoning for a fault that does reach the table; the outcome they lead to has not been observed.
+
+**Why:** the sample does not keep serving in us-east-1 when its carts table loses the other Regions (inferred; no run has
+reached the table yet), because of four facts.
 
 - The table is a multi-Region strong consistency table. `deployment/database/dynamodb/global-table.yml` sets
   `MultiRegionConsistency: STRONG` with a witness Region, and test2's `cartsTable-dev` has replicas in us-east-1 and
@@ -265,9 +276,10 @@ execution is a finding, because the cut alone should start none.
 
 **What would contradict it:**
 
-- The run ends `PASSED`: the fault did not reach the table, or carts has a way to keep serving that the code does not
-  show. Look at "What the fault reached" first, then at `FaultInjectionServiceInducedErrors` for `cartsTable-dev` in
-  CloudWatch, which says whether the DynamoDB action injected anything.
+- The run ends `PASSED`: the fault did not reach the table (the first run, 2026-10-09: it did not), or carts has a way to
+  keep serving that the code does not show. Look at "What the fault reached" first, then at
+  `FaultInjectionServiceInducedErrors` for `cartsTable-dev` in CloudWatch, which says whether the DynamoDB action
+  injected anything.
 - The run ends `FAILED` and `dynamodb-errors` never fired, or fired after the journeys: something else broke the Region (the
   routes, the VPC endpoints). The timeline says which alarm moved first.
 - The run ends `FAILED` with no execution: the stop condition ended the fault before a trigger's three conditions held
@@ -277,38 +289,60 @@ execution is a finding, because the cut alone should start none.
 - The run is `INCONCLUSIVE`: FIS refused an action. The experiment role carries `dynamodb:InjectError` conditioned on
   `dynamodb:FisActionId`, as `ngrh.yaml` has it; whether the request carries that key is untested.
 
-**Not known before the first run:**
+**Not known before the first run, and what the first run showed:**
 
-- Which resources the fault reaches. The carts table is tagged `service=cart` and `ChaosAllowed=true` in both Regions
-  (read 2026-10-09). The cart service's discovery (24 resources, read after the assessment) lists three kinds of
-  resource the template's actions act on: six subnets (three per Region), one S3 bucket, and the carts table as two
-  `AWS::DynamoDB::Table` entries, one per Region. The bucket is the failover plan's reports bucket (it takes the plan
-  stack's `service=shared` tag, so every service discovers it, and it has no replication rule). Discovery lists no
-  `AWS::DynamoDB::GlobalTable`, no Transit Gateway and no VPC endpoint. Resilience Hub's page for this test says an
-  action with no resource of its target type is skipped, so the DynamoDB pause, which the expected result rests on,
-  would be skipped if it matched on the listed type alone. The orders run suggests it does not: orders is listed with
-  ECS services and task definitions and no `AWS::ECS::Task`, and the task action still ran against its tasks. The
-  report's "What the fault reached" decides. If the DynamoDB pause did not run, expect `PASSED`: the route cut alone is
-  not expected to stop a Region that serves from local endpoints. What FIS does with the reports bucket is also
-  unknown: FIS's own cross-Region scenario targets only buckets that replicate to the destination, and skips the action
-  when none does.
-- Whether an omitted `dependencies` list stays empty. If Resilience Hub fills it from discovery, the ECS action would
-  drop traffic from cart's tasks to those names (mostly unrelated), and the report lists them under "Dependencies
-  blocked". The fix would be to name the list, empty or chosen, in the spec.
-- How long after the action begins the errors start (FIS says up to five minutes) and how long after the stop they go on.
+- Which resources the fault reaches. **Answered 2026-10-09: three subnets of us-east-1 and nothing else.** The carts
+  table is tagged `service=cart` and `ChaosAllowed=true` in both Regions (read 2026-10-09). The cart service's discovery
+  (24 resources, read after the assessment) lists three kinds of resource the template's actions act on: six subnets
+  (three per Region), one S3 bucket, and the carts table as two `AWS::DynamoDB::Table` entries, one per Region. The
+  bucket is the failover plan's reports bucket (it takes the plan stack's `service=shared` tag, so every service
+  discovers it, and it has no replication rule). Discovery lists no `AWS::DynamoDB::GlobalTable`, no Transit Gateway and
+  no VPC endpoint. Resilience Hub's page for this test says an action with no resource of its target type is skipped,
+  and that is what the run showed: the experiment's resolved targets were the three us-east-1 subnets (the template's
+  `subnets` target) and none for `dynamodb-global-tables` or `s3-buckets`, and the DynamoDB pause, the S3 pause,
+  MemoryDB, the Transit Gateway, the VPC endpoint action and the SSM, ECS and EKS actions were all skipped. The orders
+  run had suggested that types are resolved beyond what discovery lists (its task action ran although orders lists no
+  `AWS::ECS::Task`); that did not carry over to the DynamoDB pause. The route cut alone did not stop the Region, as
+  expected: it serves from local endpoints. The reports bucket was not touched: the S3 pause resolved no bucket (FIS's
+  own cross-Region scenario targets only buckets that replicate to the destination, and this one does not replicate;
+  that this is the reason was not checked).
+- Whether an omitted `dependencies` list stays empty. **Answered 2026-10-09: it stays empty.** The report's
+  "Dependencies blocked" section says "none listed", and the SSM, ECS and EKS actions were skipped for lack of targets.
+- How long after the action begins the errors start (FIS says up to five minutes) and how long after the stop they go
+  on. **Answered for the route cut only:** the cross-Region views failed 7 minutes 42 seconds after the action began
+  (route action running 18:21:50, first alarm 18:29:32) and recovered 2 to 8 minutes after it completed (18:51:53):
+  us-east-1's four views at 18:53:47 to 18:54:45, us-west-2's at 18:54:32 (home), 18:58:44 (catalog), 18:59:32 (orders)
+  and 18:59:42 (cart). For the DynamoDB pause it is still not known, because the pause did not run.
 - What ARC does with four triggers that are met in the same minutes: start one execution, start four, or start one and
   refuse the rest. The report lists every execution that started, and `make ngrh-test` fails each deactivated Region
   back once.
-- Which endpoint a trigger-started deactivate runs at, and what its comment says (only activates have been seen).
+- Which endpoint a trigger-started deactivate runs at, and what its comment says (only activates have been seen). The
+  first run met no trigger, so both of these are still open.
 - Whether Resilience Hub accepts the five source alarms when a run starts. The API takes only alarms found in a
   failure-mode assessment of the service as test sources, and the alarms were created on 2026-10-06. The cart service
   was assessed again on 2026-10-09 (13:35 to 13:50Z), and CloudTrail shows the discovery session asking CloudWatch about
   all five during it (`hop-carts-errors` and the four `journey-lcl-*` alarms of us-east-1). Orders' first run was
   refused until its service had been assessed after its alarms existed, and once more for one alarm tagged outside its
-  scope, which the preflight now checks. Only a run shows that the assessment was enough here.
+  scope, which the preflight now checks. **Answered 2026-10-09: the assessment was enough.** The run started, Resilience
+  Hub evaluated the four success alarms (all `passed`) and the observability alarm, and ended the run `PASSED`.
 - Control-plane calls on the table, such as `UpdateTable`, are blocked in every Region while the pause lasts (the
   blog), and FIS allows at most 5,040 minutes of this action per MRSC table in a rolling seven days. Do not deploy the
-  table during a run; the limit allows over a hundred 30-minute runs a week.
+  table during a run; the limit allows over a hundred 30-minute runs a week. The first run did not pause the table, so
+  none of this was exercised.
+
+**What the first run leaves open:** how to make the fault reach the carts table, and what the test is if it cannot.
+
+- The table is an `AWS::DynamoDB::GlobalTable` (logical id `DDBGlobalTable`, physical name `cartsTable-dev`, in the
+  stack `carts-db-stack-dev`). The cart service's input source is a tag filter, and discovery by tag lists the table's
+  replica in each Region as an `AWS::DynamoDB::Table`. Resilience Hub's service model accepts a CloudFormation stack ARN
+  as an input source (`cfnStackArn`, next to `resourceTags` in the same union), which would put the stack itself in the
+  service. That discovery then lists an `AWS::DynamoDB::GlobalTable`, and that the pause then takes it as its target,
+  are both untested. The cost of trying is one change to the cart service, a new assessment of about 15 minutes, and a
+  second run of about 36 minutes; the DynamoDB pause is the part that can make the expected result `FAIL`.
+- If the table cannot be reached that way, the test is the route cut alone. What the first run showed is then the
+  expected result: the Region keeps serving, the eight cross-Region views go red, no trigger is met and no failover
+  starts, so the expected result becomes `PASS` and the paragraphs above about the table move to a note on what the
+  test cannot cover.
 
 **What it would mean:** a `FAILED` run as expected says that us-east-1 cannot serve on its own while its carts table
 cannot reach the quorum, and that the failover is what keeps users served. Reads could continue if carts fell back to an
@@ -316,21 +350,25 @@ eventually consistent read when a strongly consistent one fails (the blog sugges
 the price of strong consistency, so the cart and orders journeys would still fail locally.
 
 **Confidence:** inferred from AWS's documentation and the repository's code, with the table's mode and the Region's
-health read from test2; no run exists. `make ngrh-tests` created the test in test2 on 2026-10-09 at 13:35Z, and
-Resilience Hub accepted its parameters as written (both Regions, 30 minutes, the log group, the stop condition) and its
-five alarm sources. It echoes no `dependencies` list, which says that none was stored, not what a run does with none. A
-second reconcile found nothing to change, the static preflight passes, and the live preflight refuses the test only at
-check 8, because test2's plan has no triggers yet. The experiment role in test2 already has every permission the FIS
-documentation lists for this action, including `dynamodb:InjectError` for multi-Region strong consistency tables. That
-statement is conditioned on `dynamodb:FisActionId`, a key the DynamoDB service reference does define for `InjectError`;
-that the request carries it with this action's name is assumed by analogy with the EC2 example in the FIS
-documentation, and a run is what tests it. That ui calls carts on every page is what makes all four journeys fail
-rather than only the two that add to a cart.
+health read from test2; one run exists (2026-10-09), and it did not reach the table. `make ngrh-tests` created the test
+in test2 on 2026-10-09 at 13:35Z, and Resilience Hub accepted its parameters as written (both Regions, 30 minutes, the
+log group, the stop condition) and its five alarm sources. It echoed no `dependencies` list, which said that none was
+stored, and the run confirmed that none is used. A second reconcile found nothing to change, the static preflight
+passed, and the live preflight refused the test only at check 8, because test2's plan had no triggers (with them armed
+for the run, it passed). The experiment
+role in test2 already has every permission the FIS documentation lists for this action, including
+`dynamodb:InjectError` for multi-Region strong consistency tables. That statement is conditioned on
+`dynamodb:FisActionId`, a key the DynamoDB service reference does define for `InjectError`; that the request carries it
+with this action's name is assumed by analogy with the EC2 example in the FIS documentation, and a run that reaches the
+table is what tests it (the first run skipped that action). That ui calls carts on every page is what makes all four
+journeys fail rather than only the two that add to a cart.
 
 ## Runs
 
-Five attempts so far, on the first deployment this ran on. The last two reached a verdict: the first `FAILED`, as
-then expected, and the last `PASSED`, as expected now.
+Six attempts so far, on the first deployment this ran on: five of `orders-broker-dependency` and one of
+`cart-isolation`. The last two of orders reached a verdict: the first `FAILED`, as then expected, and the last
+`PASSED`, as expected now. The one run of `cart-isolation` `PASSED` where `FAIL` is expected, because the fault did not
+reach the carts table. `catalog-recovery` has not been run.
 
 - **2026-10-06 and 2026-10-07, `orders-broker-dependency`: refused twice before it started.** `StartTestRun`
   answered "alarms not discovered for this service". A source alarm, `hop-checkout-errors`, is tagged checkout,
@@ -380,3 +418,31 @@ then expected, and the last `PASSED`, as expected now.
     the run `PASSED`, so a passing run takes about 21 minutes from its start.
   - The fault reached the two ECS tasks and blocked the broker's host name; FIS finished the experiment itself
     (`completed`, not halted).
+- **2026-10-09, `cart-isolation`, run `2ede1ccb`: `PASSED` after 35 minutes 55 seconds, not as expected (`FAIL`). Only
+  the route cut ran; the DynamoDB pause was skipped.** The eight triggers of test2's plan were armed for the run (plan
+  version 4, 18:18 to 19:09, 51 minutes; version 5 has none again) and none was met. The live preflight passed,
+  including check 8, at 18:20. Times are UTC:
+  - 18:21:32 FIS (experiment `EXPL45tih9fu5STXar`) scheduled the template's nine actions. 18:21:50 the route action,
+    `aws:network:route-table-disrupt-cross-region-connectivity`, started on three subnets of us-east-1. 18:22:04 the
+    other eight were `skipped`, "Target resolution returned empty set": the DynamoDB global table pause, the S3 pause,
+    the MemoryDB pause, the Transit Gateway action, the VPC endpoint action, and the SSM, ECS and EKS dependency
+    actions. `list-experiment-resolved-targets` returned no table and no bucket, and the report's "Dependencies
+    blocked" section said "none listed".
+  - 18:29:32 to 18:29:47 the eight `journey-rmt-*` alarms went to `ALARM`, four in each Region: each Region's canaries
+    could no longer get through to the other. That is 7 minutes 42 seconds after the route action started.
+  - 18:51:53 the route action completed and FIS ended the experiment (`completed`, not halted). us-east-1's four views
+    went `OK` at 18:53:47 to 18:54:45, us-west-2's at 18:54:32 (home), 18:58:44 (catalog), 18:59:32 (orders) and 18:59:42
+    (cart).
+  - No other alarm changed state in either Region: not the four local journeys (the success criteria), not
+    `hop-carts-errors` or any other hop alarm, not `dynamodb-errors`, not `region-degraded`. In 285 samples taken about
+    every 11 seconds from 18:20:51 to 19:12:43, all six services stayed 2 of 2 (minimum 2) in both Regions, the
+    catalog writer stayed in us-east-1 and both ARC health checks stayed healthy.
+  - No plan execution started, so `no-plan-execution` passed, and `region-degraded` for us-west-2 stayed `OK`, so
+    `destination-stayed-ok` passed. The triggers need a local journey red, and none was: a cut between the two Regions,
+    with each serving its own users, starts no failover.
+  - Resilience Hub evaluated the success criteria from 18:52:05 to 18:57:05 and ended the run `PASSED`. After the
+    10-minute wait for the alarms to settle the report was written at 19:07:48, and the tool exited 3 (the observed
+    result is not the expected one).
+  - The triggers were switched off again at 19:09, and the checks that come before arming pass in test2 again: plan
+    version 5 with no triggers, no execution, all 26 journey and region alarms `OK`, six services 2 of 2 in both
+    Regions.
