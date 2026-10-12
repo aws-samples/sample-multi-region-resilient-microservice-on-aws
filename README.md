@@ -342,17 +342,24 @@ Deployments also avoid failing requests while tasks are replaced:
 * **carts warm-up.** The first request a new carts process serves builds its DynamoDB client, fetches the task's credentials and opens its first connection to DynamoDB. That took up to 4.7 seconds on 0.5 vCPU, longer than the 3-second Service Connect timeout on ui's calls. carts now sends itself one cart request at startup, before its readiness probe passes, so its first real request is fast. If the warm-up fails or takes longer than 10 seconds (`carts.startup-warmup.timeout`), carts starts anyway, so a DynamoDB outage can't keep it from starting.
 
 ## Injecting Chaos to simulate failures
-To induce failures into your environment, you can use the `multi-region-scenario.yml` and cause a regional service disruption. This cloudformation template uses AWS Fault Injection Service to simulate disruptions like pausing DynamoDB Global Table replication and disrupting cross region network connectivity from subnets. Running this experiment will also allow you to perform a Regional failover and observe the reconciliation process.
 
-The chaos experiment template is already deployed as part of the solution deployment process.
+The sample injects its faults with the Resilience Hub tests described in [Testing resilience with NGRH](#testing-resilience-with-ngrh). Each test uses AWS Fault Injection Service (FIS) to cause the fault and writes a report that says whether the sample did what it is expected to do. `orders-broker-dependency` and `cart-isolation` stop the fault early when an alarm shows that users in the affected Region are failing. `catalog-recovery` has no stop condition, because it checks that the plan restores service while the fault goes on. The tests are listed in [`deployment/ngrh-tests.json`](deployment/ngrh-tests.json):
 
-The following sequence of steps can be used to test this solution.
+| Test | Fault | Expected result |
+|---|---|---|
+| `orders-broker-dependency` | orders cannot reach its Amazon MQ broker for up to 15 minutes | Pass: the orders journeys keep working without the broker |
+| `catalog-recovery` | catalog cannot reach its database in us-east-1 for 20 minutes | Pass: the Region Switch plan, started by its own [alarm triggers](#3-automatic-failover-and-fail-back), moves traffic to us-west-2 within its 10-minute objective |
+| `cart-isolation` | us-east-1 is cut off from us-west-2 for up to 30 minutes, and replication of the carts table is paused | Fail: while it is cut off, the carts table in us-east-1 refuses strongly consistent reads and writes, and the triggers then fail us-east-1 over |
 
-1. The first step is to get the experimentTemplateId to use in our experiment; use the below command for that and make a note of the id value
-`export templateId=$(aws fis list-experiment-templates --output json --no-cli-pager | jq -r '.experimentTemplates[] | select(.tags["Name"] == "Cross-Region: Connectivity to us-west-2") | .id')`
+To run one, after `make deploy` has finished (it includes `make monitoring` and `make ngrh`):
 
-2. Execute the experiment in the primary Region (us-east-1) using the following command using the templateId from the previous step.
-`aws fis start-experiment --experiment-template-id $templateId`
+1. `make ngrh-tests` creates the tests in Resilience Hub.
+2. `make ngrh-test-preflight TEST=cart-isolation` lists every reason the test should not start, or says that all checks passed.
+3. `make ngrh-test TEST=cart-isolation` injects the fault, follows the run, fails a Region back if the plan moved traffic away from it, and writes the report to `deployment/ngrh-test-reports/`.
+
+[Testing resilience with NGRH](#testing-resilience-with-ngrh) describes the commands, the checks behind them and the report, and [Automatic failover and fail-back](#3-automatic-failover-and-fail-back) what a failover and `make failback` do.
+
+Earlier versions of this sample also deployed a hand-written FIS experiment template, in a stack named `chaos${ENV}` in each Region. It is no longer deployed. If your deployment predates the removal, `make destroy-chaos-engineering` deletes those stacks, and `make destroy-all` still does.
 
 ## Cleanup
 
@@ -381,8 +388,8 @@ drops monthly cost by roughly $1,000.
 | Cost Type | Amount (USD) |
 |-----------|-------------|
 | Upfront Cost | $0.00 |
-| Monthly Cost | ~$3,348 |
-| Total 12 Months Cost* | ~$40,200 |
+| Monthly Cost | ~$3,344 |
+| Total 12 Months Cost* | ~$40,100 |
 
 \* Includes upfront cost. Most line items are flat 24/7 — actual cost will
 vary with the canary schedule, log retention, and workload volume.
@@ -403,11 +410,10 @@ vary with the canary schedule, log retention, and workload volume.
 | Windows EC2 client | $15 | optional (`make client`), t3.small for in-VPC browser testing — not deployed by default |
 | DynamoDB Global Table (MRSC) | $0.30 | small dataset, replicated to other Region |
 | DynamoDB Streams | $0.001 | low GetRecord volume |
-| AWS FIS | $2 | chaos experiments, 20 action-minutes/run |
 | Secrets Manager | $20 | ~50 secrets ($0.40 each) |
 | KMS | $1 | 1 multi-Region CMK + light request volume |
 | CloudWatch Logs | ~$30 | ECS task + app logs (varies with traffic) |
-| **Per-Region subtotal** | **~$1,635** | |
+| **Per-Region subtotal** | **~$1,633** | |
 
 ### Shared / Global Costs (charged once, not per Region)
 
@@ -423,10 +429,24 @@ vary with the canary schedule, log retention, and workload volume.
 
 | | Monthly Cost |
 |---|---|
-| US East (N. Virginia) | ~$1,635 |
-| US West (Oregon) | ~$1,635 |
+| US East (N. Virginia) | ~$1,633 |
+| US West (Oregon) | ~$1,633 |
 | Shared / global | ~$78 |
-| **Total** | **~$3,348** |
+| **Total** | **~$3,344** |
+
+### Resilience Hub and test costs (optional, not in the totals above)
+
+Resilience Hub bills a service from the moment its first failure mode assessment completes (`make ngrh-assess`), so a deployment that never runs one pays nothing for it. The tests are billed by FIS, per action that runs. Prices are from the [Resilience Hub](https://aws.amazon.com/resilience-hub/pricing/) and [FIS](https://aws.amazon.com/fis/pricing/) pricing pages.
+
+| Item | Cost | Configuration |
+|------|------|----------------|
+| Resilience Hub services | $90 a month | 6 services × $15 per service per month once assessed. Two failure mode assessments a month are included for a service with 150 or fewer resources. Each further assessment is $0.10 per resource, with a minimum of 50 resources ($5) |
+| Dependency discovery | up to $60 a month | The pricing page lists Automated Dependency Assessment as an add-on at $10 per service per month, and the sample turns dependency discovery on for all 6 services |
+| `orders-broker-dependency` run | up to $1.50 | 1 FIS action (packet loss on orders' tasks) for up to 15 minutes at $0.10 per action-minute. Its stop condition can end it sooner |
+| `catalog-recovery` run | $2.00 | 1 action (packet loss on catalog's tasks) for 20 minutes. It has no stop condition |
+| `cart-isolation` run | up to $6.00 | 2 actions (the cross-Region route cut and the pause of the carts table's replication) for up to 30 minutes. Its stop condition normally ends it sooner |
+
+FIS charges for the minutes an action is active, whatever number of resources it affects, so an action that is skipped for lack of targets costs nothing. The isolation test's template has more actions than this sample has targets for (Transit Gateway, S3, VPC endpoints, MemoryDB). A deployment whose discovery lists those resources pays $0.10 per action-minute for each action that then runs.
 
 ### Cost-reduction levers
 

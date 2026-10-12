@@ -67,13 +67,14 @@ EXPECTED_STACK_TAGS = {
 # The apps stack holds the ECS cluster, so it must never get a stack tag.
 UNTAGGED_STACKS = {"apps"}
 
-# Stacks outside the NGRH model: deployment tooling, test clients, the
-# hand-built chaos experiment, the NGRH stack itself and the catalog
-# reconciliation and secret-rotation helpers. Their resources stay out of
-# discovery. A new stack must be added to one of these three groups, so
-# whether its resources are discovered is a deliberate choice.
+# Stacks outside the NGRH model: deployment tooling, test clients, the NGRH
+# stack itself and the catalog reconciliation and secret-rotation helpers.
+# Their resources stay out of discovery. A new stack must be added to one of
+# these three groups, so whether its resources are discovered is a deliberate
+# choice. The hand-built chaos experiment (stack chaos) is no longer deployed,
+# so it is not in the list: a deploy of it that came back would fail
+# test_every_stack_deploy_is_classified.
 OUTSIDE_MODEL_STACKS = {
-    "chaos",
     "client",
     "convergence-watcher",
     "crdr-catalog-ssm",

@@ -30,7 +30,7 @@ endif
 
 deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_infrastructure standby_ecs global_routing \
 	canaries_primary canaries_standby restore-reconciliation monitoring \
-	region-switch arc-dns-status secrets-rotation chaos-engineering ngrh
+	region-switch arc-dns-status secrets-rotation ngrh
 
 deploy-primary: test-creds create-peer primary_infrastructure primary_ecs
 	@echo "Deploy the Synthetic Canaries in ${PRIMARY_REGION}"
@@ -595,14 +595,6 @@ destroy-load-generator:
 	@aws cloudformation wait stack-delete-complete --stack-name load-generator${ENV} --region ${PRIMARY_REGION} 2>/dev/null || true
 	@aws cloudformation wait stack-delete-complete --stack-name load-generator${ENV} --region ${STANDBY_REGION} 2>/dev/null || true
 
-chaos-engineering: primary_infrastructure standby_infrastructure
-	@echo "Creating chaos experiments in ${PRIMARY_REGION}"
-	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(PRIMARY_REGION) --query "Parameter.Value" --output text ))
-	@aws cloudformation deploy --template-file ./chaos/multi-region-scenario.yaml --stack-name chaos${ENV} --region ${PRIMARY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} Region=${STANDBY_REGION}
-	@echo "Creating chaos experiments in ${STANDBY_REGION}"
-	$(eval result:=$(shell aws ssm get-parameter --name canaryBucketName$(ENV) --region $(STANDBY_REGION) --query "Parameter.Value" --output text ))
-	@aws cloudformation deploy --template-file ./chaos/multi-region-scenario.yaml --stack-name chaos${ENV} --region ${STANDBY_REGION} --capabilities CAPABILITY_NAMED_IAM --parameter-overrides Env=${ENV} Region=${PRIMARY_REGION}
-
 # Per-region convergence watchers (Step Functions). One state machine per
 # region because native SFN SDK integrations are same-region only. The
 # self-update CodeBuild starts one execution per region after submitting the
@@ -653,6 +645,10 @@ destroy-cloudmap-namespace:
 		./delete-cloudmap-namespace.sh retail-store-ar${ENV} $$region || rc=1; \
 	done; exit $$rc
 
+# `make chaos-engineering` and its FIS experiment template (stack chaos${ENV}) are gone: the NGRH tests inject these faults
+# now (README, "Injecting Chaos to simulate failures"). This target stays so a deployment made before the removal can
+# still delete its chaos stacks, and destroy-infra still calls it. A stack that does not exist is not an error: the
+# delete succeeds on it and the waiter counts a missing stack as deleted.
 destroy-chaos-engineering:
 	@echo "Deleting Chaos Engineering stacks"
 	@aws cloudformation delete-stack --stack-name chaos${ENV} --region ${PRIMARY_REGION}

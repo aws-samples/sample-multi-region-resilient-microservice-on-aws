@@ -185,7 +185,7 @@ jobs:
 
           # destroy-all stops at its first failing target, so a stall anywhere in
           # the database chain leaves every stack queued behind it -- secrets-rotation,
-          # codebuild, arc-dns-status, chaos, monitoring, ... -- untouched, and the
+          # codebuild, arc-dns-status, monitoring, ... -- untouched, and the
           # secrets-rotation Lambda's ENIs then pin baseInfra's subnets. Sweep every
           # stack of this run that is neither a database nor a VPC stack first, which
           # is the Makefile's own order (those go before the databases, the VPC stacks
