@@ -117,46 +117,43 @@ A *user journey* is a business-meaningful path through the application. Each jou
 
 | User journey | Services exercised |
 |---|---|
-| Browse Catalog | ui, catalog, assets |
+| Browse Catalog | ui, catalog, assets, cart |
 | Manage Cart | ui, cart |
 | Checkout & Place Order | ui, checkout, orders, cart |
-| View Orders | ui, orders |
+| View Orders | ui, orders, cart |
 
 Notes:
 * `ui` is the only public entry point (ALB + Route 53/ARC health checks) and fans out to the backends via ECS Service Connect, so it participates in every journey.
+* `cart` participates in every journey too. The ui asks it for the cart on every page it renders (`BaseController.populateCommon` in `source/ui`), so a stalled cart service fails browsing and the order list as well as the cart and checkout pages.
 * `checkout` orchestrates the order: it reads the cart and calls `orders` to create the order on submit (an inter-service dependency beyond the UI-centric hub-and-spoke diagram).
 * Operational concerns (CloudWatch Synthetics canaries, the ARC Region Switch runbook) are **not** modeled as journeys — they are detection/recovery mechanisms, not user-facing paths.
 
 ### Resiliency policies (tiers)
 
-Two policies express the resilience requirements. Each uses **one RTO/RPO bar applied across all disruption types** (AZ, hardware, software, Region); the per-disruption breakdown comes from the assessment, not from differentiated targets.
+Two policies express the resilience requirements. Each uses **one RTO/RPO bar applied across all disruption types** (AZ, hardware, software, Region); the per-disruption breakdown comes from the assessment, not from differentiated targets. A policy is attached to a service, not to a journey.
 
-| Tier | RTO | RPO | Applied to journeys |
+| Policy | RTO | RPO | Applied to services |
 |---|---|---|---|
-| **Tier-1** (revenue funnel) | 10 min | 0 | Browse Catalog, Checkout & Place Order |
-| **Tier-2** (standard) | 15 min | 5 min | Manage Cart, View Orders |
+| **Tier-1** (zero data loss) | 10 min | 0 | ui, cart, orders |
+| **Tier-2** (RPO-relaxed) | 10 min | 5 min | catalog, checkout, assets |
 
 Justification:
-* **Tier-1 = the revenue funnel.** Browsing the catalog gates *all* sales (no browse → no purchase) and checkout is the revenue transaction itself, so both get the strictest targets.
-* **Tier-1 RTO is 10 minutes — the realistic Active/Active floor.** Resilience Hub treats ~10 minutes as the minimum achievable RTO for an Active/Active topology (failure detection + DNS TTL + connection drain + service stabilization). An aspirational 5-minute target is flagged as unachievable across every service, which drowns out the genuinely actionable findings; 10 minutes is the honest target and lets the real architecture gaps surface.
-* **Tier-2 = important but degraded-tolerable.** Managing the cart (mid-funnel) and viewing past orders (post-purchase/support) can tolerate a longer recovery and small data-loss window without direct revenue impact.
+* **The RTO is 10 minutes in both policies, the realistic Active/Active floor.** Resilience Hub treats ~10 minutes as the minimum achievable RTO for an Active/Active topology (failure detection + DNS TTL + connection drain + service stabilization). An aspirational 5-minute target is flagged as unachievable across every service, which drowns out the genuinely actionable findings; 10 minutes is the honest target and lets the real architecture gaps surface.
 * **RPO 0 for Tier-1 is honest for the write path** because Orders uses Aurora DSQL and Carts uses DynamoDB Global Tables — strongly consistent across Regions. The only data lost in a regional failover is in-flight checkout session state in ElastiCache (not a system of record; the customer simply re-enters it).
-* **Browse Catalog is a read path on Aurora Global Database (asynchronous replication),** so a strict RPO 0 is not physically achievable there. This is an accepted compensating control rather than a defect: catalog data is read-only in-Region and written by an external, re-runnable ingest from an external system of record, so any unreplicated catalog updates are recovered by re-running ingest with no unrecoverable data loss. This rationale is recorded as a Resilience Hub **assertion** on the `catalog` service.
+* **Tier-2 relaxes the RPO to 5 minutes where the data is asynchronous or transient.** Catalog is a read path on Aurora Global Database (asynchronous replication), so a strict RPO 0 is not physically achievable there. This is an accepted compensating control rather than a defect: catalog data is read-only in-Region and written by an external, re-runnable ingest from an external system of record, so any unreplicated catalog updates are recovered by re-running ingest with no unrecoverable data loss. This rationale is recorded as a Resilience Hub **assertion** on the `catalog` service. Checkout keeps its session state in ElastiCache, which is not a system of record, and assets serves static files and holds no data.
 
-### Service tier = strictest journey it serves
+### Which policy each service has
 
-A service can carry only one policy, so each service inherits the **strictest tier of any journey it participates in**:
+| Service | In journeys | Policy | Data |
+|---|---|---|---|
+| ui | all four | Tier-1 | none |
+| cart | all four | Tier-1 | DynamoDB global table |
+| orders | Checkout & Place Order, View Orders | Tier-1 | Aurora DSQL |
+| catalog | Browse Catalog | Tier-2 | Aurora Global Database (asynchronous replication) |
+| checkout | Checkout & Place Order | Tier-2 | ElastiCache (session state) |
+| assets | Browse Catalog | Tier-2 | none (static files) |
 
-| Service | In journeys | Effective tier |
-|---|---|---|
-| ui | all four (incl. two Tier-1) | Tier-1 |
-| catalog | Browse Catalog (T1) | Tier-1 |
-| assets | Browse Catalog (T1) | Tier-1 |
-| checkout | Checkout & Place Order (T1) | Tier-1 |
-| orders | Checkout (T1) + View Orders (T2) | Tier-1 |
-| cart | Checkout (T1) + Manage Cart (T2) | Tier-1 |
-
-All six services resolve to Tier-1 because every service participates in at least one revenue-funnel (Tier-1) journey. This is intentional: a service shared between a Tier-1 and a Tier-2 journey **must** meet the stricter target to satisfy the Tier-1 journey. The tier differentiation therefore lives at the **journey** layer (two Tier-1, two Tier-2), while the **service** layer is uniformly Tier-1 here. An application with services used *exclusively* by lower-tier journeys would show a mix of service tiers.
+The policy is set on each service in `deployment/ngrh.yaml`; it is not the strictest policy among the service's journeys. Catalog, checkout and assets take part in the Browse Catalog and Checkout & Place Order journeys and carry Tier-2.
 
 ### Region scope
 

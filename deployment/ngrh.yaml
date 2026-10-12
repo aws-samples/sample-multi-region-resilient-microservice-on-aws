@@ -442,8 +442,10 @@ Resources:
 
   # -------------------------------------------------------------------------
   # Services. Each spans both regions and links to the journeys it participates
-  # in via AssociatedSystems.UserJourneyIds. PolicyArn = strictest tier among
-  # the service's journeys.
+  # in via AssociatedSystems.UserJourneyIds. PolicyArn is set per service, not
+  # derived from its journeys: Tier-1 for ui, cart and orders, Tier-2
+  # (RPO-relaxed) for catalog, checkout and assets (README, "Resiliency
+  # policies (tiers)").
   #
   # Resource discovery is TAG-BASED: each service's input source is a
   # `service` tag filter matching the service's own name plus `shared`. This
@@ -575,8 +577,14 @@ Resources:
       AssociatedSystems:
         - SystemArn: !GetAtt System.SystemArn
           UserJourneyIds:
+            # Every journey: the ui asks this service for the cart on every
+            # page it renders (BaseController.populateCommon), so a stalled
+            # cart fails browsing and the order list too, not only the cart
+            # and checkout pages.
+            - !GetAtt BrowseJourney.UserJourneyId
             - !GetAtt CartJourney.UserJourneyId
             - !GetAtt CheckoutJourney.UserJourneyId
+            - !GetAtt ViewOrdersJourney.UserJourneyId
       InputSources:
         - ResourceConfiguration:
             ResourceTags:

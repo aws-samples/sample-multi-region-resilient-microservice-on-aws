@@ -297,8 +297,8 @@ for a in "$A_CATALOG_RPO" "$A_CATALOG_AURORA" "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$CATALOG_ARN" "$a"
 done
 
-# --- cart: Cart + Checkout journeys, Tier-1 ---
-CART_ARN=$(ensure_service "cart${ENV}" "$TIER1_ARN" "$CART_ID,$CHECKOUT_ID")
+# --- cart: all four journeys (the ui asks it for the cart on every page), Tier-1 ---
+CART_ARN=$(ensure_service "cart${ENV}" "$TIER1_ARN" "$BROWSE_ID,$CART_ID,$CHECKOUT_ID,$VIEWORDERS_ID")
 add_tag_input_source "$CART_ARN" "cart"
 for a in "$A_FAILOVER" "$A_AZ"; do
   add_assertion "$CART_ARN" "$a"
