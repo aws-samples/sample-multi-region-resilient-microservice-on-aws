@@ -88,11 +88,49 @@ inputs, the four `journey-lcl-*` alarms of us-east-1 and the four `journey-rmt-*
 
 Expected result: PASS
 
+**First run (2026-10-12, run `5cd025f3`): `PASSED` after 25 minutes 50 seconds, as expected.** The fault was a real one:
+FIS ran `aws:ecs:task-network-packet-loss` on catalog's two tasks in us-east-1 from 13:30:52 to 13:51:05, the full 20
+minutes (`completed`, nothing stopped it), against the two database endpoints; its EC2 and EKS actions had no targets
+and were skipped. The eight triggers of test2's plan were armed from 13:28 to 13:57 (plan versions 8 and 9). Times are
+UTC:
+
+- 13:31 the canaries that stay in us-east-1 (`lcl`) and the ones that go through the DNS name (`global`) began to fail for
+  catalog and home, and for cart and orders too: all four journeys failed there. The ui load balancer in us-east-1 returned
+  a 5xx for every request it received from 13:32 to 13:50 (8 to 12 a minute).
+- 13:33:07 to 13:33:58 the eight journey alarms of us-east-1 and its `region-degraded` went to `ALARM`; 13:33:32 to 13:34:42
+  the four `journey-rmt-*` alarms of us-west-2 did.
+- 13:33:44, **2 minutes 52 seconds after the fault began**, the orders trigger started a graceful deactivate of us-east-1
+  (`us-west-2/a2e073cbeafa5ab3`, at us-west-2's endpoint, comment "Execution started by automated trigger [Deactivate
+  us-east-1: its orders journey fails there, and us-west-2 sees it fail too while us-west-2 is healthy]"). It started 12
+  seconds after its last condition (`journey-rmt-orders` in us-west-2, 13:33:32) was met. The conditions of the catalog,
+  home and cart triggers were met at 13:33:52, 13:33:58 and 13:34:42, and ARC started no second execution.
+- The plan: the six scale-ups in us-west-2, from 2 to 4 tasks each, ran in parallel and ended after 65 seconds (assets)
+  to 191 seconds (carts, 13:36:55); DNS moved from 13:36:55 to 13:38:55; the catalog switchover took 13:38:55 to 13:39:55;
+  the application health step took until 13:40:32. The execution ended `completed`, with an ARC recovery time of **6
+  minutes 48 seconds** against the objective of 10.
+- The global canaries failed in 6 to 7 one-minute runs (13:31 to 13:36 for cart and orders, 13:31 to 13:37 for catalog and
+  home), so users of the DNS name saw errors until the DNS answers changed. The `journey-global-*` alarms were `OK` again
+  at 13:39:10 (cart), 13:39:16 (orders), 13:40:26 (catalog) and 13:40:32 (home): 8 minutes 18 seconds to 9 minutes 40
+  seconds after the fault began, and 6 to 7 minutes after they went red. Resilience Hub's verdict for each: "The alarm
+  recovered to OK before the recovery-time deadline and remained OK until the test ended."
+- From 13:31 to 14:00 us-west-2 served all of its own canaries, local and global, at 100%, and `region-degraded` for
+  us-west-2 never changed. Its `rmt` canaries (its view of us-east-1) failed until the fault ended.
+- 13:51:05 the fault ended. The local journeys of us-east-1 were `OK` again from 13:53:52 to 13:54:58 (the canaries
+  recovered in the 13:52 minute, the alarms need a few clean minutes) and `region-degraded` at 13:54:58. Resilience Hub
+  evaluated the success criteria from 13:51:17 to 13:56:18 and ended the run `PASSED`.
+- The tool waited ten minutes, wrote the report at 14:07, saw that the plan had deactivated us-east-1, and failed it back
+  once it and its view from us-west-2 had been `OK` for ten minutes: the activate (`us-east-1/971195f1d41e8399`, graceful)
+  ran 14:07:31 to 14:09:33, the six us-west-2 services went back from 4 to 2 tasks, and the catalog writer returned to
+  us-east-1 in 1 minute 2 seconds. It was done at 14:11:06. The triggers were switched off at 13:57:16, before the
+  fail-back, as in the isolation run. By 14:17 test2 was at its baseline (15 of 15 checks).
+- The run check `deactivate-completed` passed. The report lists the two database endpoints as dependencies blocked and
+  `hop-catalog-slow` as the observability alarm (`ALARM` 13:36:22 to 13:58:22).
+
 **Why:** the fault touches only catalog's tasks in us-east-1. Catalog can no longer read its database, so the
 catalog journey and the home journey, which both call catalog through ui, fail from us-east-1 after two of three
-one-minute canary runs. That meets one trigger: `journey-lcl-<journey>` for us-east-1 is red, `journey-rmt-<journey>`
-for us-west-2 (its view of us-east-1) is red, and `region-degraded` for us-west-2 is `OK`, because the fault does
-not reach it. The plan then scales the six services up in us-west-2 to twice their 24-hour peak in us-east-1,
+one-minute canary runs (on 2026-10-12 cart and orders failed too). That meets one trigger: `journey-lcl-<journey>` for
+us-east-1 is red, `journey-rmt-<journey>` for us-west-2 (its view of us-east-1) is red, and `region-degraded` for
+us-west-2 is `OK`, because the fault does not reach it. The plan then scales the six services up in us-west-2 to twice their 24-hour peak in us-east-1,
 moves DNS, and switches the catalog database over to us-west-2, in that order. The global journeys recover once
 the new DNS answers reach their canaries. Resilience Hub passes the run when all four are back to `OK` within the
 10 minutes of the multi-Region objective in the resiliency policy and stay there.
@@ -106,6 +144,10 @@ and the run went on) or paused does not count.
 deactivate starting a few minutes after the fault, its three steps completed, and ARC's own recovery time under
 the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be healthy for ten minutes and runs
 `make failback REGION=us-east-1`, which the report records.
+
+**Against the run of 2026-10-12:** all of it held. The run ended `PASSED`; `deactivate-completed` passed; the plan
+started 2 minutes 52 seconds after the fault, its nine steps completed, and ARC's recovery time was 6 minutes 48 seconds
+against 10; the tool failed us-east-1 back after ten healthy minutes and the report records it.
 
 **What would contradict it:**
 
@@ -122,7 +164,13 @@ the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be hea
   DNS has moved, all before the 10 minutes of the objective can be said to hold from the fault. So a `FAILED` from
   the clock is possible even with every step working. The report's timeline shows where the time went. Either the
   alarms or the plan get faster (the scale-up is the largest part; services that start faster, or a higher
-  minimum in the standby Region, would shorten it), or the expectation changes to what the run shows.
+  minimum in the standby Region, would shorten it), or the expectation changes to what the run shows. The first run
+  (2026-10-12) was not decided by the clock but came close on its strictest reading: Resilience Hub does not say from
+  when it counts its recovery-time deadline; the four global alarms were green 6 to 7 minutes after they went red, and
+  8 minutes 18 seconds to 9 minutes 40 seconds after the fault began, the last of them 32 seconds before ten minutes had
+  passed since the fault action began running (13:31:04). The plan itself, from its start to green, took 6 minutes 48
+  seconds; the 2 minutes 52 seconds from the fault to the plan's start are the detection, and they are what a slower
+  alarm or a slower service would lengthen.
 - The run check fails with no deactivate: no trigger fired. The evidence alarms say which of the three conditions
   was missing. If the plan has no triggers the deployment was made with `AUTOMATIC_FAILOVER=disabled`, and
   preflight refuses the run before it starts.
@@ -148,49 +196,44 @@ the objective of 10 minutes. `make ngrh-test` then waits for us-east-1 to be hea
   operator-started deactivate, in mode `graceful` and with the same comment shape.
 - **A deactivate ends `completed`.** 9 of the demo account's 10 did (one was cancelled), all graceful.
 
-**Not known before the first run:**
+**Not known before the first run, and what the first run (2026-10-12) showed:**
 
 - Whether Resilience Hub only records the plan named in `regionSwitchPlan` (current documentation) or starts it
-  itself (the template's own description says "to execute during the test"). The report lists every execution that
-  started during the run with its mode and comment, and a second execution started a moment after the first would
-  be this.
-- Whether a trigger-started execution ends `completedMonitoringApplicationHealth` or `completed`; both count. A
-  manual deactivate ended `completed`.
+  itself (the template's own description says "to execute during the test"). **Answered: it records it.** One execution
+  started during the run, at 13:33:44 by a trigger, and none from Resilience Hub; the report lists it with its mode and
+  comment.
+- Whether a trigger-started execution ends `completedMonitoringApplicationHealth` or `completed`; both count. **Answered:**
+  `completed`, like a manual deactivate (and like the trigger-started one of the `cart-isolation` run).
 - Whether `StartTestRun` accepts the five source alarms. The API says only alarms found during a service assessment
   can be test sources. Catalog's assessment of 2026-09-08 was older than all five alarms (created 2026-10-06), so it
-  was assessed again on 2026-10-08 (17:28 to 17:43Z, 19 findings, no cost) before any run. For orders an assessment
-  was neither needed nor enough to explain a refusal (a mis-tagged alarm was the cause), so whether the first
-  assessment's age alone would have refused the alarms was never tested. If the run is refused with "alarms not
-  discovered" now, look at the alarms' tags against the service's input sources first (preflight does), not at the
-  assessment.
+  was assessed again on 2026-10-08 (17:28 to 17:43Z, 19 findings, no cost) before any run. **Answered: it accepts them
+  after that assessment.** The run started at 13:30 and Resilience Hub evaluated all four success alarms (all `passed`) and
+  the observability alarm. Whether the first assessment's age alone would have refused the alarms was never tested.
+- How long from the fault to the start of the plan. **Answered: 2 minutes 52 seconds** (fault 13:30:52, plan 13:33:44),
+  of which the first alarm took until 13:33:07 and ARC's own delay from the last condition to the start was 12 seconds.
+- Which endpoint an alarm-started deactivate runs at: **us-west-2's**, the surviving Region's, as an operator-started one does.
+- Whether the fault leaves the plan able to finish. **Answered: yes.** The fault was at the network level of catalog's
+  tasks and the cluster itself stayed available, so the switchover took 60 seconds as without a fault; a fault that also
+  slows the primary database is not what this test does, and the paused-switchover case in the README's runbook is still
+  unexercised.
 
-**Confidence:** some for the setup, none for the result. `make ngrh-tests` created the test in test2 on 2026-10-08
-at 17:02Z, and Resilience Hub accepted its parameters as written (the plan ARN, both database endpoints, 20 minutes,
-the impaired and recovery Regions, the log group, no stop condition) and its five alarm sources. A second reconcile
-found nothing to change, the static preflight passes, and the live preflight refuses the test only at check 8,
-because test2's plan has no triggers yet; its capacity part ran on the real numbers (the most tasks any service ran
-in us-east-1 in 24 hours was 4, so the scale-up asks for at most 8 of 10). Test2's plan was then updated to this branch's
-step order, without triggers (2026-10-08 18:23Z, plan version 2 to 3, same ARN): ARC accepted the workflow, the
-10-minute objective, the 26 associated alarms and the reports bucket, and its own evaluation passed at both endpoints
-with no warnings.
+**Confidence:** one run, in test2, on 2026-10-12, and it matched the expectation in every point above. `make ngrh-tests`
+created the test on 2026-10-08 at 17:02Z, and Resilience Hub accepted its parameters as written (the plan ARN, both
+database endpoints, 20 minutes, the impaired and recovery Regions, the log group, no stop condition) and its five alarm
+sources. Test2's plan had been updated to this branch's step order, without triggers (2026-10-08 18:23Z, plan version 2
+to 3, same ARN): ARC accepted the workflow, the 10-minute objective, the 26 associated alarms and the reports bucket, and
+its own evaluation passed at both endpoints with no warnings. The plan and `make failback` had each run once for real
+before, by an operator in test2 on 2026-10-08, with no fault and no trigger: a graceful deactivate of us-east-1 completed
+in 6 minutes 18 seconds, ARC's report rated it Good with 0 errors, and `make failback REGION=us-east-1` ran from its
+preflight to its end without a fix (19:04:25 to 19:08:32Z; activate 2 minutes 6 seconds, writer back in 1 minute 19
+seconds). Both switchovers made the Region that gave up the writer fail its catalog-backed journeys for about a minute
+(its catalog got `connection refused` and reconnected without restarting a task).
 
-The plan has since run once for real, and so has `make failback`, both by an operator in test2 on 2026-10-08, with no
-fault and no trigger. A graceful deactivate of us-east-1 (started 18:41:56Z at us-west-2's endpoint) completed in
-6 minutes 18 seconds, ARC's report rated it Good with 0 errors, and the Aurora writer moved to us-west-2 by switchover.
-`make failback REGION=us-east-1` then ran from its preflight to its end without a fix (19:04:25 to 19:08:32Z): the
-activate took 2 minutes 6 seconds, the capacity reset put six services back to 2 and a minimum of 2 in us-west-2, and
-the writer returned to us-east-1 in 1 minute 19 seconds. Afterwards every ECS count, Auto Scaling minimum and maximum,
-task definition, health check, cluster state and alarm matched the state taken before, and the plan was unchanged.
-Both switchovers made the Region that gave up the writer fail its catalog-backed journeys for about a minute (its
-catalog got `connection refused` and reconnected without restarting a task); no alarm fired on the Region itself, and
-the three `journey-rmt-*` alarms that test it from outside were in alarm for two minutes after the failover. The
-replay of the two days before shows one trigger met: the first `orders-broker-dependency` run on 2026-10-07, which is
-explained, and neither switchover met a trigger.
-
-No trigger has been deployed to test2, no run of `catalog-recovery` exists, and no execution has been started by an
-alarm, so what is still untested against the real service is: that the eight triggers start the plan, which endpoint
-an alarm-started deactivate runs at, how long it takes from the fault, and whether the fault leaves the plan able to
-finish. The first live run is the check.
+What one run cannot show: the margin. The global alarms were green 9 minutes 40 seconds after the fault began at the
+latest, which is inside the objective on every reading but not by much on the strictest one, and a slower scale-up (one
+more minute for carts) or a slower alarm would have moved it. The run check cannot tell a plan that is quick from one
+that is just fast enough; the report's timeline and ARC's recovery time are what to read, and more runs would say how
+much they vary.
 
 ## cart-isolation
 
@@ -457,10 +500,10 @@ journeys fail rather than only the two that add to a cart; the canaries showed a
 
 ## Runs
 
-Seven attempts so far, on the first deployment this ran on: five of `orders-broker-dependency` and two of
-`cart-isolation`. The last two of orders reached a verdict: the first `FAILED`, as then expected, and the last
+Eight attempts so far, on the first deployment this ran on: five of `orders-broker-dependency`, two of
+`cart-isolation` and one of `catalog-recovery`. The last two of orders reached a verdict: the first `FAILED`, as then expected, and the last
 `PASSED`, as expected now. The first run of `cart-isolation` `PASSED` where `FAIL` is expected, because the fault did not
-reach the carts table; the second reached it and `FAILED`, as expected. `catalog-recovery` has not been run.
+reach the carts table; the second reached it and `FAILED`, as expected. The one run of `catalog-recovery` `PASSED`, as expected.
 
 - **2026-10-06 and 2026-10-07, `orders-broker-dependency`: refused twice before it started.** `StartTestRun`
   answered "alarms not discovered for this service". A source alarm, `hop-checkout-errors`, is tagged checkout,
@@ -578,3 +621,13 @@ reach the carts table; the second reached it and `FAILED`, as expected. `catalog
     services 2 of 2 in both Regions, the writer in us-east-1, both ARC health checks healthy, 26 journey and
     region-degraded alarms `OK`. The one exception was `hop-ui-errors` in us-west-2, which went to `ALARM` at 12:19:02,
     four minutes after the 5xx of the fail-back's switchover (one at 12:15).
+- **2026-10-12, `catalog-recovery`, run `5cd025f3`: `PASSED` after 25 minutes 50 seconds, as expected (`PASS`).** The first
+  alarm-started failover with a real fault. Test2's plan had its eight triggers armed from 13:28:08 to 13:57:16 (plan
+  versions 8 and 9); the static and live preflight passed at 13:28 and 13:30, check 8 included. The full account is under
+  "First run" in the `catalog-recovery` section: fault 13:30:52 to 13:51:05 on catalog's two tasks in us-east-1, the
+  orders trigger started a graceful deactivate of us-east-1 at 13:33:44 (2 minutes 52 seconds after the fault began), it
+  completed at 13:40:32 with an ARC recovery time of 6 minutes 48 seconds against 10, the four global alarms were green
+  again from 13:39:10 to 13:40:32, and the tool failed us-east-1 back between 14:07 and 14:11 (activate about 2 minutes,
+  writer back in 1 minute 2 seconds) after the triggers had been switched off. Test2 was at its baseline at
+  14:17 (15 of 15 checks). The first trigger-started failover of 2026-10-12 11:51 (the `cart-isolation` run) had taken
+  5 minutes 57 seconds from its start.
