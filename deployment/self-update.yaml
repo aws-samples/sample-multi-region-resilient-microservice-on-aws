@@ -278,12 +278,23 @@ Resources:
                 # 1. Rebuild every service image from current main (fresh base layers).
                 #    set -e: stop at the first failed build instead of tagging and
                 #    pushing an image that does not exist and moving on to the next.
+                #    A failed build is tried twice more, 30 s and then 60 s later. The
+                #    builds download their dependencies, and two of the three scheduled
+                #    repaves from 2026-09-27 to 2026-10-11 ended on a single download
+                #    error (Maven Central reset the connection; gopkg.in answered 502).
+                #    A real defect fails all three attempts and ends the build as before.
                 - |
                   set -e
                   for ENTRY in catalog:catalog checkout:checkout ui:ui carts:cart assets:assets orders:orders; do
                     SVC=${ENTRY%%:*}; SRC=${ENTRY##*:}
                     echo "Building $SVC from source/$SRC..."
-                    docker build --pull -t $SVC:$TAG source/$SRC
+                    ATTEMPT=1
+                    until docker build --pull -t $SVC:$TAG source/$SRC; do
+                      if [ $ATTEMPT -ge 3 ]; then echo "Building $SVC failed $ATTEMPT times, giving up"; exit 1; fi
+                      echo "Building $SVC failed (attempt $ATTEMPT of 3), trying again in $((ATTEMPT * 30)) s..."
+                      sleep $((ATTEMPT * 30))
+                      ATTEMPT=$((ATTEMPT + 1))
+                    done
                     for R in $PRIMARY_REGION $STANDBY_REGION; do
                       docker tag $SVC:$TAG $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${SVC}${ENV_SUFFIX}:$TAG
                       docker push $AWS_ACCOUNT_ID.dkr.ecr.$R.amazonaws.com/${SVC}${ENV_SUFFIX}:$TAG
