@@ -259,7 +259,7 @@ sources below, and borne out by the second run), because of four facts.
 The alarms were predicted to change in this order: `dynamodb-errors` first (one 60-second period), then `hop-carts-errors`
 and the journeys (two failed minutes out of three), then `region-degraded`, which stops the experiment. On 2026-10-12 the
 journeys and `region-degraded` changed as predicted, but `dynamodb-errors` did not change at all and `hop-carts-errors`
-changed three minutes after the stop (11:52:29). The table did return the errors; the alarm cannot see them (see "A defect
+changed three minutes after the stop (11:52:29). The table did return the errors; the alarm could not see them (see "A defect
 found in the DynamoDB alarms"). FIS documents that replication may go on for up to five minutes after the action begins;
 here the pause was `running` 2 minutes 5 seconds after it was scheduled and the first errors were counted in the minute
 that began 1 to 2 minutes later. Nothing changed in us-west-2 apart from its views of us-east-1: the pause isolates
@@ -302,7 +302,7 @@ experiment was `stopped` (11:49:38) and `region-degraded-us-east-1` was among th
 table was among what the fault reached. `destination-stayed-ok` passed. `no-plan-execution` failed by listing one deactivate
 of us-east-1, started by a trigger (the home journey's), whose steps completed, with a recovery time of 5 minutes 57
 seconds. The tool failed us-east-1 back (12:12:20 to 12:15:52). The second did not hold: `dynamodb-errors-us-east-1` did
-not change, because the alarm cannot see the errors.
+not change, because the alarm could not see the errors (fixed on this branch since, not yet deployed to test2).
 
 **What would contradict it:**
 
@@ -396,17 +396,41 @@ fault was over before the failover moved a request: the journeys of us-east-1 we
 plan's DNS step began (11:54:39). The failover ran for a fault that had already ended. `catalog-recovery`, which has no
 stop condition and a 20-minute fault, is the test for that.
 
-**A defect found in the DynamoDB alarms, which this branch did not change.** `dynamodb-errors-${Region}${Env}` is a
-composite of `dynamodb-user-errors` and `dynamodb-system-errors`, and it did not change state on 2026-10-12 although the
-table returned system errors for four minutes. `dynamodb-system-errors` alarms on `SystemErrors` with the single
+**A defect found in the DynamoDB alarms, and its fix (on this branch, not deployed anywhere).** `dynamodb-errors-${Region}${Env}`
+is a composite of `dynamodb-user-errors` and `dynamodb-system-errors`, and it did not change state on 2026-10-12 although
+the table returned system errors for four minutes. `dynamodb-system-errors` alarmed on `SystemErrors` with the single
 dimension `TableName`, but CloudWatch holds that metric for `cartsTable-dev` only with the dimensions `TableName` and
 `Operation` (`Query` and `GetItem` here: 33 and 33 errors in the 11:47 minute, then 44 and 44, 34 and 35, 6 and 6, and 3),
-so the alarm receives no data and treats the missing data as not breaching ("no datapoints were received for 1 period").
-`dynamodb-user-errors` has the same kind of problem: `UserErrors` carries no table dimension at all (CloudWatch lists
-no `UserErrors` series for `cartsTable-dev`). Both alarms are in the repository's first commit (`45e6b04`) and in `main`.
-The report lists `dynamodb-errors` among the evidence, so it says "no state change" for it whatever the table does. A
-fix is an alarm per operation that carts calls (the two seen here are `GetItem` and `Query`), or a metric-math sum
-over them; the user-errors alarm needs the account-level metric or has to go.
+so the alarm received no data and treated the missing data as not breaching ("no datapoints were received for 1 period").
+`dynamodb-user-errors` had the same kind of problem: `UserErrors` is published once per account and Region with no
+dimension at all (`list-metrics` returns one series, without dimensions), so a `TableName` dimension selected nothing.
+Both alarms are in the repository's first commit (`45e6b04`) and in `main`. The report lists `dynamodb-errors` among the
+evidence, so it said "no state change" for it whatever the table did.
+
+The fix keeps the names, the threshold (any error in one 60-second period), the missing-data setting, the tag and the
+composite, and changes what the two alarms look at:
+
+- `dynamodb-system-errors` is a metric math alarm, `SUM(METRICS())` over `SystemErrors` with `TableName` and `Operation`
+  for each operation the carts service sends: `GetItem` (mapper `load`), `Query` (`query`), `UpdateItem` (`save`),
+  `DeleteItem` (`delete`) and `BatchWriteItem` (`batchDelete`), and `PutItem` for another save behavior. The table's
+  `SuccessfulRequestLatency` series in test2 are exactly the first five. The sum skips a series with no data in the
+  period, so an operation that has never failed costs nothing.
+- `dynamodb-user-errors` has no dimension, so it now watches every table in the account and Region. DynamoDB counts
+  HTTP 400 errors in it except failed conditional writes, which have their own metric.
+
+Replaying the new expression with `get-metric-data` (the same queries the alarm holds, read-only) on the 11:40 to 12:00
+window of 2026-10-12 gives 66, 88, 69, 12 and 3 for the minutes 11:47 to 11:51, and no data for the quiet windows after
+it. The sum is above zero from the minute 11:47, which began two and a half minutes before the first journey alarm
+changed (11:49:30). The alarm itself has not been created, so this is a check of the expression, not of the alarm. The
+alarms now see more than they did, and not only in fault tests: in the 14 days before the run, `SystemErrors` for this
+table had data in three hours (`GetItem` 5 errors on 09-28, `Query` 1 on 09-28 and `GetItem` 7 on 10-01), and
+`UserErrors` in one (2 errors on 09-29), so with the threshold unchanged they would have fired a few times in two weeks
+on single errors. Whether any error should page is a choice that the fix leaves where it was.
+
+`tests/test_dynamodb_alarms.py` pins the shape, and a scan of the carts Java source keeps the alarm's operations equal to
+what the code calls (a new call fails the test until the alarm covers it); 82 deliberate breaks of the template, the
+Java and the scan are caught (`temporary/mutations/dynamodb_alarms.py`, outside the repository). To use it, `make
+monitoring` has to deploy `monitoring.yml` in each Region; the change set in test2 is not created yet.
 
 **What it would mean:** a `FAILED` run as expected says that us-east-1 cannot serve on its own while its carts table
 cannot reach the quorum, which the second run showed. Whether the failover would keep users served while the fault goes

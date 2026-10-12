@@ -127,6 +127,10 @@ Resources:
         - Key: service
           Value: catalog
 
+  # DynamoDB publishes UserErrors once per account and Region, with no dimensions at all (list-metrics shows a single
+  # series), so this alarm watches every table in the account, not only the carts table. It used to name the table in a
+  # TableName dimension, which no UserErrors series has: it received no data and could not leave OK. DynamoDB counts
+  # HTTP 400 errors here except failed conditional writes, which have their own metric.
   DynamoDBUserErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -141,11 +145,15 @@ Resources:
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: TableName
-          Value: !Sub 'cartsTable${Env}'
       TreatMissingData: notBreaching
 
+  # DynamoDB publishes SystemErrors (HTTP 500) per table and per operation, with the dimensions TableName and Operation,
+  # and never for the table alone. An alarm on TableName alone received no data (it showed "no datapoints were received")
+  # and stayed OK while the table returned errors. This alarm sums the operations the carts service issues:
+  # mapper.load is GetItem, query is Query, save is UpdateItem (PutItem for another save behavior), delete is
+  # DeleteItem and batchDelete is BatchWriteItem. SUM(METRICS()) skips a series that has no data in the period, so an
+  # operation that has never failed costs nothing. tests/test_dynamodb_alarms.py keeps the list equal to what the
+  # carts source calls.
   DynamoDBSystemErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
@@ -153,16 +161,92 @@ Resources:
       Tags:
         - Key: service
           Value: cart
-      MetricName: SystemErrors
-      Namespace: AWS/DynamoDB
-      Statistic: Sum
-      Period: 60
+      Metrics:
+        - Id: errors
+          Label: SystemErrors
+          Expression: SUM(METRICS())
+          ReturnData: true
+        - Id: getitem
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: SystemErrors
+              Dimensions:
+                - Name: TableName
+                  Value: !Sub 'cartsTable${Env}'
+                - Name: Operation
+                  Value: GetItem
+            Period: 60
+            Stat: Sum
+        - Id: query
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: SystemErrors
+              Dimensions:
+                - Name: TableName
+                  Value: !Sub 'cartsTable${Env}'
+                - Name: Operation
+                  Value: Query
+            Period: 60
+            Stat: Sum
+        - Id: updateitem
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: SystemErrors
+              Dimensions:
+                - Name: TableName
+                  Value: !Sub 'cartsTable${Env}'
+                - Name: Operation
+                  Value: UpdateItem
+            Period: 60
+            Stat: Sum
+        - Id: putitem
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: SystemErrors
+              Dimensions:
+                - Name: TableName
+                  Value: !Sub 'cartsTable${Env}'
+                - Name: Operation
+                  Value: PutItem
+            Period: 60
+            Stat: Sum
+        - Id: deleteitem
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: SystemErrors
+              Dimensions:
+                - Name: TableName
+                  Value: !Sub 'cartsTable${Env}'
+                - Name: Operation
+                  Value: DeleteItem
+            Period: 60
+            Stat: Sum
+        - Id: batchwriteitem
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: AWS/DynamoDB
+              MetricName: SystemErrors
+              Dimensions:
+                - Name: TableName
+                  Value: !Sub 'cartsTable${Env}'
+                - Name: Operation
+                  Value: BatchWriteItem
+            Period: 60
+            Stat: Sum
       EvaluationPeriods: 1
       Threshold: 0
       ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: TableName
-          Value: !Sub 'cartsTable${Env}'
       TreatMissingData: notBreaching
 
   DynamoDBComposite:
