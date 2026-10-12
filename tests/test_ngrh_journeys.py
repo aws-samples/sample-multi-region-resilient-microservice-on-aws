@@ -12,9 +12,16 @@ Two defects led to this file.
    Tier-2 had a 15-minute RTO and applied to journeys, while the template gives Tier-2 (RTO 10 minutes) to catalog,
    checkout and assets and attaches each policy to a service.
 
+3. The catalog service's assertion called Aurora Global's asynchronous replication "an accepted compensating control for
+   the Tier-1 RPO target", but catalog has the Tier-2 policy (RPO 5 minutes). An assertion is an input to the failure mode
+   assessment, so the model must not state a tier its service does not have. The gamma script repeats the assertion
+   texts "verbatim from ngrh.yaml"; nothing checked that.
+
 What this file pins: which journeys each service is in and which policy it has (template, gamma script and README
-agree), each policy's RTO and RPO (template, gamma script and README agree), cart and ui in every journey, and the code
-fact behind the cart decision: every page controller of the ui calls populateCommon, which asks the cart service.
+agree), each policy's RTO and RPO (template, gamma script and README agree), cart and ui in every journey, the code
+fact behind the cart decision (every page controller of the ui calls populateCommon, which asks the cart service), the
+assertions of each service (template and gamma script carry the same texts) and that no assertion names a tier other
+than the one its service has.
 """
 import re
 import sys
@@ -231,3 +238,67 @@ class TestGammaScript:
         expected = {tier: (float(props["AvailabilitySlo"]["Target"]), props["MultiRegion"]["RtoInMinutes"],
                            props["MultiRegion"]["RpoInMinutes"]) for tier, props in POLICIES.items()}
         assert found == expected
+
+
+# ---------------------------------------------------------------------------
+# Assertions: the gamma script says the same as the template, and no text names the wrong tier
+# ---------------------------------------------------------------------------
+
+def _squash(text):
+    """Folded YAML scalars and long shell strings differ only in line breaks: compare them with single spaces."""
+    return " ".join(text.split())
+
+
+def _template_assertions():
+    """service name -> list of assertion texts."""
+    found = {}
+    for r in RESOURCES.values():
+        if r["Type"] != "AWS::ResilienceHubV2::Service":
+            continue
+        name = r["Properties"]["Name"].replace("${Env}", "")
+        found[name] = [_squash(a["Text"]) for a in r["Properties"]["Assertions"]]
+    return found
+
+
+def _gamma_assertions():
+    """service name -> list of assertion texts, as ngrh-gamma-create.sh adds them (its A_* variables, one loop per service)."""
+    texts = {var: _squash(value) for var, value in re.findall(r'^(A_[A-Z_]+)="([^"]*)"$', GAMMA, flags=re.M)}
+    arn_service = {var: name for var, name in re.findall(r'^(\w+_ARN)=\$\(ensure_service "(\w+)\$\{ENV\}"', GAMMA, flags=re.M)}
+    found = {}
+    for variables, arn in re.findall(r'^for a in ((?:"\$A_[A-Z_]+" ?)+); do\n\s+add_assertion "\$(\w+_ARN)" "\$a"', GAMMA, flags=re.M):
+        found[arn_service[arn]] = [texts[var] for var in re.findall(r'\$(A_[A-Z_]+)', variables)]
+    return found
+
+
+TEMPLATE_ASSERTIONS = _template_assertions()
+GAMMA_ASSERTIONS = _gamma_assertions()
+
+
+class TestAssertions:
+    def test_both_cover_the_same_six_services(self):
+        assert sorted(TEMPLATE_ASSERTIONS) == sorted(GAMMA_ASSERTIONS) == sorted(SERVICES)
+
+    @pytest.mark.parametrize("service", sorted(TEMPLATE_ASSERTIONS))
+    def test_the_gamma_script_adds_the_template_assertions_of_the_service(self, service):
+        # The order does not matter to Resilience Hub; a missing, extra or repeated text does.
+        assert sorted(GAMMA_ASSERTIONS[service]) == sorted(TEMPLATE_ASSERTIONS[service])
+
+    def test_every_assertion_variable_of_the_gamma_script_is_used(self):
+        defined = set(re.findall(r'^(A_[A-Z_]+)="', GAMMA, flags=re.M))
+        used = set(re.findall(r'\$(A_[A-Z_]+)', "\n".join(line for line in GAMMA.splitlines() if line.startswith("for a in"))))
+        assert defined == used
+
+    @pytest.mark.parametrize("source,assertions", [("template", TEMPLATE_ASSERTIONS), ("gamma script", GAMMA_ASSERTIONS)])
+    @pytest.mark.parametrize("service", sorted(SERVICES))
+    def test_no_assertion_names_a_tier_the_service_does_not_have(self, source, assertions, service):
+        _, tier = SERVICES[service]
+        named = {tier_name for text in assertions[service] for tier_name in re.findall(r"Tier-\d", text)}
+        assert named <= {tier}, f"{source}: the {service} service has {tier} but its assertions name {sorted(named)}"
+
+    def test_the_catalog_assertion_still_makes_its_case_for_the_rpo(self):
+        # The reword must not lose the point: unreplicated updates are recovered by running the ingest again.
+        (text,) = [t for t in TEMPLATE_ASSERTIONS["catalog"] if t.startswith("Catalog is read-only in-region")]
+        assert "re-running ingest" in text
+        assert "no unrecoverable data loss" in text
+        assert text.endswith("Aurora Global async replication is an accepted compensating control for the RPO target.")
+

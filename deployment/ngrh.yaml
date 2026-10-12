@@ -544,7 +544,7 @@ Resources:
             failover, any unreplicated catalog updates are recovered by
             re-running ingest, so there is no unrecoverable data loss. Aurora
             Global async replication is an accepted compensating control for
-            the Tier-1 RPO target.
+            the RPO target.
         - Text: >-
             Catalog uses Aurora Global Database as its only data store.
         - Text: >-
