@@ -473,7 +473,8 @@ on single errors. Whether any error should page is a choice that the fix leaves 
 `tests/test_dynamodb_alarms.py` pins the shape, and a scan of the carts Java source keeps the alarm's operations equal to
 what the code calls (a new call fails the test until the alarm covers it); 82 deliberate breaks of the template, the
 Java and the scan are caught (`temporary/mutations/dynamodb_alarms.py`, outside the repository). To use it, `make
-monitoring` has to deploy `monitoring.yml` in each Region; the change set in test2 is not created yet.
+monitoring` has to deploy `monitoring.yml` in each Region. In test2 the change sets exist (2026-10-12 14:55Z, one per Region, two
+rows each, neither alarm replaced) and have not been executed.
 
 **What it would mean:** a `FAILED` run as expected says that us-east-1 cannot serve on its own while its carts table
 cannot reach the quorum, which the second run showed. Whether the failover would keep users served while the fault goes
