@@ -1,6 +1,10 @@
 # Build the manager binary
 FROM public.ecr.aws/docker/library/golang:1.27 AS builder
-RUN go env -w GOPROXY=direct
+# Modules come from Go's module mirror and, after any error ("|", not ","), from
+# their own hosts. The mirror alone fails on networks that block proxy.golang.org;
+# the hosts alone (GOPROXY=direct) made each one a build dependency, and the repave
+# of 2026-10-11 failed on a 502 from gopkg.in. go.sum checks every module either way.
+ENV GOPROXY="https://proxy.golang.org|direct"
 
 WORKDIR /workspace
 # Copy the Go Modules manifests

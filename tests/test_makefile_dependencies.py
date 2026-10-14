@@ -145,7 +145,7 @@ class TestParser:
     def test_deploy_all_has_expected_targets(self, makefile_targets):
         deps = makefile_targets["deploy-all"]
         for expected in ("primary_ecs", "standby_ecs", "global_routing",
-                         "region-switch", "secrets-rotation", "monitoring"):
+                         "region-switch", "arc-dns-status", "secrets-rotation", "monitoring"):
             assert expected in deps, f"{expected} missing from deploy-all"
 
 
@@ -219,6 +219,20 @@ class TestDeployOrdering:
     def test_region_switch_after_routing(self, makefile_targets):
         assert is_before(makefile_targets, "global_routing", "region-switch-plan")
         assert is_before(makefile_targets, "region-switch-plan", "region-switch")
+
+    def test_region_switch_plan_after_monitoring(self, makefile_targets):
+        # The plan names the journey alarms monitoring.yml defines as its associated alarms (design 5.6).
+        assert is_before(makefile_targets, "monitoring", "region-switch-plan")
+
+    def test_monitoring_does_not_wait_for_the_plan(self, makefile_targets):
+        # monitoring used to wait for arc-dns-status, which waits for the plan. Nothing in monitoring.yml needs
+        # the plan (the dashboard only charts the metrics the Lambda publishes) and the plan now needs monitoring,
+        # so any of these would be a cycle.
+        for later in ("region-switch-plan", "region-switch", "arc-dns-status"):
+            assert not is_before(makefile_targets, later, "monitoring"), later
+
+    def test_arc_dns_status_after_the_plan(self, makefile_targets):
+        assert is_before(makefile_targets, "region-switch", "arc-dns-status")
 
     def test_secrets_rotation_after_catalog_db(self, makefile_targets):
         assert is_before(makefile_targets, "primary_region_catalog-db", "secrets-rotation")

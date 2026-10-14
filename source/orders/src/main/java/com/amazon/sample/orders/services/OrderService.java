@@ -24,8 +24,6 @@ import com.amazon.sample.orders.messaging.OrdersEventHandler;
 import com.amazon.sample.orders.repositories.OrderRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import jakarta.transaction.Transactional;
@@ -63,6 +61,6 @@ public class OrderService {
     }
 
     public List<OrderEntity> list() {
-        return this.repository.findAll(PageRequest.of(0, 20, Sort.by(Sort.Direction.DESC, "createdOn"))).getContent();
+        return this.repository.findTop20ByOrderByCreatedOnDesc();
     }
 }
