@@ -345,7 +345,7 @@ experiment was `stopped` (11:49:38) and `region-degraded-us-east-1` was among th
 table was among what the fault reached. `destination-stayed-ok` passed. `no-plan-execution` failed by listing one deactivate
 of us-east-1, started by a trigger (the home journey's), whose steps completed, with a recovery time of 5 minutes 57
 seconds. The tool failed us-east-1 back (12:12:20 to 12:15:52). The second did not hold: `dynamodb-errors-us-east-1` did
-not change, because the alarm could not see the errors (fixed on this branch since, not yet deployed to test2).
+not change, because the alarm could not see the errors (fixed since, and deployed to test2 on 2026-10-12, see below).
 
 **What would contradict it:**
 
@@ -439,7 +439,7 @@ fault was over before the failover moved a request: the journeys of us-east-1 we
 plan's DNS step began (11:54:39). The failover ran for a fault that had already ended. `catalog-recovery`, which has no
 stop condition and a 20-minute fault, is the test for that.
 
-**A defect found in the DynamoDB alarms, and its fix (on this branch, not deployed anywhere).** `dynamodb-errors-${Region}${Env}`
+**A defect found in the DynamoDB alarms, and its fix (deployed to test2 on 2026-10-12).** `dynamodb-errors-${Region}${Env}`
 is a composite of `dynamodb-user-errors` and `dynamodb-system-errors`, and it did not change state on 2026-10-12 although
 the table returned system errors for four minutes. `dynamodb-system-errors` alarmed on `SystemErrors` with the single
 dimension `TableName`, but CloudWatch holds that metric for `cartsTable-dev` only with the dimensions `TableName` and
@@ -464,7 +464,7 @@ composite, and changes what the two alarms look at:
 Replaying the new expression with `get-metric-data` (the same queries the alarm holds, read-only) on the 11:40 to 12:00
 window of 2026-10-12 gives 66, 88, 69, 12 and 3 for the minutes 11:47 to 11:51, and no data for the quiet windows after
 it. The sum is above zero from the minute 11:47, which began two and a half minutes before the first journey alarm
-changed (11:49:30). The alarm itself has not been created, so this is a check of the expression, not of the alarm. The
+changed (11:49:30). The alarm was not deployed yet, so this was a check of the expression, not of the alarm. The
 alarms now see more than they did, and not only in fault tests: in the 14 days before the run, `SystemErrors` for this
 table had data in three hours (`GetItem` 5 errors on 09-28, `Query` 1 on 09-28 and `GetItem` 7 on 10-01), and
 `UserErrors` in one (2 errors on 09-29), so with the threshold unchanged they would have fired a few times in two weeks
@@ -473,8 +473,11 @@ on single errors. Whether any error should page is a choice that the fix leaves 
 `tests/test_dynamodb_alarms.py` pins the shape, and a scan of the carts Java source keeps the alarm's operations equal to
 what the code calls (a new call fails the test until the alarm covers it); 82 deliberate breaks of the template, the
 Java and the scan are caught (`temporary/mutations/dynamodb_alarms.py`, outside the repository). To use it, `make
-monitoring` has to deploy `monitoring.yml` in each Region. In test2 the change sets exist (2026-10-12 14:55Z, one per Region, two
-rows each, neither alarm replaced) and have not been executed.
+monitoring` has to deploy `monitoring.yml` in each Region. In test2 that was done from change sets created on 2026-10-12
+at 14:55Z (one per Region, two rows each, neither alarm replaced) and executed at 22:39Z in us-west-2 and at 22:40Z in
+us-east-1. Both stacks ended `UPDATE_COMPLETE`, and only the two alarms changed, in place. On 2026-10-15 the deployed
+`dynamodb-system-errors` alarm's own query returned, over the previous 14 days, 66, 88, 69, 12 and 3 for the minutes
+11:47 to 11:51 of 2026-10-12 in us-east-1 (the numbers of the replay above) and three single-error minutes in us-west-2.
 
 **What it would mean:** a `FAILED` run as expected says that us-east-1 cannot serve on its own while its carts table
 cannot reach the quorum, which the second run showed. Whether the failover would keep users served while the fault goes
