@@ -42,6 +42,7 @@ SMOKE = "Smoke test"
 FAULT = "Run NGRH fault test"
 STOP = "Stop NGRH fault test if still running"
 UPLOAD = "Upload NGRH test reports"
+AGENT_SPACE = "Deploy the DevOps Agent Agent Space"
 TEARDOWN = "Teardown"
 BY_HAND = "env.NGRH_TEST != 'none'"
 
@@ -167,6 +168,47 @@ class TestTheManualFaultRun:
         assert job()["timeout-minutes"] >= 360
 
 
+class TestDevOpsAgentInEveryRun:
+    """The step that deploys the AWS DevOps Agent Agent Space (README, "Investigating with AWS DevOps Agent"). It shows that
+    the stack deploys with the e2e role and that CloudFormation accepts the invoker role's policy on the NGRH stack. It connects
+    no service, because connecting starts a paid investigation for every finding of the service. It runs last, after the tests,
+    because an Agent Space starts a "system learning" task of its own some time after it exists (about 33 minutes in one test
+    account, 27 minutes of it counted in another), and the Teardown deletes it in its first minutes."""
+
+    def test_it_runs_make_devops_agent_with_this_runs_env_from_the_deployment_directory(self):
+        assert step(AGENT_SPACE)["run"] == 'make devops-agent "ENV=${ENV}"'
+        assert step(AGENT_SPACE)["working-directory"] == "deployment"
+
+    def test_it_runs_after_the_deploy_the_tests_and_the_fault_run_and_before_the_teardown(self):
+        assert position(DEPLOY) < position(RECONCILE) < position(PREFLIGHT) < position(SMOKE) < position(FAULT)
+        assert position(FAULT) < position(STOP) < position(UPLOAD) < position(AGENT_SPACE) < position(TEARDOWN)
+
+    def test_it_has_no_condition_so_a_run_that_already_failed_never_creates_an_agent_space(self):
+        # the default condition of a step is success(); the Teardown (always()) deletes whatever exists either way
+        assert "if" not in step(AGENT_SPACE)
+
+    def test_it_is_the_only_step_that_makes_one_and_make_deploy_does_not(self):
+        # `make devops-agent` and nothing longer: `make devops-agent-connect` and the like are other targets
+        makers = [s["name"] for s in steps() if re.search(r"\bmake devops-agent(?![\w-])", s.get("run", ""))]
+        assert makers == [AGENT_SPACE]
+
+    def test_no_step_connects_a_service_or_picks_an_agent_space_by_hand(self):
+        for s in steps():
+            run = s.get("run", "")
+            assert "devops-agent-connect" not in run and "DEVOPS_AGENT_SERVICES" not in run, f"{s['name']} would start paid investigations"
+            assert "DEVOPS_AGENT_SPACE_ARN" not in run, f"{s['name']} would override the Agent Space of the stack the run just made"
+
+    def test_the_teardown_deletes_it_through_destroy_all_which_deletes_the_ngrh_stack_first(self):
+        assert 'make destroy-all "ENV=${ENV}"' in step(TEARDOWN)["run"]
+        rule = next(line for line in MAKEFILE.read_text().splitlines() if line.startswith("destroy-all:"))
+        prerequisites = rule.split(":", 1)[1].split()
+        assert prerequisites.index("destroy-ngrh") < prerequisites.index("destroy-devops-agent")
+
+    def test_the_e2e_role_has_the_statement_the_step_needs(self):
+        role = (REPO / "deployment" / "github-oidc-role.yaml").read_text()
+        assert "Sid: DevOpsAgentSpace" in role
+
+
 def automatic_failover_given(chosen):
     """What the job's AUTOMATIC_FAILOVER expression gives when ``ngrh_test`` is ``chosen`` (None when the run was not started by hand).
 
@@ -242,7 +284,7 @@ class TestReadme:
 
     def test_it_explains_the_ci_steps_and_the_manual_input_by_the_names_the_workflow_uses(self):
         readme = (REPO / "README.md").read_text()
-        for name in (RECONCILE, PREFLIGHT):
+        for name in (RECONCILE, PREFLIGHT, AGENT_SPACE):
             assert f"`{name}`" in readme, f"the README does not name the step {name}"
         input_name = next(iter(dispatch_inputs()))
         assert f"`{input_name}`" in readme

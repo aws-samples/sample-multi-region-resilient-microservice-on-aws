@@ -182,7 +182,7 @@ This narrows each service's assessment to its own resources and the shared ones.
 
 The `ngrh` stack also creates the two IAM roles a Resilience Hub test run executes as:
 
-* **`ngrh-invoker${ENV}`** is each service's invoker role. Besides the assessment policy it carries `AWSResilienceHubResilienceTestingPolicy`, which lets Resilience Hub create, start and stop the AWS FIS experiment behind a test run. Without it every test run fails at `fis:CreateExperimentTemplate`.
+* **`ngrh-invoker${ENV}`** is each service's invoker role. Besides the assessment policy it carries `AWSResilienceHubResilienceTestingPolicy`, which lets Resilience Hub create, start and stop the AWS FIS experiment behind a test run. Without it every test run fails at `fis:CreateExperimentTemplate`. When the deployment uses an AWS DevOps Agent Agent Space it also carries permissions for it ([Investigating with AWS DevOps Agent](#investigating-with-aws-devops-agent)).
 * **`ngrh-test-experiment${ENV}`** is the role to choose as the test's IAM role. FIS assumes it to inject the faults, and it carries the permissions the FIS actions reference lists for every action in the four Resilience Hub test templates (Availability Zone recovery, dependency validation, multi-Region isolation, multi-Region recovery). Only FIS experiments in this account can assume it.
 
 People running tests do not need to create IAM roles. They need `iam:PassRole` on these two roles (passed to `resiliencehub.amazonaws.com` and `fis.amazonaws.com`) and pick them when they create a test.
@@ -196,6 +196,58 @@ Faults on ECS tasks (`aws:ecs:task-network-packet-loss`, used by the dependency 
 Each task role can create the sidecar's SSM activation and pass the managed-instance role to SSM, and nothing else is added to it. ECS Exec stays off, because FIS can't run these actions on a task that has it enabled.
 
 **Upgrading a deployment that already has the weekly repave.** The repave's commands are part of its stack, and it clones `main` for the files they read. Run `make self-update` once the sidecar is on `main`; a repave still running the older commands would copy the bare SSM agent image over the sidecar's image, because it mirrors every public image the sidecar buildspec names. After that, `make mirror-sidecar-images` (or the next repave) rebuilds the image, and the service's tasks need replacing to pick it up. A live `make ngrh-test-preflight` says which tasks aren't registered with SSM.
+
+### Investigating with AWS DevOps Agent
+
+This part is optional. Resilience Hub can hand a failure mode assessment finding, or a test run, to [AWS DevOps Agent](https://docs.aws.amazon.com/devopsagent/latest/userguide/) to investigate, once a service is connected to an Agent Space. The sample creates the Agent Space and gives Resilience Hub access to it, and leaves the connecting to you, because it costs money:
+
+```
+make devops-agent
+```
+
+This deploys the stack `devops-agent${ENV}` (`deployment/devops-agent.yaml`) in the primary Region. It creates:
+
+* an Agent Space, `multi-region-microservice${ENV}`, with elevated actions off, so the agent analyses and recommends but takes no action in your account;
+* the role DevOps Agent assumes to investigate your account, `devops-agent-space${ENV}`, with the managed policy AWS documents for it, `AIDevOpsAgentAccessPolicy`. That is mostly read access, and it also allows `cloudtrail:StartQuery` and `support:CreateCase`;
+* the role behind the Agent Space's operator web app, `devops-agent-operator${ENV}`, with `AIDevOpsOperatorAppAccessPolicy`;
+* the association that lets the Agent Space investigate this account. It finds the account's resources in every Region, so one Agent Space serves both of the sample's Regions.
+
+If the NGRH model is deployed, `make devops-agent` then runs `make ngrh`, which finds the stack and gives the invoker role `ngrh-invoker${ENV}` the inline policy `ResilienceHubDevOpsAgentAccess`. If it is not deployed yet, `make ngrh` does this when you run it. The policy has the eight actions Resilience Hub calls: `GetAgentSpace`, `GetOperatorApp` and `ListAssociations` to check the connection, and `CreateBacklogTask`, `GetBacklogTask`, `UpdateBacklogTask`, `ListExecutions` and `ListJournalRecords` to start, follow and cancel an investigation. They apply to this one Agent Space. The policy in the AWS documentation allows any Agent Space (`agentspace/*`); the template does not, and it refuses an ARN with a wildcard in it. The invoker role does not get `AIDevOpsAgentFullAccess` or `AIDevOpsOperatorAppAccessPolicy`, which the documentation says Resilience Hub must not have because they include actions that change an Agent Space.
+
+Nothing is connected yet, so no investigation has started. **Connecting a service is a separate step, because it starts paid work.**
+
+**Connecting starts one investigation for every finding.** When a service is connected, Resilience Hub starts a DevOps Agent investigation for each failure mode finding the service has, open or resolved, all at once. DevOps Agent runs three at a time and queues the rest, and bills each by the agent-second. The Resilience Hub pages about DevOps Agent do not say this. In a test deployment, connecting `orders` (21 findings) started 21 investigations within four seconds, and the six services of this sample had 111 findings between them. Those investigations ran for 6 to 40 minutes each by the clock. `aws devops-agent get-account-usage` shows the month's investigation hours, and the pricing page below says what is billed. A test run of a connected service starts one more.
+
+```
+make devops-agent-status
+make devops-agent-connect DEVOPS_AGENT_SERVICES="orders"
+```
+
+`make devops-agent-status` shows each service's connection and how many findings it has, which is how many investigations connecting it starts. `make devops-agent-connect` refuses unless you name the services (`ui`, `catalog`, `cart`, `checkout`, `orders`, `assets`, or `all`), and before it changes anything it prints each service's finding count and the total. Start with one service. A service already connected to the Agent Space is left alone and starts nothing. A connection that fails, for example because IAM has not yet added the new policy, is reported once with Resilience Hub's reason and is not sent again; run the command again for it when the cause is fixed. Findings change as you assess and fix things, so the count can differ from run to run.
+
+Once a service is connected, a test run of it starts an investigation, and each of its failure mode assessment findings offers **Chat with DevOps Agent**.
+
+The operator web app is at the address `aws devops-agent get-operator-app --agent-space-id <AgentSpaceId> --query operatorAppUrl` prints; the `AgentSpaceId` is an output of the stack.
+
+**What you need.**
+
+* A primary Region where DevOps Agent is available ([Supported Regions](https://docs.aws.amazon.com/devopsagent/latest/userguide/about-aws-devops-agent-supported-regions.html)). The Agent Space is created there.
+* AWS CLI 2.38.0 or later, the first version that can connect a service. The tool checks and says so if yours is older.
+* Permission to create IAM roles and pass them to DevOps Agent, and to administer DevOps Agent. The managed policy `AIDevOpsAgentFullAccess` has every DevOps Agent action the stack uses and no IAM actions, so add those. The e2e role in `deployment/github-oidc-role.yaml` has both: the IAM actions in `IAMForCFN`, and the DevOps Agent actions in `DevOpsAgentSpace`, which is limited to this account's Agent Spaces in us-east-1 and us-west-2.
+
+**If the first deploy fails.** AWS's own template notes that creating an Agent Space right after its roles can fail while IAM catches up. A failed first deploy leaves the stack in `ROLLBACK_COMPLETE`. Run `make destroy-devops-agent`, then `make devops-agent` again.
+
+**Cost.** DevOps Agent bills the time the agent spends working, $0.0083 per agent-second, for investigations, chat and custom agents, and its [pricing page](https://aws.amazon.com/devops-agent/pricing/) says there is no charge while the agent is idle. That page works an 8-minute investigation out at about $4. Connecting a service starts one investigation per finding (above), and every test run of a connected service starts one more, so a connected deployment pays for each on top of the test's own cost. `aws devops-agent get-account-usage` shows the month's investigation hours so far. An Agent Space also starts a task of its own, "system learning", with no service connected: in one test account it began about 33 minutes after the Agent Space was created, ran for 22 minutes, and the usage command counted it as `monthlyAccountSystemLearningHours`; in another test account, an Agent Space left up for about two hours counted 27 minutes of it. The pricing page lists no charge for it, so check your usage if you leave an Agent Space running. Paid AWS Support plans get monthly DevOps Agent credits, which the pricing page explains.
+
+**Which Agent Space `make ngrh` uses.** In this order:
+
+1. `DEVOPS_AGENT_SPACE_ARN`, when you set it, even to nothing. This is how to use an Agent Space you made yourself, in the console for example: `make ngrh DEVOPS_AGENT_SPACE_ARN=arn:aws:aidevops:<Region>:<account-id>:agentspace/<agent-space-id>`.
+2. The Agent Space of the `devops-agent${ENV}` stack, when that stack exists.
+3. None. The stack keeps what it has, so a deployment that never used DevOps Agent is not touched. `make deploy` runs `make ngrh`, so the deploy step of the `e2e` workflow gets this case and creates no Agent Space; the workflow's own step for that comes after the tests (next paragraph).
+
+**In the `e2e` workflow.** After the tests, and before the teardown, the step `Deploy the DevOps Agent Agent Space` runs `make devops-agent`. It shows that the stack deploys with the e2e role (the `DevOpsAgentSpace` statement of `github-oidc-role.yaml`) and that CloudFormation accepts the invoker role's policy on the NGRH stack. It connects no service, so no investigation starts, and it only calls CloudFormation, so the runner's AWS CLI does not need to be 2.38.0. It comes last because of the system learning task under **Cost**: the teardown's `make destroy-all` deletes the NGRH stack and then the Agent Space within minutes of its creation, and a run that failed earlier never reaches the step. A fork whose e2e role was created before this step existed has to deploy `github-oidc-role.yaml` again first, or the step fails with `AccessDenied`.
+
+**Taking it away.** `make devops-agent-disconnect` takes every service off the Agent Space. `make ngrh DEVOPS_AGENT_SPACE_ARN=` (set to nothing) disconnects the services and removes the invoker role's access. `make destroy-devops-agent` deletes the stack, and with it the Agent Space and its investigations and chat history, for good; it refuses while the NGRH stack still uses the Agent Space. `make destroy-all` deletes the NGRH stack first and then the Agent Space, and `make destroy-ngrh` disconnects the services before it deletes them. That disconnect is best effort: on an AWS CLI older than 2.38.0, which cannot see whether a service is connected, `make destroy-ngrh` prints that it skipped it and goes on, so a deployment that made its Agent Space and connected nothing tears down cleanly. A service you connected by hand stays connected until you disconnect it. `make devops-agent-disconnect`, which you ask for, still refuses an old AWS CLI.
 
 ### Testing resilience with NGRH
 
@@ -250,6 +302,7 @@ If your terminal drops or you press Ctrl-C, the run carries on in AWS: nothing i
     * Amazon CloudWatch
     * Amazon Simple Storage Service
     * Amazon Application Recovery Controller
+    * AWS DevOps Agent (optional, only for [Investigating with AWS DevOps Agent](#investigating-with-aws-devops-agent))
 
 * Install the latest version of AWS CLI v2 on your machine, including configuring the CLI for a specific account and region
 profile.  Please follow the [AWS CLI setup instructions](https://github.com/aws/aws-cli).  Make sure you have a 
@@ -367,6 +420,8 @@ Delete all the cloudformation stacks and associated resources from both the Regi
     make destroy-all
     ```
 
+If you created the optional DevOps Agent Agent Space (`make devops-agent`), `make destroy-all` deletes it too, after the NGRH stack, and with it the Agent Space's investigations and chat history. That cannot be undone.
+
 ## Cost
 
 The following table provides a sample monthly cost breakdown for running the
@@ -442,6 +497,7 @@ Resilience Hub bills a service from the moment its first failure mode assessment
 | `orders-broker-dependency` run | up to $1.50 | 1 FIS action (packet loss on orders' tasks) for up to 15 minutes at $0.10 per action-minute. Its stop condition can end it sooner |
 | `catalog-recovery` run | $2.00 | 1 action (packet loss on catalog's tasks) for 20 minutes. It has no stop condition |
 | `cart-isolation` run | up to $6.00 | 2 actions (the cross-Region route cut and the pause of the carts table's replication) for up to 30 minutes. Its stop condition normally ends it sooner |
+| DevOps Agent investigation | about $4 each | Optional (`make devops-agent`). $0.0083 per agent-second, so AWS's own example of an 8-minute investigation is $3.98. Every test run of a connected service starts one, and chat sessions are billed the same way. Nothing is billed while the agent is idle. See the [DevOps Agent pricing](https://aws.amazon.com/devops-agent/pricing/) page, including the monthly credits that paid AWS Support plans get |
 
 FIS charges for the minutes an action is active, whatever number of resources it affects, so an action that is skipped for lack of targets costs nothing. The isolation test's template has more actions than this sample has targets for (Transit Gateway, S3, VPC endpoints, MemoryDB). A deployment whose discovery lists those resources pays $0.10 per action-minute for each action that then runs.
 

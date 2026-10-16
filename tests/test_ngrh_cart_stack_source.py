@@ -96,8 +96,10 @@ class TestTemplate:
             assert not pattern.fullmatch(refused), refused
 
     def test_a_condition_says_the_parameter_is_set(self):
+        # HasDevOpsAgentSpace belongs to the invoker role's DevOps Agent policy; see tests/test_ngrh_devops_agent.py.
         assert _template()["Conditions"] == {
-            "HasCartsDbStack": {"Fn::Not": [{"Fn::Equals": [{"Ref": "CartsDbStackArn"}, ""]}]}
+            "HasCartsDbStack": {"Fn::Not": [{"Fn::Equals": [{"Ref": "CartsDbStackArn"}, ""]}]},
+            "HasDevOpsAgentSpace": {"Fn::Not": [{"Fn::Equals": [{"Ref": "DevOpsAgentSpaceArn"}, ""]}]},
         }
 
     def test_the_cart_service_reads_the_stack_as_a_second_source_when_the_parameter_is_set(self):
@@ -192,7 +194,10 @@ def _overrides(deploy):
 
 
 def _lookups(calls):
-    return [call for call in calls if call[:2] == ["cloudformation", "describe-stacks"]]
+    """The lookups of the carts table's stack. The recipe also looks for the devops-agent stack (see
+    tests/test_ngrh_devops_agent_make.py), which these tests are not about."""
+    return [call for call in calls if call[:2] == ["cloudformation", "describe-stacks"]
+            and call[call.index("--stack-name") + 1].startswith("carts-db-stack")]
 
 
 class TestMakeNgrh:
@@ -231,7 +236,8 @@ class TestMakeNgrh:
 
     def test_the_lookup_comes_before_the_deploy(self, tmp_path):
         _, calls = _make_ngrh(tmp_path)
-        order = [call[1] for call in calls if call[0] == "cloudformation"]
+        order = [call[1] for call in calls if call[0] == "cloudformation"
+                 and not (call[1] == "describe-stacks" and not call[call.index("--stack-name") + 1].startswith("carts-db-stack"))]
         assert order == ["describe-stacks", "deploy"]
 
 
