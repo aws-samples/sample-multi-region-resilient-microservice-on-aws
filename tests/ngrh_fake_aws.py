@@ -16,7 +16,7 @@ AwsCliError with a message, the way the CLI reports an API error.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ngrh_testing.aws import AwsCliError
 
@@ -150,6 +150,15 @@ class FakeAws:
         self.ecs_tasks: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, service name) -> running tasks
         self.ssm_instances: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}  # (region, task ARN) -> instances tagged with it
         self.task_definitions: Dict[str, Dict[str, Any]] = {}
+        self.devops_cli_supported = True   # False: an AWS CLI too old to know update-service --dev-ops-agent-configuration
+        self.devops: Dict[str, Dict[str, Any]] = {}  # service ARN -> its devOpsAgentConfiguration as get-service shows it; absent: not connected
+        # What successive get-service reads show after an update-service that connects, one list for each such call a
+        # service has had (the last list serves every call after): a status, or a (status, reason) pair; the last item sticks.
+        self.devops_scripts: List[List[Any]] = [["CONNECTING", "CONNECTED"]]
+        self.devops_stuck: Set[str] = set()   # service ARNs that keep their configuration when asked to disconnect
+        self.findings: Dict[str, int] = {}    # service ARN -> how many failure mode findings it has (default 3)
+        self._devops_attempts: Dict[str, int] = {}
+        self._devops_reads: Dict[str, List[Any]] = {}
         self._next = 0
         self._handlers: Dict[Tuple[str, str], Callable[..., Dict[str, Any]]] = {
             ("sts", "get-caller-identity"): self._identity,
@@ -182,6 +191,9 @@ class FakeAws:
             ("ecs", "describe-task-definition"): self._describe_task_definition,
             ("resiliencehubv2", "list-test-templates"): self._list_test_templates,
             ("resiliencehubv2", "list-services"): self._list_services,
+            ("resiliencehubv2", "get-service"): self._rh_get_service,
+            ("resiliencehubv2", "list-failure-mode-findings"): self._rh_list_findings,
+            ("resiliencehubv2", "update-service"): self._rh_update_service,
             ("resiliencehubv2", "list-input-sources"): self._list_input_sources,
             ("resiliencehubv2", "list-tests"): self._list_tests,
             ("resiliencehubv2", "get-test"): self._get_test,
@@ -417,6 +429,67 @@ class FakeAws:
         arns = [a for a in (self.outputs or {}).get("ServiceArns", "").split(",") if a]
         arns += sorted({r["serviceArn"] for r in self.runs.values()} - set(arns))      # someone else's services
         return {"serviceSummaries": [{"serviceArn": a, "name": a.rsplit("/", 1)[-1]} for a in arns]}
+
+    # --- Resilience Hub services and their DevOps Agent connection ---------------------------
+
+    def _rh_service(self, service_arn: str) -> Dict[str, Any]:
+        """The Service structure get-service and update-service answer with."""
+        service: Dict[str, Any] = {"serviceArn": service_arn, "name": service_arn.rsplit("/", 1)[-1].replace("-id", "")}
+        if service_arn in self.devops:
+            service["devOpsAgentConfiguration"] = dict(self.devops[service_arn])
+        return service
+
+    def _rh_get_service(self, region: Optional[str], service_arn: str) -> Dict[str, Any]:
+        if not self._known_service(service_arn):
+            raise self._error("resiliencehubv2", "get-service", "ResourceNotFoundException", f"{service_arn} does not exist")
+        config = self.devops.get(service_arn)
+        reads = self._devops_reads.get(service_arn)
+        if config is not None and reads:
+            step = reads.pop(0) if len(reads) > 1 else reads[0]
+            status, reason = step if isinstance(step, tuple) else (step, "")
+            config = {k: v for k, v in config.items() if k != "statusReason"}
+            config["status"] = status
+            if reason:
+                config["statusReason"] = reason
+            self.devops[service_arn] = config
+        return {"service": self._rh_service(service_arn)}
+
+    def _rh_list_findings(self, region: Optional[str], service_arn: str) -> Dict[str, Any]:
+        """The failure mode findings of a service, shaped like the live response (checked against orders-dev: the list
+        is under findingsSummary, each item has findingId, status OPEN or RESOLVED and more). Resilience Hub starts
+        one DevOps Agent investigation for each when the service is connected, resolved ones included."""
+        if not self._known_service(service_arn):
+            raise self._error("resiliencehubv2", "list-failure-mode-findings", "ResourceNotFoundException", f"{service_arn} does not exist")
+        count = self.findings.get(service_arn, 3)
+        return {"findingsSummary": [
+            {"serviceArn": service_arn, "findingId": f"{service_arn.rsplit('/', 1)[-1]}-finding-{i}", "name": f"finding {i}",
+             "severity": "HIGH", "status": "RESOLVED" if i % 5 == 4 else "OPEN"} for i in range(count)]}
+
+    def _rh_update_service(self, region: Optional[str], service_arn: Optional[str] = None,
+                           dev_ops_agent_configuration: Optional[Dict[str, Any]] = None,
+                           generate_cli_skeleton: Optional[str] = None) -> Dict[str, Any]:
+        """Only the DevOps Agent configuration is modelled. ``--generate-cli-skeleton input`` makes no AWS call: it
+        prints the operation's input, which has the member only if the AWS CLI is new enough to know it."""
+        if generate_cli_skeleton:
+            skeleton: Dict[str, Any] = {"serviceArn": ""}
+            if self.devops_cli_supported:
+                skeleton["devOpsAgentConfiguration"] = {"agentSpaceArn": ""}
+            return skeleton
+        assert service_arn is not None
+        if not self._known_service(service_arn):
+            raise self._error("resiliencehubv2", "update-service", "ResourceNotFoundException", f"{service_arn} does not exist")
+        assert self.devops_cli_supported, "an AWS CLI that does not know --dev-ops-agent-configuration cannot send it"
+        space_arn = (dev_ops_agent_configuration or {}).get("agentSpaceArn")
+        if space_arn:
+            attempt = self._devops_attempts.get(service_arn, 0)
+            self._devops_attempts[service_arn] = attempt + 1
+            self._devops_reads[service_arn] = list(self.devops_scripts[min(attempt, len(self.devops_scripts) - 1)])
+            self.devops[service_arn] = {"agentSpaceArn": space_arn, "agentSpaceId": space_arn.rsplit("/", 1)[-1],
+                                        "region": space_arn.split(":")[3], "status": "CONNECTING"}
+        elif service_arn not in self.devops_stuck:
+            self.devops.pop(service_arn, None)
+            self._devops_reads.pop(service_arn, None)
+        return {"service": self._rh_service(service_arn)}
 
     def _known_service(self, service_arn: str) -> bool:
         return service_arn in (self.outputs or {}).get("ServiceArns", "").split(",") or any(r["serviceArn"] == service_arn for r in self.runs.values())

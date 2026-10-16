@@ -89,7 +89,8 @@ Resources:
   # Regional services: CloudFormation, ECS, ECR, RDS/Aurora, DynamoDB, DSQL,
   # ElastiCache, MQ, EC2, ELB, Lambda, KMS (regional keys), SecretsManager,
   # SSM, CloudWatch (logs/metrics/alarms/dashboards/synthetics), SNS, EventBridge,
-  # CodeBuild, ApplicationAutoScaling, FIS, Cloud Map (namespace teardown only).
+  # CodeBuild, ApplicationAutoScaling, FIS, Cloud Map (namespace teardown only),
+  # and AWS DevOps Agent (Agent Spaces only, see DevOpsAgentSpace).
   # All scoped to us-east-1 / us-west-2.
   RegionalServicesPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -172,6 +173,44 @@ Resources:
               - dynamodb:DescribeTable
               - dynamodb:DescribeGlobalTable
             Resource: !Sub 'arn:aws:dynamodb:*:${AWS::AccountId}:table/*'
+          # AWS DevOps Agent, for the Agent Space stack (devops-agent.yaml, make
+          # devops-agent). CloudFormation runs the AWS::DevOpsAgent::AgentSpace and
+          # AWS::DevOpsAgent::Association handlers as this role, so it needs the
+          # aidevops actions those handlers use to create, read, update and delete
+          # them. They apply to this account's Agent Spaces in the two Regions and
+          # to nothing else. The two roles the stack creates, the policies on them,
+          # passing them to DevOps Agent and its service-linked role are already
+          # covered by IAMForCFN below, so nothing is added there. Left out on
+          # purpose:
+          #   - aidevops:ListAgentSpaces: only the list handler uses it, and no
+          #     stack operation lists.
+          #   - aidevops:UpdateOperatorAppIdpConfig and sso:*: external identity
+          #     provider and IAM Identity Center sign-in. The stack uses IAM sign-in.
+          #   - aidevops:GetOperatorAppTeams: the handlers declare it, but IAM has no
+          #     such action (IAM Access Analyzer reports it as nonexistent, as it
+          #     does for an invented name), and neither does the AWS managed policy
+          #     AIDevOpsAgentFullAccess.
+          - Sid: DevOpsAgentSpace
+            Effect: Allow
+            Action:
+              - aidevops:CreateAgentSpace
+              - aidevops:GetAgentSpace
+              - aidevops:UpdateAgentSpace
+              - aidevops:DeleteAgentSpace
+              - aidevops:EnableOperatorApp
+              - aidevops:DisableOperatorApp
+              - aidevops:GetOperatorApp
+              - aidevops:AssociateService
+              - aidevops:DisassociateService
+              - aidevops:UpdateAssociation
+              - aidevops:GetAssociation
+              - aidevops:ListAssociations
+              - aidevops:TagResource
+              - aidevops:UntagResource
+              - aidevops:ListTagsForResource
+            Resource:
+              - !Sub 'arn:aws:aidevops:us-east-1:${AWS::AccountId}:agentspace/*'
+              - !Sub 'arn:aws:aidevops:us-west-2:${AWS::AccountId}:agentspace/*'
 
   # Global services: IAM, Route 53, ARC Region Switch, S3, STS.
   # IAM and S3 don't support aws:RequestedRegion conditions; the trust

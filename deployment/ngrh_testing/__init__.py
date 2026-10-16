@@ -16,4 +16,6 @@ Commands:
   run           preflight, start one test's run, follow it to its end and write its report (make ngrh-test).
   stop          stop the test's active run (make ngrh-test-stop).
   report        collect a run's report as JSON and markdown (make ngrh-test-report).
+  devops-agent  connect named NGRH services to an AWS DevOps Agent Agent Space, disconnect them, or show
+                their state and finding counts (make devops-agent-connect, -disconnect and -status).
 """

@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  AWS DevOps Agent for the multi-region microservice (optional): an Agent Space,
+  the two IAM roles it needs, its operator web app and the association that
+  lets the agent investigate this account. Resilience Hub (the ngrh stack) uses
+  the Agent Space to investigate failure mode assessment findings and test runs.
+  Deployed by `make devops-agent`; `make ngrh` then gives the invoker role
+  access to it. Connecting a service is a separate step that costs money
+  (`make devops-agent-connect`), so nothing here connects one. Shaped after
+  the CloudFormation template in the AWS DevOps Agent User Guide.
+
+# ---------------------------------------------------------------------------
+# AWS DevOps Agent is a regional service, so this stack goes in a Region where
+# it is available (PRIMARY_REGION must be one). The Agent Space can investigate
+# resources in every Region of the account, so one Agent Space serves both of
+# the sample's Regions. The roles are named with Env, and IAM is global, so
+# deploy one of these stacks per Env.
+# ---------------------------------------------------------------------------
+Parameters:
+  Env:
+    Type: String
+    Default: ""
+    Description: Environment suffix (e.g. -ngrh). Must match the app deploy ENV.
+
+Resources:
+
+  # -------------------------------------------------------------------------
+  # The role DevOps Agent assumes to read this account while it investigates.
+  # AIDevOpsAgentAccessPolicy is the managed policy the AWS documentation gives
+  # it: read access to most services, plus cloudtrail:StartQuery and
+  # support:CreateCase. The trust policy names the service, this account and
+  # the Agent Spaces of this Region, so another account's Agent Space cannot
+  # assume the role. It does not name the one Agent Space this stack creates,
+  # which is how AWS's reference template writes it too; the operator role
+  # below could not name it, because the Agent Space needs that role to exist
+  # first. The inline policy lets the service create the Resource Explorer
+  # service-linked role, which the agent uses to find resources, and nothing
+  # else.
+  # -------------------------------------------------------------------------
+  AgentSpaceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "devops-agent-space${Env}"
+      Description: Assumed by AWS DevOps Agent to investigate this account
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AIDevOpsAgentAccessPolicy
+      Policies:
+        - PolicyName: AllowCreateServiceLinkedRoles
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowCreateServiceLinkedRoles
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer"
+
+  # -------------------------------------------------------------------------
+  # The role behind the operator web app, where people start investigations,
+  # chat with the agent and read its findings. Same trust as above, plus
+  # sts:TagSession, which the web app uses to pass the signed-in person's
+  # identity. AIDevOpsOperatorAppAccessPolicy is the managed policy the AWS
+  # documentation gives it.
+  # -------------------------------------------------------------------------
+  OperatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "devops-agent-operator${Env}"
+      Description: Assumed by the AWS DevOps Agent operator web app
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: aidevops.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:aidevops:${AWS::Region}:${AWS::AccountId}:agentspace/*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AIDevOpsOperatorAppAccessPolicy
+
+  # -------------------------------------------------------------------------
+  # The Agent Space. Elevated actions stay off, so the agent analyses and
+  # recommends but takes no action in the account (they would also need a
+  # third role). The operator app signs people in through IAM: a console
+  # session opens it for 10 minutes at a time. Deleting the Agent Space
+  # deletes its investigations and chat history for good. Both roles are
+  # created before it, as in AWS's reference template, whose troubleshooting
+  # notes say that creating an Agent Space right after its roles can fail while
+  # IAM propagates; if the first deploy fails that way, delete the failed stack
+  # and run it again (README).
+  # -------------------------------------------------------------------------
+  AgentSpace:
+    Type: AWS::DevOpsAgent::AgentSpace
+    DependsOn: AgentSpaceRole
+    Properties:
+      Name: !Sub "multi-region-microservice${Env}"
+      Description: Investigates Resilience Hub findings and test runs for the multi-region microservice sample
+      Preferences:
+        ElevatedActionsEnabled: false
+      OperatorApp:
+        Iam:
+          OperatorAppRoleArn: !GetAtt OperatorRole.Arn
+
+  # -------------------------------------------------------------------------
+  # Lets the agent investigate this account (its monitoring account). The
+  # agent then finds the account's resources in every Region, including both
+  # of the sample's.
+  # -------------------------------------------------------------------------
+  MonitorAssociation:
+    Type: AWS::DevOpsAgent::Association
+    Properties:
+      AgentSpaceId: !GetAtt AgentSpace.AgentSpaceId
+      ServiceId: aws
+      Configuration:
+        Aws:
+          AssumableRoleArn: !GetAtt AgentSpaceRole.Arn
+          AccountId: !Ref "AWS::AccountId"
+          AccountType: monitor
+
+Outputs:
+  AgentSpaceId:
+    Description: The Agent Space's id
+    Value: !GetAtt AgentSpace.AgentSpaceId
+  AgentSpaceArn:
+    Description: The Agent Space's ARN; `make ngrh` gives it to the invoker role, and `make devops-agent-connect` connects the services you name to it
+    Value: !GetAtt AgentSpace.Arn
+  AgentSpaceRoleArn:
+    Description: The role DevOps Agent assumes to investigate this account
+    Value: !GetAtt AgentSpaceRole.Arn
+  OperatorRoleArn:
+    Description: The role behind the operator web app
+    Value: !GetAtt OperatorRole.Arn

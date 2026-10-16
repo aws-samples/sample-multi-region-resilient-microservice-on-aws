@@ -161,6 +161,9 @@ jobs:
           path: deployment/ngrh-test-reports
           if-no-files-found: ignore
           retention-days: 30
+      - name: Deploy the DevOps Agent Agent Space
+        run: make devops-agent "ENV=${ENV}"
+        working-directory: deployment
       - name: Record the message brokers of this run
         if: always()
         run: |-
