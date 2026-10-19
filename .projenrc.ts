@@ -549,6 +549,19 @@ e2e.addJob('e2e', {
       },
     },
     {
+      // README, "Investigating with AWS DevOps Agent". Creates the Agent Space stack, and the NGRH stack then
+      // gives its invoker role access to it, so a run shows that the template deploys with the e2e role (the
+      // DevOpsAgentSpace statement of github-oidc-role.yaml) and that CloudFormation accepts the invoker policy.
+      // It never connects a service: connecting starts a paid investigation for every finding of the service.
+      // It runs last, after the tests, because an Agent Space starts a "system learning" task of its own (in one
+      // test account about 33 minutes after the Agent Space was created, and 27 minutes of it were counted in the
+      // usage of a two-hour test), and the Teardown deletes the stack in its first minutes: destroy-all deletes
+      // the NGRH stack, then the Agent Space. The step has no `if`, so a run that already failed creates none.
+      name: 'Deploy the DevOps Agent Agent Space',
+      workingDirectory: 'deployment',
+      run: 'make devops-agent "ENV=${ENV}"',
+    },
+    {
       // An Amazon MQ broker's three log groups are named by its id and nothing of the run, and the
       // broker is gone by the time the log group step runs, so the ids are written down here, while
       // it still exists. It runs after a failed run too: the ids in the log tell whoever cleans up

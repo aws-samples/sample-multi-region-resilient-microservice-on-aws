@@ -626,7 +626,7 @@ test-creds:
 # destroy-databases-primary depends on destroy-databases-standby.
 # DSQL parallel deletion is handled in destroy-dsql-both-regions via & and wait.
 
-destroy-all: destroy-ngrh destroy-infra destroy-cloudmap-namespace
+destroy-all: destroy-ngrh destroy-devops-agent destroy-infra destroy-cloudmap-namespace
 	@echo "Removed all cloudformation stacks!!!"
 
 # ECS Service Connect implicitly creates the retail-store-ar${ENV} Cloud Map
@@ -891,18 +891,107 @@ destroy-client-standby:
 # table. The target looks the stack's ARN up and passes it; without that stack
 # the cart service discovers by tag alone. Run `make ngrh` again after the
 # carts-db stack has been recreated, because its ARN changes.
+#
+# The AWS DevOps Agent Agent Space the NGRH services use is the first of these:
+#   1. DEVOPS_AGENT_SPACE_ARN=<arn>, an Agent Space you made yourself. Set it
+#      to nothing (DEVOPS_AGENT_SPACE_ARN=) and the services are disconnected
+#      and the invoker role loses its DevOps Agent permissions.
+#   2. the Agent Space of the devops-agent<ENV> stack (make devops-agent),
+#      when that stack exists.
+#   3. none: the stack keeps whatever it has, so a deployment that never
+#      used DevOps Agent is untouched (make deploy runs this target).
+# When there is one, the invoker role gets permissions on it. make ngrh never
+# connects a service: connecting starts a paid DevOps Agent investigation for
+# every finding of the service, so it is a step of its own, make
+# devops-agent-connect, which needs the services named (README, "Investigating
+# with AWS DevOps Agent").
+# The value reaches the recipe as an environment variable, so the shell never
+# parses it as text. It is exported only when it is set: `export` on an unset
+# variable would make it empty, which is case 1 and would remove the access.
 ####
+
+ifneq ($(origin DEVOPS_AGENT_SPACE_ARN),undefined)
+export DEVOPS_AGENT_SPACE_ARN
+NGRH_DEVOPS_AGENT_SPACE = devops_agent_decided=yes; devops_agent_space_arn="$$DEVOPS_AGENT_SPACE_ARN";
+# Set to nothing: the services come off the Agent Space before the deploy takes the invoker role's access away.
+ifeq ($(strip $(DEVOPS_AGENT_SPACE_ARN)),)
+ngrh: devops-agent-disconnect
+endif
+else
+NGRH_DEVOPS_AGENT_SPACE = devops_agent_decided=""; devops_agent_space_arn=$$(aws cloudformation describe-stacks --stack-name devops-agent$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='AgentSpaceArn'].OutputValue" --output text 2>/dev/null) || devops_agent_space_arn=""; if [ "$$devops_agent_space_arn" = "None" ]; then devops_agent_space_arn=""; fi; if [ -n "$$devops_agent_space_arn" ]; then devops_agent_decided=yes; fi;
+endif
 
 ngrh:
 	@carts_db_stack_arn=$$(aws cloudformation describe-stacks --stack-name carts-db-stack$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].StackId" --output text 2>/dev/null) || carts_db_stack_arn=""; \
 	if [ -z "$$carts_db_stack_arn" ]; then \
 		echo "WARNING: stack carts-db-stack$(ENV) was not found in $(PRIMARY_REGION): the cart service will discover by tag only, and the isolation test will not pause the carts table."; \
 	fi; \
+	$(NGRH_DEVOPS_AGENT_SPACE) \
 	echo "Deploying tag-based NGRH model (resources discovered by service tag, plus the carts table's stack for the cart service)..."; \
 	aws cloudformation deploy --template ./ngrh.yaml --region $(PRIMARY_REGION) \
 	--stack-name ngrh$(ENV) --capabilities CAPABILITY_NAMED_IAM \
-	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION) "CartsDbStackArn=$$carts_db_stack_arn"
+	--parameter-overrides Env=$(ENV) PrimaryRegion=$(PRIMARY_REGION) StandbyRegion=$(STANDBY_REGION) "CartsDbStackArn=$$carts_db_stack_arn" $${devops_agent_decided:+"DevOpsAgentSpaceArn=$$devops_agent_space_arn"}
 	@echo "NGRH model deployed (stack ngrh$(ENV)). Run 'make ngrh-assess' to run failure-mode assessments."
+
+####
+# AWS DevOps Agent (optional; README, "Investigating with AWS DevOps Agent")
+# make devops-agent creates the Agent Space (stack devops-agent<ENV>, in
+# PRIMARY_REGION, which must be a Region where DevOps Agent is available) and,
+# when the NGRH model is deployed, runs make ngrh, which finds the stack and
+# gives the invoker role access to the Agent Space. Neither costs anything
+# while idle. If the stack's first deploy fails while IAM is still
+# propagating, it is left in ROLLBACK_COMPLETE: run make destroy-devops-agent,
+# then this again.
+# make devops-agent-status shows each service's connection and finding count.
+# make devops-agent-connect DEVOPS_AGENT_SERVICES="orders cart" (or all) is what
+# costs money: DevOps Agent starts one investigation for each finding of each
+# service connected, and bills it by the agent-second.
+####
+devops-agent:
+	@aws cloudformation deploy --template ./devops-agent.yaml --region $(PRIMARY_REGION) \
+	--stack-name devops-agent$(ENV) --capabilities CAPABILITY_NAMED_IAM \
+	--parameter-overrides Env=$(ENV)
+	@if aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) >/dev/null 2>&1; then \
+		echo "Agent Space stack devops-agent$(ENV) is deployed. Running make ngrh to give the invoker role access to it..."; \
+		$(MAKE) ngrh || exit 1; \
+		echo "Next: make devops-agent-status shows each service's findings; make devops-agent-connect DEVOPS_AGENT_SERVICES=\"orders\" connects the ones you name (each finding starts a paid investigation)."; \
+	else \
+		echo "Agent Space stack devops-agent$(ENV) is deployed. Deploy the NGRH model (make ngrh) to give the invoker role access to it."; \
+	fi
+
+# Connects the services named in DEVOPS_AGENT_SERVICES (ui, catalog, cart, checkout, orders, assets, or all) to
+# the Agent Space the ngrh stack was given, and refuses without one. It also refuses with no services named: a
+# service is never connected by accident. The names reach the tool as an environment variable, not as shell text.
+export DEVOPS_AGENT_SERVICES
+devops-agent-connect:
+	@space=$$(aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Parameters[?ParameterKey=='DevOpsAgentSpaceArn'].ParameterValue" --output text 2>/dev/null) || space=""; \
+	if [ -z "$$space" ] || [ "$$space" = "None" ]; then \
+		echo "ERROR: stack ngrh$(ENV) has no Agent Space. Run make devops-agent (or make ngrh DEVOPS_AGENT_SPACE_ARN=<arn>) first." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$$DEVOPS_AGENT_SERVICES" ]; then \
+		echo "ERROR: name the services to connect: make devops-agent-connect DEVOPS_AGENT_SERVICES=\"orders cart\" (ui, catalog, cart, checkout, orders, assets, or all)." >&2; \
+		echo "Each finding of each service starts a paid DevOps Agent investigation; make devops-agent-status shows how many that is." >&2; \
+		exit 1; \
+	fi; \
+	python3 -m ngrh_testing devops-agent connect $(NGRH_TESTING_ARGS) --space-arn "$$space" --services "$$DEVOPS_AGENT_SERVICES"
+
+# Takes the NGRH services off their Agent Space. It does nothing unless the ngrh
+# stack was given one, so it is safe to run on any deployment (destroy-ngrh does).
+# The shell variable ngrh_disconnect_options is empty unless the recipe line sets it before this text (destroy-ngrh
+# sets --if-supported), so make devops-agent-disconnect, which asked for the disconnect, refuses an old AWS CLI.
+NGRH_DEVOPS_AGENT_DISCONNECT = space=$$(aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Parameters[?ParameterKey=='DevOpsAgentSpaceArn'].ParameterValue" --output text 2>/dev/null) || space=""; \
+	if [ -z "$$space" ] || [ "$$space" = "None" ]; then \
+		echo "The NGRH services have no Agent Space to disconnect from."; \
+	else \
+		python3 -m ngrh_testing devops-agent disconnect $$ngrh_disconnect_options $(NGRH_TESTING_ARGS); \
+	fi
+
+devops-agent-disconnect:
+	@$(NGRH_DEVOPS_AGENT_DISCONNECT)
+
+devops-agent-status:
+	@python3 -m ngrh_testing devops-agent status $(NGRH_TESTING_ARGS)
 
 ngrh-assess:
 	$(eval _SVCS := $(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='ServiceArns'].OutputValue" --output text))
@@ -1006,8 +1095,12 @@ failback:
 
 # Deleting a service that still has tests is not documented to work, so the tests go first. The tool
 # refuses while a test run is active, and does nothing if the ngrh stack is already gone.
+# The disconnect is best effort and, with --if-supported, quiet on an AWS CLI older than 2.38.0: the teardown
+# goes on either way, and a deployment that made its Agent Space with make devops-agent and never connected a
+# service (the e2e workflow's) has nothing to take off.
 destroy-ngrh:
-	@echo "Deleting the NGRH tests before the stack..."
+	@echo "Taking the services off their DevOps Agent Agent Space, if they have one, and deleting the NGRH tests before the stack..."
+	-@ngrh_disconnect_options=--if-supported; $(NGRH_DEVOPS_AGENT_DISCONNECT)
 	@python3 -m ngrh_testing delete-tests $(NGRH_TESTING_ARGS)
 	@echo "Emptying NGRH bucket before stack delete..."
 	$(eval NGRH_BUCKET:=$(shell aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='NgrhBucketName'].OutputValue" --output text 2>/dev/null))
@@ -1017,3 +1110,23 @@ destroy-ngrh:
 	@aws cloudformation delete-stack --stack-name ngrh$(ENV) --region $(PRIMARY_REGION)
 	@aws cloudformation wait stack-delete-complete --stack-name ngrh$(ENV) --region $(PRIMARY_REGION)
 	@echo "NGRH stack ngrh$(ENV) destroyed."
+
+# Deletes the Agent Space stack, and with it the Agent Space's investigations and chat history, for good.
+# It refuses while the ngrh stack still uses the Agent Space, because deleting it would leave the services
+# connected to nothing: run make ngrh DEVOPS_AGENT_SPACE_ARN= first (destroy-all deletes ngrh first). A stack
+# that is not there is not an error, so destroy-all works on a deployment that never made one.
+destroy-devops-agent:
+	@space=$$(aws cloudformation describe-stacks --stack-name devops-agent$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Outputs[?OutputKey=='AgentSpaceArn'].OutputValue" --output text 2>/dev/null) || space=""; \
+	if [ -z "$$space" ]; then \
+		echo "No devops-agent$(ENV) stack in $(PRIMARY_REGION): nothing to delete."; \
+		exit 0; \
+	fi; \
+	in_use=$$(aws cloudformation describe-stacks --stack-name ngrh$(ENV) --region $(PRIMARY_REGION) --query "Stacks[0].Parameters[?ParameterKey=='DevOpsAgentSpaceArn'].ParameterValue" --output text 2>/dev/null) || in_use=""; \
+	if [ "$$in_use" = "$$space" ]; then \
+		echo "ERROR: stack ngrh$(ENV) still uses this Agent Space. Run 'make ngrh DEVOPS_AGENT_SPACE_ARN=' first, which disconnects the services and takes the invoker role's access away." >&2; \
+		exit 1; \
+	fi; \
+	echo "Deleting stack devops-agent$(ENV): the Agent Space and its investigations and chat history are deleted for good..."; \
+	aws cloudformation delete-stack --stack-name devops-agent$(ENV) --region $(PRIMARY_REGION) || exit 1; \
+	aws cloudformation wait stack-delete-complete --stack-name devops-agent$(ENV) --region $(PRIMARY_REGION) || exit 1; \
+	echo "Stack devops-agent$(ENV) deleted."

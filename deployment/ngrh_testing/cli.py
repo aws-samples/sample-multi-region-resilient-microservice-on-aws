@@ -6,7 +6,8 @@ environment, as for the Makefile's own aws calls.
 Exit codes: 0 done; 1 the command could not run or failed; 2 preflight refused the run; 3 it ran and
 found something to act on (replay: a failover trigger's conditions were met; reconcile --check: the tests
 have drifted; run: the verdict was not the one the spec expects, or the fail-back after it is done except for what
-the output says is left; failback: done except for what the output says is left to do); 130 interrupted (the run
+the output says is left; failback: done except for what the output says is left to do; devops-agent: a service is
+left unconnected, or still connected, as the output says); 130 interrupted (the run
 goes on)."""
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
-from . import context, executions, failback, preflight, reconcile, replay, report, run, spec
+from . import context, devops_agent, executions, failback, preflight, reconcile, replay, report, run, spec
 from .aws import AwsCli, AwsCliError
 from .context import ContextError, Environment, ResolvedTest, load_environment
 
@@ -109,6 +110,19 @@ def parser() -> argparse.ArgumentParser:
     b.add_argument("--writer-wait-minutes", type=float, default=failback.WRITER_WAIT_MINUTES,
                    help="how long to wait for the old primary database to rejoin and catch up before giving up on moving "
                         f"the writer back (default {failback.WRITER_WAIT_MINUTES})")
+
+    g = commands.add_parser("devops-agent", help="connect NGRH services to an AWS DevOps Agent Agent Space, disconnect "
+                                                 "them, or show their state (make devops-agent-connect and friends)")
+    _add_deployment(g)
+    g.add_argument("action", choices=devops_agent.ACTIONS)
+    g.add_argument("--space-arn", default="", help="the Agent Space's ARN (connect needs it)")
+    g.add_argument("--services", default="",
+                   help="the services to connect (connect needs it): names from "
+                        f"{', '.join(devops_agent.SERVICE_NAMES)}, separated by spaces or commas, or {devops_agent.ALL}. "
+                        "Connecting starts one paid investigation for each finding of each service")
+    g.add_argument("--if-supported", action="store_true",
+                   help="disconnect only: when the AWS CLI is too old to see or change a service's DevOps Agent connection, "
+                        "say so and exit 0 instead of refusing (make destroy-ngrh does this, because the teardown goes on either way)")
     return p
 
 
@@ -298,6 +312,52 @@ def _failback_command(aws: AwsCli, args: argparse.Namespace, sleep: Callable[[fl
                         lambda line: sys.stderr.write(line + "\n"))
 
 
+def _devops_agent_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep: Callable[[float], None],
+                          clock: Callable[[], float]) -> int:
+    """connect and disconnect exit 3 when a service is left in a state the output names; status only reads."""
+    if args.action == "connect":
+        if not args.space_arn:
+            raise devops_agent.DevOpsAgentError("connect needs --space-arn")
+        if not args.services.strip():
+            raise devops_agent.DevOpsAgentError(
+                f"connect needs --services: connecting starts a paid investigation for each finding of a service, "
+                f"so name them ({', '.join(devops_agent.SERVICE_NAMES)}, or {devops_agent.ALL}); make devops-agent-status shows the counts")
+        connections = devops_agent.connect(aws, env, args.space_arn, args.services, _say, sleep, clock)
+        for line in devops_agent.render(connections):
+            _say(line)
+        left = [c for c in connections if not c.connected]
+        if left:
+            sys.stderr.write(f"ngrh_testing devops-agent: {len(left)} of {len(connections)} services are not connected: "
+                             f"{', '.join(c.name for c in left)}. The reason is above. The usual cause is the invoker role "
+                             "without its DevOps Agent permissions (IAM can take a minute to add them): wait, or fix that, "
+                             "and run make devops-agent-connect again for these services.\n")
+            return EXIT_FOUND
+        return EXIT_OK
+    if args.action == "disconnect":
+        try:
+            connections = devops_agent.disconnect(aws, env, _say, sleep, clock)
+        except devops_agent.CliNotSupported:
+            if not args.if_supported:
+                raise
+            # Not an error: this AWS CLI drops the field that says a service is connected, so it cannot tell, and a
+            # deployment that never connected one (the e2e workflow's) has nothing to take off.
+            _say(f"Skipped: this AWS CLI is older than {devops_agent.MIN_CLI_VERSION}, so it cannot see or change a service's "
+                 "DevOps Agent connection, and no service was disconnected. One connected by hand stays connected until you "
+                 "disconnect it (in the console, or with a newer AWS CLI and make devops-agent-disconnect).")
+            return EXIT_OK
+        for line in devops_agent.render(connections):
+            _say(line)
+        left = [c for c in connections if c.linked]
+        if left:
+            sys.stderr.write(f"ngrh_testing devops-agent: {', '.join(c.name for c in left)} still name an Agent Space.\n")
+            return EXIT_FOUND
+        return EXIT_OK
+    for line in devops_agent.render(devops_agent.status(aws, env), findings=True):
+        _say(line)
+    _say("Connecting a service starts one paid DevOps Agent investigation for each of its findings.")
+    return EXIT_OK
+
+
 def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_seconds: Optional[float] = None,
          sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> int:
     args = parser().parse_args(argv)
@@ -325,6 +385,8 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
                 sys.stdout.write(f"Preflight ({args.mode}) for {args.test}: refused, 1 reason(s)\n  [1] the credentials do not work: {e}\n")
                 return EXIT_REFUSED
         env = load_environment(aws, args.primary_region, args.standby_region, args.env)
+        if args.command == "devops-agent":
+            return _devops_agent_command(aws, env, args, sleep, clock)
         if args.command == "reconcile":
             tests = spec.load(args.spec).select(args.test)
             plans, lines = reconcile.reconcile(aws, env, tests, write=not args.check)
@@ -360,7 +422,7 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
         for problem in e.problems:
             sys.stderr.write(f"ngrh_testing {args.command}: {problem}\n")
         return EXIT_ERROR
-    except (replay.ReplayError, AwsCliError, run.RunError, ValueError) as e:
+    except (replay.ReplayError, AwsCliError, run.RunError, devops_agent.DevOpsAgentError, ValueError) as e:
         sys.stderr.write(f"ngrh_testing {args.command}: {e}\n")
         return EXIT_ERROR
     raise AssertionError(f"unhandled command {args.command}")  # pragma: no cover

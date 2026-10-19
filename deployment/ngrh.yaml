@@ -16,7 +16,8 @@ Description: >
 # Parameters. Resource discovery is tag-based (key "service"), so the only
 # stack ARN the template takes is the optional CartsDbStackArn; left empty,
 # every service discovers by tag alone and the template is portable across any
-# account/Env.
+# account/Env. The other optional parameter, DevOpsAgentSpaceArn, is not a
+# stack ARN: left empty, the invoker role has no AWS DevOps Agent permissions.
 # ---------------------------------------------------------------------------
 Parameters:
   Env:
@@ -42,9 +43,27 @@ Parameters:
       test's DynamoDB pause acts on; discovery by tag lists a global table's
       replicas as one plain AWS::DynamoDB::Table per Region, and that action is
       then skipped. `make ngrh` fills it in. Empty means tag discovery only.
+  DevOpsAgentSpaceArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:aws[a-z-]*:aidevops:[a-z0-9-]+:[0-9]{12}:agentspace/[A-Za-z0-9-]{1,64}$"
+    ConstraintDescription: "Empty, or the ARN of one AWS DevOps Agent Agent Space (arn:aws:aidevops:<region>:<account>:agentspace/<id>), without wildcards."
+    Description: >-
+      ARN of the AWS DevOps Agent Agent Space that Resilience Hub may use to
+      investigate assessment findings and test runs. When set, the invoker role
+      gets the eight aidevops actions Resilience Hub calls, on that Agent Space
+      only (inline policy ResilienceHubDevOpsAgentAccess). Empty means the role
+      has no DevOps Agent permissions. This template does not connect the
+      services, for two reasons: connecting starts a paid DevOps Agent
+      investigation for every finding of a service, so it is a step of its own
+      (`make devops-agent-connect`, which needs the services named), and
+      CloudFormation cannot disconnect a service again. `make ngrh` fills this
+      in from DEVOPS_AGENT_SPACE_ARN, or from the devops-agent stack (make
+      devops-agent).
 
 Conditions:
   HasCartsDbStack: !Not [!Equals [!Ref CartsDbStackArn, ""]]
+  HasDevOpsAgentSpace: !Not [!Equals [!Ref DevOpsAgentSpaceArn, ""]]
 
 Resources:
 
@@ -89,7 +108,9 @@ Resources:
   # FIS experiment behind each test run (tagged managedBy=resiliencehub),
   # pass the test's experiment role to FIS, and read CloudWatch alarm history
   # for the test's alarms. Without it every test run fails at
-  # fis:CreateExperimentTemplate.
+  # fis:CreateExperimentTemplate. When DevOpsAgentSpaceArn is set, the role
+  # also carries the permissions NGRH needs to investigate with that AWS
+  # DevOps Agent Agent Space.
   # -------------------------------------------------------------------------
   InvokerRole:
     Type: AWS::IAM::Role
@@ -125,6 +146,38 @@ Resources:
                 Resource:
                   - !GetAtt NgrhBucket.Arn
                   - !Sub "${NgrhBucket.Arn}/*"
+        # AWS DevOps Agent, only when DevOpsAgentSpaceArn is set. NGRH reaches
+        # the Agent Space by assuming this role and calls exactly these eight
+        # actions: the first five start, follow, update and cancel an
+        # investigation, the last three check the connection. The AWS
+        # documentation allows any Agent Space (agentspace/*); this allows only
+        # the one named. The managed policies AIDevOpsAgentFullAccess and
+        # AIDevOpsOperatorAppAccessPolicy are left out on purpose: they include
+        # actions that change an Agent Space. The policy name is the one the
+        # documentation uses.
+        - !If
+          - HasDevOpsAgentSpace
+          - PolicyName: ResilienceHubDevOpsAgentAccess
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Sid: ResilienceHubV2DevOpsAgentInvestigation
+                  Effect: Allow
+                  Action:
+                    - aidevops:CreateBacklogTask
+                    - aidevops:GetBacklogTask
+                    - aidevops:ListExecutions
+                    - aidevops:ListJournalRecords
+                    - aidevops:UpdateBacklogTask
+                  Resource: !Ref DevOpsAgentSpaceArn
+                - Sid: ResilienceHubV2DevOpsAgentValidation
+                  Effect: Allow
+                  Action:
+                    - aidevops:GetAgentSpace
+                    - aidevops:GetOperatorApp
+                    - aidevops:ListAssociations
+                  Resource: !Ref DevOpsAgentSpaceArn
+          - !Ref AWS::NoValue
 
   # -------------------------------------------------------------------------
   # Experiment role for NGRH tests: choose it as the IAM role when creating a

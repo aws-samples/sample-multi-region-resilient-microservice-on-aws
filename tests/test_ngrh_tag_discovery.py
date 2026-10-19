@@ -79,6 +79,7 @@ OUTSIDE_MODEL_STACKS = {
     "convergence-watcher",
     "crdr-catalog-ssm",
     "crdr-roles",
+    "devops-agent",
     "load-generator",
     "ngrh",
     "reconciliation-catalog-ssm",
@@ -293,10 +294,12 @@ def test_each_service_discovers_by_its_tag_and_shared(lid):
     assert config["ResourceTags"] == [{"Key": "service", "Values": [name, "shared"]}]
 
 
-def test_ngrh_template_takes_one_optional_stack_arn_parameter():
+def test_ngrh_template_takes_the_env_the_regions_and_two_optional_arns():
     params = _load_template(DEPLOYMENT / "ngrh.yaml")["Parameters"]
-    assert set(params) == {"Env", "PrimaryRegion", "StandbyRegion", "CartsDbStackArn"}
+    assert set(params) == {"Env", "PrimaryRegion", "StandbyRegion", "CartsDbStackArn", "DevOpsAgentSpaceArn"}
     assert params["CartsDbStackArn"]["Default"] == "", "left empty, every service discovers by tag alone"
+    # See tests/test_ngrh_devops_agent.py.
+    assert params["DevOpsAgentSpaceArn"]["Default"] == "", "left empty, the invoker role has no DevOps Agent permissions"
 
 
 def test_ngrh_outputs_one_arn_per_service():
