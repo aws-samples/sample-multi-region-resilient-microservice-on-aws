@@ -273,6 +273,26 @@ class TestReadme:
         assert "Nothing is billed" not in section and "nothing has been billed" not in section
         assert "not in the AWS documentation" not in section, "only five Resilience Hub pages were read"
 
+    def test_it_says_how_to_deploy_and_connect_in_one_command_and_what_that_does_and_costs(self):
+        # make deploy DEVOPS_AGENT_CONNECT="orders" (deployment/Makefile): the checks, then the deploy, then the Agent Space and
+        # the connection. Everything the paragraph says is a behaviour tests/test_ngrh_devops_agent_make.py pins.
+        paragraph = next(p for p in _section().split("\n\n") if p.startswith("**In one command.**"))
+        assert '`make deploy DEVOPS_AGENT_CONNECT="orders"`' in paragraph
+        assert "`make devops-agent`" in paragraph and "`make devops-agent-connect`" in paragraph
+        assert "same names as `DEVOPS_AGENT_SERVICES`" in paragraph and "`all`" in paragraph
+        assert "Without the variable `make deploy` does neither" in paragraph and "the `e2e` workflow does not set it" in paragraph
+        assert "Before it deploys anything" in paragraph and "AWS CLI is 2.38.0 or later" in paragraph
+        assert "`DEVOPS_AGENT_IAM_WAIT`" in paragraph and "a minute" in paragraph and "is not sent again" in paragraph
+        assert "`make deploy` runs no assessment" in paragraph and "name one service first" in paragraph
+        assert "`DEVOPS_AGENT_SPACE_ARN=<arn>`" in paragraph and "is not created" in paragraph
+        assert "the deploy is done" in paragraph and "run `make devops-agent-connect` as above" in paragraph
+        assert "\u2014" not in paragraph and " -- " not in paragraph
+
+    def test_the_readme_and_the_makefile_name_the_same_variables(self):
+        makefile = (DEPLOYMENT / "Makefile").read_text()
+        for name in ("DEVOPS_AGENT_CONNECT", "DEVOPS_AGENT_IAM_WAIT"):
+            assert name in makefile and name in _section(), name
+
     def test_it_gives_the_price_and_the_command_that_shows_the_usage(self):
         section = _section()
         assert "$0.0083 per agent-second" in section and "`aws devops-agent get-account-usage`" in section

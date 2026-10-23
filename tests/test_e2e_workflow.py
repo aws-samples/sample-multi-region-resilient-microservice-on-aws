@@ -196,7 +196,12 @@ class TestDevOpsAgentInEveryRun:
         for s in steps():
             run = s.get("run", "")
             assert "devops-agent-connect" not in run and "DEVOPS_AGENT_SERVICES" not in run, f"{s['name']} would start paid investigations"
+            assert "DEVOPS_AGENT_CONNECT" not in run, f"{s['name']} would connect services through make deploy, which starts paid investigations"
             assert "DEVOPS_AGENT_SPACE_ARN" not in run, f"{s['name']} would override the Agent Space of the stack the run just made"
+
+    def test_the_workflow_does_not_set_the_connect_variable_anywhere(self):
+        # not in a run line, and not in an env block either: make reads the environment too
+        assert "DEVOPS_AGENT_CONNECT" not in E2E.read_text()
 
     def test_the_teardown_deletes_it_through_destroy_all_which_deletes_the_ngrh_stack_first(self):
         assert 'make destroy-all "ENV=${ENV}"' in step(TEARDOWN)["run"]

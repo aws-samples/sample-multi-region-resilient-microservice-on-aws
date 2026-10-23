@@ -14,9 +14,17 @@
 the service (21 for orders-dev; 111 for the six), so it is ``make devops-agent-connect``, which refuses unless
 ``DEVOPS_AGENT_SERVICES`` names the services and the ngrh stack has an Agent Space.
 
+``make deploy DEVOPS_AGENT_CONNECT="orders"`` is the one command that does the deploy and then the connect. It is
+opt-in, and TestDeployWithConnect pins what that means: the checks run first, before deploy-all, so a typo or an
+AWS CLI too old to connect costs no deploy; the Agent Space, a wait for IAM and the connect follow the deploy; an
+Agent Space you made yourself (``DEVOPS_AGENT_SPACE_ARN=<arn>``) is used and none is created; without the variable the
+plan of ``make deploy`` is the one it was (that is also proved by hand, by comparing ``make -n deploy`` with the plan
+of origin/main, which is identical), so the e2e workflow, which runs ``make deploy``, never connects. The deploy is
+left out of these tests with ``make -o deploy-all``, because two hours of stacks are not what they are about.
+
 The recipes run against a stub ``aws`` that keeps a few stacks (by name, with outputs and parameters) and a stub
-``python3`` that records what the recipe asks ``python3 -m ngrh_testing`` to do. What the tool then does is
-tests/test_ngrh_devops_agent_tool.py. Nothing reaches AWS.
+``python3`` that records what the recipe asks ``python3 -m ngrh_testing`` to do (and a stub ``sleep`` that records the
+wait and does not wait). What the tool then does is tests/test_ngrh_devops_agent_tool.py. Nothing reaches AWS.
 
 Run with:  pytest tests/test_ngrh_devops_agent_make.py -v
 """
@@ -97,8 +105,9 @@ sys.exit(0)
 '''
 
 # A stub `python3`: `python3 -m ngrh_testing devops-agent <action> ...` is logged and succeeds, or exits with
-# STUB_TOOL_EXIT. `delete-tests` (destroy-ngrh runs it) is logged and succeeds. Anything else is a mistake in the
-# recipe. It is Python so the log line is encoded by json.dumps, whatever the arguments contain.
+# STUB_TOOL_EXIT_<ACTION> (one action) or STUB_TOOL_EXIT (all of them). `delete-tests` (destroy-ngrh runs it) is logged
+# and succeeds. Anything else is a mistake in the recipe. It is Python so the log line is encoded by json.dumps, whatever
+# the arguments contain.
 STUB_PYTHON = r'''#!PYTHON
 import json
 import os
@@ -108,11 +117,22 @@ args = sys.argv[1:]
 if args[:2] == ["-m", "ngrh_testing"] and args[2:3] == ["devops-agent"]:
     with open(os.environ["STUB_LOG"], "a") as log:
         log.write(json.dumps(["python3"] + args) + "\n")
-    sys.exit(int(os.environ.get("STUB_TOOL_EXIT", "0")))
+    action = args[3] if len(args) > 3 else ""
+    sys.exit(int(os.environ.get("STUB_TOOL_EXIT_" + action.upper(), os.environ.get("STUB_TOOL_EXIT", "0"))))
 if args[:2] == ["-m", "ngrh_testing"] and args[2:3] == ["delete-tests"]:
     sys.exit(0)
 sys.stderr.write("unexpected python3 call: %s\n" % " ".join(args))
 sys.exit(99)
+'''
+
+# A stub `sleep`: the wait is logged and not waited, so a test can see that the Makefile waited and for how long.
+STUB_SLEEP = r'''#!PYTHON
+import json
+import os
+import sys
+
+with open(os.environ["STUB_LOG"], "a") as log:
+    log.write(json.dumps(["sleep"] + sys.argv[1:]) + "\n")
 '''
 
 
@@ -141,10 +161,12 @@ class Run:
         return dict(item.split("=", 1) for item in deploy[deploy.index("--parameter-overrides") + 1:])
 
     def order(self):
-        """The calls that matter, in order: deploys and deletes, and the tool's actions."""
+        """The calls that matter, in order: deploys and deletes, the tool's actions, and waits."""
         out = []
         for call in self.calls:
-            if call[0] == "python3":
+            if call[0] == "sleep":
+                out.append("sleep:" + call[1])
+            elif call[0] == "python3":
                 out.append("tool:" + call[call.index("devops-agent") + 1])
             elif call[:3] == ["aws", "cloudformation", "deploy"]:
                 out.append("deploy:" + call[call.index("--stack-name") + 1])
@@ -154,10 +176,10 @@ class Run:
 
 
 def make(tmp_path, *targets, stacks=None, variables=(), in_environment=None, tool_exit=0, deploy_exit=0,
-         in_services=None, services_name="DEVOPS_AGENT_SERVICES"):
+         in_services=None, services_name="DEVOPS_AGENT_SERVICES", tool_exits=None):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for name, body in (("aws", STUB_AWS), ("python3", STUB_PYTHON)):
+    for name, body in (("aws", STUB_AWS), ("python3", STUB_PYTHON), ("sleep", STUB_SLEEP)):
         stub = bin_dir / name
         # The stubs are Python scripts: run them with the interpreter running the tests, not whatever python3 is on PATH.
         stub.write_text(body.replace("#!/usr/bin/env python3", f"#!{sys.executable}").replace("#!PYTHON", f"#!{sys.executable}"))
@@ -169,7 +191,11 @@ def make(tmp_path, *targets, stacks=None, variables=(), in_environment=None, too
                STUB_TOOL_EXIT=str(tool_exit), STUB_DEPLOY_EXIT=str(deploy_exit))
     env.pop("DEVOPS_AGENT_SPACE_ARN", None)  # a value exported in the developer's shell must not change the result
     env.pop("DEVOPS_AGENT_SERVICES", None)
+    env.pop("DEVOPS_AGENT_CONNECT", None)
+    env.pop("DEVOPS_AGENT_IAM_WAIT", None)
     env.pop("SERVICES", None)
+    for action, code in (tool_exits or {}).items():
+        env["STUB_TOOL_EXIT_" + action.upper()] = str(code)
     if in_services is not None:
         env[services_name] = in_services
     if in_environment is not None:
@@ -423,6 +449,174 @@ class TestDisconnectAndStatus:
         (call,) = [c for c in run.calls if c[0] == "python3"]
         assert call[1:] == ["-m", "ngrh_testing", "devops-agent", "status", "--primary-region", "us-east-1",
                             "--standby-region", "us-west-2", "--env=-t"]
+
+
+# ---------------------------------------------------------------------------
+# make deploy DEVOPS_AGENT_CONNECT=<services>
+# ---------------------------------------------------------------------------
+
+def deploy(tmp_path, *variables, stacks=None, wait="0", **kw):
+    """make deploy with deploy-all left out (-o): its two hours of stacks are not what these tests are about. The stubs hold
+    what a finished deploy leaves, the ngrh stack with the Agent Space the second make ngrh gave it, because they keep no
+    state from one call to the next. ``wait`` is DEVOPS_AGENT_IAM_WAIT; None leaves the Makefile's own."""
+    state = {**ngrh_stack(SPACE), **agent_space_stack()} if stacks is None else stacks
+    extra = [] if wait is None else [f"DEVOPS_AGENT_IAM_WAIT={wait}"]
+    return make(tmp_path, "-o", "deploy-all", "deploy", stacks=state, variables=[*extra, *variables], **kw)
+
+
+def prerequisites_of_deploy(tmp_path, *variables):
+    """What make itself says the prerequisites of deploy are (make -pq prints its database): the Makefile's line has a variable in it."""
+    run = make(tmp_path, "-pq", "deploy", variables=list(variables))
+    match = re.search(r"^deploy: (.*)$", run.done.stdout, re.M)
+    assert match, run.out[-2000:]
+    return match.group(1).split()
+
+
+def tool_calls(run):
+    return [c for c in run.calls if c[0] == "python3"]
+
+
+class TestDeployWithConnect:
+    """``make deploy DEVOPS_AGENT_CONNECT="orders"`` is the one-command way to use DevOps Agent: the checks first, before
+    anything is deployed, then, after the deploy, the Agent Space and the connection. Without the variable ``make deploy``
+    is what it was, which is what the e2e workflow runs."""
+
+    def test_without_the_variable_deploy_does_none_of_it(self, tmp_path):
+        run = deploy(tmp_path, stacks={})
+        assert run.done.returncode == 0, run.out
+        assert run.order() == [] and "Deployment Outputs" in run.done.stdout
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_a_blank_variable_is_the_same_as_none(self, tmp_path, value):
+        run = deploy(tmp_path, f"DEVOPS_AGENT_CONNECT={value}", stacks={})
+        assert run.done.returncode == 0, run.out
+        assert run.order() == []
+
+    @pytest.mark.parametrize("value", ["", "   ", " \t "])
+    def test_a_blank_variable_in_the_environment_is_the_same_as_none(self, tmp_path, value):
+        # make drops the spaces of a blank value given on its command line, but takes one from the environment as it is.
+        run = deploy(tmp_path, in_services=value, services_name="DEVOPS_AGENT_CONNECT", stacks={})
+        assert run.done.returncode == 0, run.out
+        assert run.order() == []
+
+    def test_without_the_variable_deploy_still_has_deploy_all_as_its_only_prerequisite(self, tmp_path):
+        assert prerequisites_of_deploy(tmp_path) == ["deploy-all"]
+
+    def test_with_the_variable_the_checks_are_a_prerequisite_listed_before_deploy_all(self, tmp_path):
+        # make builds prerequisites left to right, as it does for the targets of deploy-all itself.
+        assert prerequisites_of_deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders") == ["devops-agent-connect-preflight", "deploy-all"]
+
+    def test_the_checks_run_first_then_the_agent_space_then_a_wait_for_iam_and_then_the_connection(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders")
+        assert run.done.returncode == 0, run.out
+        assert run.order() == ["tool:check", "deploy:devops-agent-t", "deploy:ngrh-t", "sleep:0", "tool:connect"]
+
+    def test_it_connects_the_services_it_checked_to_the_agent_space_the_ngrh_stack_has(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders cart")
+        check, connect = tool_calls(run)
+        assert check[1:] == ["-m", "ngrh_testing", "devops-agent", "check", "--primary-region", "us-east-1",
+                             "--standby-region", "us-west-2", "--env=-t", "--services", "orders cart"]
+        assert connect[1:] == ["-m", "ngrh_testing", "devops-agent", "connect", "--primary-region", "us-east-1",
+                               "--standby-region", "us-west-2", "--env=-t", "--space-arn", SPACE, "--services", "orders cart"]
+
+    def test_the_variable_in_the_environment_does_the_same(self, tmp_path):
+        run = deploy(tmp_path, in_services="orders", services_name="DEVOPS_AGENT_CONNECT")
+        assert run.order() == ["tool:check", "deploy:devops-agent-t", "deploy:ngrh-t", "sleep:0", "tool:connect"]
+
+    def test_the_value_reaches_the_recipes_even_when_a_makefile_sets_it(self, tmp_path):
+        # make exports what came from the command line or the environment by itself, but not a variable a makefile sets: the
+        # Makefile's own export is what carries it to the shell, so a local include (-include local.mk) works too.
+        local = tmp_path / "local.mk"
+        local.write_text("DEVOPS_AGENT_CONNECT = orders cart\n")
+        run = make(tmp_path, "-f", str(local), "-f", str(MAKEFILE), "-o", "deploy-all", "deploy",
+                   stacks={**ngrh_stack(SPACE), **agent_space_stack()}, variables=["DEVOPS_AGENT_IAM_WAIT=0"])
+        assert run.done.returncode == 0, run.out
+        assert [c[c.index("--services") + 1] for c in tool_calls(run)] == ["orders cart", "orders cart"]
+
+    def test_all_is_passed_on_for_the_tool_to_expand(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=all")
+        assert [c[c.index("--services") + 1] for c in tool_calls(run)] == ["all", "all"]
+
+    def test_the_wait_for_iam_is_a_minute_unless_told_otherwise_and_says_why(self, tmp_path):
+        # A connection that cannot use the invoker role's new policy yet ends FAILED and is not sent again, because each
+        # send can start paid investigations: so the step waits first, which costs a minute in a deploy of two hours.
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders", wait=None)
+        assert "sleep:60" in run.order()
+        assert "Waiting 60 seconds for IAM" in run.done.stdout
+
+    def test_the_names_reach_both_tool_calls_as_one_argument_whatever_they_contain(self, tmp_path):
+        ran = tmp_path / "ran"
+        hostile = f"orders; touch {ran} `touch {ran}` \"q\" 's' *"
+        run = deploy(tmp_path, f"DEVOPS_AGENT_CONNECT={hostile}")
+        assert [c[c.index("--services") + 1] for c in tool_calls(run)] == [hostile, hostile]
+        assert not ran.exists()
+
+    def test_a_failing_check_stops_everything_and_deploy_all_never_starts(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orderz", tool_exits={"check": 1})
+        assert run.done.returncode != 0
+        assert run.order() == ["tool:check"] and "Deployment Outputs" not in run.done.stdout
+
+    def test_a_failed_agent_space_stack_stops_before_the_connection(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders", deploy_exit=1)
+        assert run.done.returncode != 0
+        assert run.order() == ["tool:check", "deploy:devops-agent-t"]
+
+    def test_a_failed_connection_fails_make_but_only_after_the_outputs_were_printed(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders", tool_exits={"connect": 3})
+        assert run.done.returncode != 0
+        assert run.order()[-1] == "tool:connect"
+        assert run.done.stdout.index("Deployment Outputs") < run.done.stdout.index("Agent Space stack devops-agent-t is deployed")
+
+    def test_with_an_agent_space_you_made_none_is_created_and_the_services_connect_to_yours(self, tmp_path):
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders", f"DEVOPS_AGENT_SPACE_ARN={OWN_SPACE}", stacks=ngrh_stack(OWN_SPACE))
+        assert run.order() == ["tool:check", "sleep:0", "tool:connect"]
+        connect = tool_calls(run)[-1]
+        assert connect[connect.index("--space-arn") + 1] == OWN_SPACE
+
+    def test_an_agent_space_variable_set_to_nothing_cannot_go_with_connecting_and_nothing_runs(self, tmp_path):
+        # Set to nothing it takes the access away; connecting needs it. Found before the deploy, not after.
+        run = deploy(tmp_path, "DEVOPS_AGENT_CONNECT=orders", "DEVOPS_AGENT_SPACE_ARN=", stacks=ngrh_stack(SPACE))
+        assert run.done.returncode != 0 and run.order() == []
+        assert "DEVOPS_AGENT_CONNECT" in run.out and "DEVOPS_AGENT_SPACE_ARN" in run.out
+
+    def test_the_variable_means_nothing_to_the_other_targets(self, tmp_path):
+        # Only make deploy reads it. ngrh, devops-agent and devops-agent-connect do what they always did.
+        run = make(tmp_path, "ngrh", stacks=agent_space_stack(), variables=["DEVOPS_AGENT_CONNECT=orders"])
+        assert run.order() == ["deploy:ngrh-t"]
+        run = make(tmp_path / "connect", "devops-agent-connect", stacks=ngrh_stack(SPACE), variables=["DEVOPS_AGENT_CONNECT=orders"])
+        assert run.done.returncode != 0 and run.tool() == [] and "name the services to connect" in run.out
+        run = make(tmp_path / "space", "devops-agent", variables=["DEVOPS_AGENT_CONNECT=orders"])
+        assert run.order() == ["deploy:devops-agent-t"]
+
+    def test_make_dash_n_shows_the_steps_and_runs_none_of_them(self, tmp_path):
+        # make runs a recipe line that has $(MAKE) in it even under -n, which would deploy and connect for real. The steps are
+        # kept in a variable, so the recipe line has no $(MAKE) in it and -n only prints them.
+        run = make(tmp_path, "-n", "-o", "deploy-all", "deploy", stacks={**ngrh_stack(SPACE), **agent_space_stack()},
+                   variables=["DEVOPS_AGENT_CONNECT=orders", "DEVOPS_AGENT_IAM_WAIT=0"])
+        assert run.done.returncode == 0, run.out
+        assert run.order() == [], "nothing was run"
+        assert "devops-agent-connect" in run.done.stdout and "devops-agent" in run.done.stdout
+
+    def test_without_the_variable_the_whole_dry_run_plan_of_deploy_has_no_trace_of_the_new_steps(self, tmp_path):
+        # The plan is every recipe of the deploy, about 300 lines. It does mention the devops-agent stack (make ngrh looks for it) and
+        # has waits and sleeps of its own, so the checks are for the new steps: the tool's check, the connect, the wait for IAM.
+        run = make(tmp_path, "-n", "deploy", stacks={})
+        assert run.done.returncode == 0, run.out
+        plan = run.done.stdout
+        assert "Deployment Outputs" in plan and len(plan.splitlines()) > 100
+        for trace in ("ngrh_testing devops-agent", "devops-agent-connect", "DEVOPS_AGENT_CONNECT", "for IAM to give the invoker role its new policy"):
+            assert trace not in plan, trace
+        assert run.order() == []
+
+    def test_the_makefile_documents_the_wait_and_its_default(self):
+        assert re.search(r"^DEVOPS_AGENT_IAM_WAIT \?= 60$", MAKEFILE.read_text(), re.M)
+
+    def test_the_e2e_workflow_never_sets_it(self):
+        # The e2e deploy runs make deploy for a run of about four hours in the CI account: a connection there would start
+        # paid investigations on every run.
+        workflow = (REPO / ".github" / "workflows" / "e2e.yml").read_text()
+        assert "DEVOPS_AGENT_CONNECT" not in workflow and "make deploy" in workflow
+
 
 
 # ---------------------------------------------------------------------------
