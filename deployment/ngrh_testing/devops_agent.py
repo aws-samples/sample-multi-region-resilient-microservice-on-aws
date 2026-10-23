@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT-0
 """Connect NGRH services to an AWS DevOps Agent Agent Space, disconnect them, or show their state
-(make devops-agent-connect, make devops-agent-disconnect, make devops-agent-status).
+(make devops-agent-connect, make devops-agent-disconnect, make devops-agent-status). ``check`` is the one action that
+needs no deployment: make deploy DEVOPS_AGENT_CONNECT=<services> runs it before it deploys anything.
 
 Resilience Hub starts a DevOps Agent investigation for a service once the service names an Agent Space in its
 DevOps Agent configuration. That configuration is set here, not in ngrh.yaml: CloudFormation cannot take it away
@@ -29,7 +30,7 @@ from typing import Any, Callable, Dict, List
 from .aws import AwsCli, AwsCliError
 from .context import Environment
 
-ACTIONS = ("connect", "disconnect", "status")
+ACTIONS = ("connect", "disconnect", "status", "check")
 
 # The services of ngrh.yaml, by the short names its outputs use (OrdersServiceArn, UiServiceArn, ...).
 SERVICE_NAMES = ("ui", "catalog", "cart", "checkout", "orders", "assets")
@@ -142,22 +143,42 @@ def all_services(env: Environment) -> List[str]:
     return arns
 
 
-def select_services(env: Environment, names: str) -> List[str]:
-    """The ARNs of the services named in ``names`` (separated by spaces or commas), or of all of them for ``all``."""
+def parse_service_names(names: str) -> List[str]:
+    """The service names in ``names`` (separated by spaces or commas, in any case), in the order given and without repeats,
+    or ``["all"]`` when ``all`` is among them. Refuses a list with nothing in it and a name that is not a service. This is the
+    part of select_services that needs no deployment, so ``check`` can run it before there is one."""
     wanted = [n for n in re.split(r"[,\s]+", names.strip().lower()) if n]
     if not wanted:
         raise DevOpsAgentError(f"name the services to connect: {', '.join(SERVICE_NAMES)}, or {ALL}")
     if ALL in wanted:
-        return all_services(env)
+        return [ALL]
     unknown = [n for n in wanted if n not in SERVICE_NAMES]
     if unknown:
         raise DevOpsAgentError(f"unknown service {', '.join(unknown)}: the services are {', '.join(SERVICE_NAMES)}")
+    return list(dict.fromkeys(wanted))
+
+
+def select_services(env: Environment, names: str) -> List[str]:
+    """The ARNs of the services named in ``names`` (separated by spaces or commas), or of all of them for ``all``."""
+    wanted = parse_service_names(names)
+    if wanted == [ALL]:
+        return all_services(env)
     arns: List[str] = []
     for n in wanted:
         arn = env.service_arn(n)
         if arn not in arns:
             arns.append(arn)
     return arns
+
+
+def check(aws: AwsCli, services: str) -> List[str]:
+    """What ``make deploy DEVOPS_AGENT_CONNECT=<services>`` asks before it deploys anything: the names are ones connect accepts
+    and the AWS CLI can connect a service. Connect would refuse either after a deploy of about two hours, so both are found
+    first. It reads nothing from the deployment, which does not exist yet on a first deploy, and it writes nothing. Returns the
+    names, as parse_service_names gives them."""
+    names = parse_service_names(services)
+    require_cli_support(aws)
+    return names
 
 
 def _settle(aws: AwsCli, env: Environment, states: Dict[str, Connection], arns: List[str], done: Callable[[Connection], bool],

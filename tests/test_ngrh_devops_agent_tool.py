@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT-0
-"""``python3 -m ngrh_testing devops-agent connect | disconnect | status`` (make devops-agent-connect and friends).
+"""``python3 -m ngrh_testing devops-agent connect | disconnect | status | check`` (make devops-agent-connect and friends;
+``check`` is what make deploy DEVOPS_AGENT_CONNECT=<services> runs before it deploys anything).
 
 Everything runs against the shared fake AWS and a fake clock, so the wait for a connection is a loop over simulated
 seconds. The fake models what Resilience Hub shows for a service's DevOps Agent configuration: a status that moves
@@ -174,6 +175,104 @@ class TestSelectingServices:
 
     def test_the_names_are_the_ones_the_stacks_outputs_use(self):
         assert devops_agent.SERVICE_NAMES == NGRH_SERVICES
+
+
+class TestCheckBeforeTheDeploy:
+    """``devops-agent check --services <names>`` is what ``make deploy DEVOPS_AGENT_CONNECT=<names>`` asks before it
+    deploys anything. A deploy takes about two hours, so a name that connect would refuse, or an AWS CLI too old to
+    connect, has to be found first. It reads nothing from the deployment, because on a first deploy there is none, and it
+    writes nothing."""
+
+    def test_names_that_connect_accepts_pass_and_come_back_in_order_and_lowercase(self):
+        assert devops_agent.check(FakeAws(), "Orders, cart  ui") == ["orders", "cart", "ui"]
+
+    def test_a_name_given_twice_comes_back_once(self):
+        assert devops_agent.check(FakeAws(), "orders orders") == ["orders"]
+
+    def test_all_passes(self):
+        assert devops_agent.check(FakeAws(), "all") == ["all"]
+
+    def test_nothing_named_is_refused(self):
+        with pytest.raises(devops_agent.DevOpsAgentError, match="name the services to connect"):
+            devops_agent.check(FakeAws(), "  ")
+
+    def test_an_unknown_name_is_refused_and_the_known_ones_are_listed(self):
+        with pytest.raises(devops_agent.DevOpsAgentError, match=r"unknown service orderz.*ui, catalog, cart, checkout, orders, assets"):
+            devops_agent.check(FakeAws(), "orders orderz")
+
+    def test_an_aws_cli_too_old_to_connect_is_refused_with_the_advice(self):
+        fake = FakeAws()
+        fake.devops_cli_supported = False
+        with pytest.raises(devops_agent.CliNotSupported, match=r"install AWS CLI 2\.38\.0 or later"):
+            devops_agent.check(fake, "orders")
+
+    def test_a_bad_name_is_reported_before_the_aws_cli_is_even_asked(self):
+        fake = FakeAws()
+        fake.devops_cli_supported = False
+        with pytest.raises(devops_agent.DevOpsAgentError, match="unknown service orderz") as refused:
+            devops_agent.check(fake, "orderz")
+        assert not isinstance(refused.value, devops_agent.CliNotSupported)
+        assert fake.calls == []
+
+    def test_it_agrees_with_connect_about_which_names_are_valid(self):
+        # If check passed a name that select_services then refused, the deploy would fail after two hours.
+        env = environment(FakeAws())
+        for names in ("orders", "Orders, cart  ui", "all", "orders orders", "all orderz"):
+            devops_agent.check(FakeAws(), names)
+            devops_agent.select_services(env, names)
+        for names in ("", "  ", "orderz", "orders orderz"):
+            with pytest.raises(devops_agent.DevOpsAgentError):
+                devops_agent.check(FakeAws(), names)
+            with pytest.raises(devops_agent.DevOpsAgentError):
+                devops_agent.select_services(env, names)
+
+    def test_the_only_aws_call_is_the_cli_probe_which_makes_no_aws_call_itself(self):
+        fake = FakeAws()
+        fake.outputs = None  # a first deploy: the ngrh stack does not exist
+        devops_agent.check(fake, "orders")
+        assert [(c[0], c[1]) for c in fake.calls] == [("resiliencehubv2", "update-service")]
+        assert updates(fake)[0][3] == {"generate_cli_skeleton": "input"} and real_updates(fake) == []
+
+    def test_the_command_works_before_the_ngrh_stack_exists_and_needs_no_agent_space(self, capsys):
+        fake = FakeAws()
+        fake.outputs = None
+        code, _ = run_cli(fake, "check", "--services", "orders cart")
+        out = capsys.readouterr()
+        assert code == 0 and out.err == ""
+        assert "orders, cart" in out.out
+        assert [c[1] for c in fake.calls] == ["update-service"], "no stack or service is read"
+
+    def test_the_command_says_what_will_be_connected_and_that_it_costs_money(self, capsys):
+        run_cli(FakeAws(), "check", "--services", "orders cart")
+        out = capsys.readouterr().out
+        assert "after the deploy" in out and "orders, cart" in out
+        assert "paid DevOps Agent investigation for each finding" in out and "shown before anything is changed" in out
+
+    def test_the_command_says_all_means_every_service(self, capsys):
+        run_cli(FakeAws(), "check", "--services", "all")
+        assert "all 6 services" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("services, reason", [("orderz", "unknown service orderz"), ("", "name the services to connect"),
+                                                  ("  ", "name the services to connect")])
+    def test_a_name_connect_would_refuse_exits_one_with_the_reason_on_stderr(self, capsys, services, reason):
+        code, _ = run_cli(FakeAws(), "check", "--services", services)
+        out = capsys.readouterr()
+        assert code == 1 and reason in out.err and out.out == ""
+
+    def test_an_old_aws_cli_exits_one_with_the_advice_and_the_message_names_the_cause(self, capsys):
+        fake = FakeAws()
+        fake.devops_cli_supported = False
+        code, _ = run_cli(fake, "check", "--services", "orders")
+        out = capsys.readouterr()
+        assert code == 1 and "install AWS CLI 2.38.0 or later" in out.err and out.out == ""
+
+    def test_the_other_actions_still_need_the_ngrh_stack(self, capsys):
+        # check is the one action that runs without it; status, connect and disconnect read the services.
+        for action, extra in (("status", ()), ("connect", ("--space-arn", SPACE, "--services", "orders")), ("disconnect", ())):
+            fake = FakeAws()
+            fake.outputs = None
+            code, _ = run_cli(fake, action, *extra)
+            assert code != 0 and "does not exist" in capsys.readouterr().err, action
 
 
 class TestConnect:
@@ -442,7 +541,7 @@ class TestCommand:
         assert code == 1 and "make ngrh" in capsys.readouterr().err
 
     def test_the_makefile_uses_every_action(self):
-        assert devops_agent.ACTIONS == ("connect", "disconnect", "status")
+        assert devops_agent.ACTIONS == ("connect", "disconnect", "status", "check")
         makefile = (DEPLOYMENT / "Makefile").read_text()
         for action in devops_agent.ACTIONS:
             assert f"ngrh_testing devops-agent {action} " in makefile or f"ngrh_testing devops-agent {action}\n" in makefile, action

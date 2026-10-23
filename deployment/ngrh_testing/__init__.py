@@ -17,5 +17,7 @@ Commands:
   stop          stop the test's active run (make ngrh-test-stop).
   report        collect a run's report as JSON and markdown (make ngrh-test-report).
   devops-agent  connect named NGRH services to an AWS DevOps Agent Agent Space, disconnect them, or show
-                their state and finding counts (make devops-agent-connect, -disconnect and -status).
+                their state and finding counts (make devops-agent-connect, -disconnect and -status); check
+                that the names and the AWS CLI would let a connect through, before a deploy (make deploy
+                DEVOPS_AGENT_CONNECT=<services>).
 """

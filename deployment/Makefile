@@ -28,6 +28,32 @@ PRIMARY_ONLY=false
 endif
 ####
 
+####
+# Optional: make deploy DEVOPS_AGENT_CONNECT="orders" is the one-command way to use AWS DevOps Agent (README,
+# "Investigating with AWS DevOps Agent"). Before it deploys anything it checks the names and that the AWS CLI can
+# connect a service (devops-agent-connect-preflight). After the deploy it runs make devops-agent, which creates the Agent
+# Space and gives the invoker role access to it, waits DEVOPS_AGENT_IAM_WAIT seconds for IAM to catch up, and runs make
+# devops-agent-connect for the services named. That last step is what costs money: DevOps Agent starts one investigation
+# for each finding of each service connected. Without the variable make deploy does none of this, which is what the e2e
+# workflow gets. With DEVOPS_AGENT_SPACE_ARN=<arn>, an Agent Space you made, make devops-agent is left out and the
+# services connect to that one; set to nothing it takes the access away, which cannot go with connecting, so the check
+# refuses it. The names reach the recipes as an environment variable, so the shell never parses them as text.
+# The steps are kept in a variable, not written in the recipe of deploy: make runs a recipe line that has $(MAKE) in it
+# even under -n, so make -n deploy DEVOPS_AGENT_CONNECT=orders would deploy and connect for real.
+####
+DEVOPS_AGENT_IAM_WAIT ?= 60
+ifneq ($(strip $(DEVOPS_AGENT_CONNECT)),)
+export DEVOPS_AGENT_CONNECT
+DEVOPS_AGENT_PREFLIGHT = devops-agent-connect-preflight
+DEVOPS_AGENT_CONNECT_STEP = echo "Waiting $(DEVOPS_AGENT_IAM_WAIT) seconds for IAM to give the invoker role its new policy, because a connection that cannot use it yet is not sent again..." \
+	&& sleep $(DEVOPS_AGENT_IAM_WAIT) && $(MAKE) devops-agent-connect DEVOPS_AGENT_SERVICES="$$DEVOPS_AGENT_CONNECT"
+ifeq ($(origin DEVOPS_AGENT_SPACE_ARN),undefined)
+DEVOPS_AGENT_AFTER_DEPLOY = @$(MAKE) devops-agent && $(DEVOPS_AGENT_CONNECT_STEP)
+else
+DEVOPS_AGENT_AFTER_DEPLOY = @$(DEVOPS_AGENT_CONNECT_STEP)
+endif
+endif
+
 deploy-all: test-creds create-peer primary_infrastructure primary_ecs standby_infrastructure standby_ecs global_routing \
 	canaries_primary canaries_standby restore-reconciliation monitoring \
 	region-switch arc-dns-status secrets-rotation ngrh
@@ -40,7 +66,7 @@ deploy-primary: test-creds create-peer primary_infrastructure primary_ecs
 	--stack-name canaries${ENV} --parameter-overrides Env=${ENV} RemoteRegion=${STANDBY_REGION} PrimaryOnly=true VpcId=$(_CAN_VPC) --capabilities CAPABILITY_IAM --s3-bucket $(result) \
 	--tags service=shared
 
-deploy: deploy-all
+deploy: $(DEVOPS_AGENT_PREFLIGHT) deploy-all
 	@echo "*** Deployment Outputs ****"
 	@echo ""
 	@echo "Canaries:"
@@ -52,6 +78,7 @@ deploy: deploy-all
 	@echo ""
 	@echo "Region Switch Plan:"
 	@echo "Use 'aws arc-region-switch start-plan-execution' to initiate failover"
+	$(DEVOPS_AGENT_AFTER_DEPLOY)
 
 create-peer:
 	@echo "Verifying if the AWSServiceRoleForECS exists; if not; this will be created for you..."
@@ -946,6 +973,8 @@ ngrh:
 # make devops-agent-connect DEVOPS_AGENT_SERVICES="orders cart" (or all) is what
 # costs money: DevOps Agent starts one investigation for each finding of each
 # service connected, and bills it by the agent-second.
+# make deploy DEVOPS_AGENT_CONNECT="orders" does the deploy, this, and the connect in one command (the comment above
+# deploy-all says how).
 ####
 devops-agent:
 	@aws cloudformation deploy --template ./devops-agent.yaml --region $(PRIMARY_REGION) \
@@ -975,6 +1004,17 @@ devops-agent-connect:
 		exit 1; \
 	fi; \
 	python3 -m ngrh_testing devops-agent connect $(NGRH_TESTING_ARGS) --space-arn "$$space" --services "$$DEVOPS_AGENT_SERVICES"
+
+# What make deploy DEVOPS_AGENT_CONNECT=<services> asks before it deploys anything (see the comment above deploy-all):
+# DEVOPS_AGENT_SPACE_ARN set to nothing takes the invoker role's access away, which cannot go with connecting, and the tool
+# checks that the names are services and that the AWS CLI can connect one. Connect would refuse either after a deploy of
+# about two hours. It reads nothing from the deployment, because on a first deploy there is none.
+devops-agent-connect-preflight:
+	@if [ "$${DEVOPS_AGENT_SPACE_ARN+set}" = set ] && [ -z "$$DEVOPS_AGENT_SPACE_ARN" ]; then \
+		echo "ERROR: DEVOPS_AGENT_CONNECT connects services to an Agent Space, and DEVOPS_AGENT_SPACE_ARN= (set to nothing) takes the access to it away. Use one or the other." >&2; \
+		exit 1; \
+	fi
+	@python3 -m ngrh_testing devops-agent check $(NGRH_TESTING_ARGS) --services "$$DEVOPS_AGENT_CONNECT"
 
 # Takes the NGRH services off their Agent Space. It does nothing unless the ngrh
 # stack was given one, so it is safe to run on any deployment (destroy-ngrh does).
