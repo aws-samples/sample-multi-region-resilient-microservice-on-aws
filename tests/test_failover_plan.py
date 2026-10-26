@@ -11,6 +11,7 @@ choice stays a person's. The ui scale-up waits until the load balancer counts it
 checks the two Regions' service quotas, reporting a shortfall without requesting an increase.
 """
 
+import fnmatch
 import re
 import sys
 from pathlib import Path
@@ -211,12 +212,25 @@ class TestTargetHealthAndQuotas:
         assert _resources_allowing("ecs:ListTasks") == ["*"]
         assert _resources_allowing("elasticloadbalancing:DescribeTargetHealth") == ["*"]
         (resources,) = _resources_allowing("ecs:DescribeTasks")
-        assert [r["!Sub"][0] for r in resources] == [
-            "arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task/${ClusterName}/*",
-            "arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task/${ClusterName}/*"]
-        assert [r["!Sub"][1]["ClusterName"] for r in resources] == [
-            {"!Select": [1, {"!Split": ["/", {"!Ref": "PrimaryClusterArn"}]}]},
-            {"!Select": [1, {"!Split": ["/", {"!Ref": "StandbyClusterArn"}]}]}]
+        # Every task in the two Regions: plan evaluation tests the read on a task outside any cluster.
+        assert [_sub(r) for r in resources] == [f"arn:aws:ecs:us-east-1:{ACCOUNT}:task/*",
+                                                f"arn:aws:ecs:us-west-2:{ACCOUNT}:task/*"]
+
+    @pytest.mark.parametrize("action, kind", [("ecs:DescribeTasks", "task"),
+                                              ("ecs:DescribeContainerInstances", "container-instance")])
+    def test_the_grant_covers_the_name_plan_evaluation_tests_and_the_clusters_resources(self, action, kind):
+        (resources,) = _resources_allowing(action)
+        patterns = [_sub(r) for r in resources]
+
+        def allowed(arn):
+            # IAM's * matches any characters, slashes included, as fnmatch's does.
+            return any(fnmatch.fnmatchcase(arn, p) for p in patterns)
+
+        for region in REGIONS.values():
+            assert allowed(f"arn:aws:ecs:{region}:{ACCOUNT}:{kind}/sq-permission-probe")
+            assert allowed(f"arn:aws:ecs:{region}:{ACCOUNT}:{kind}/apps{ENV}-EcsCluster-AbCdEf123456/0123456789abcdef")
+        assert not allowed(f"arn:aws:ecs:eu-west-1:{ACCOUNT}:{kind}/sq-permission-probe")
+        assert not allowed(f"arn:aws:ecs:us-east-1:222222222222:{kind}/sq-permission-probe")
 
     def test_the_plan_checks_service_quotas_and_says_so_explicitly(self):
         # Unset, the setting is the service's default for the plan's creation date, and an update keeps it.
@@ -226,6 +240,22 @@ class TestTargetHealthAndQuotas:
         for action in ("servicequotas:GetServiceQuota", "ecs:DescribeTaskDefinition", "ecs:DescribeCapacityProviders"):
             assert _resources_allowing(action) == ["*"], action
         assert _resources_allowing("ecs:DescribeServices") and _resources_allowing("ecs:DescribeClusters")
+
+    def test_the_role_has_the_ec2_side_reads_plan_evaluation_tests(self):
+        # Plan evaluation tests these for every ECS service, Fargate ones included, and names each one the role
+        # lacks. The EC2 and Auto Scaling actions take no resource ARN, so "*" is the only resource they accept.
+        for action in ("ec2:DescribeInstances", "ec2:DescribeLaunchTemplateVersions",
+                       "autoscaling:DescribeLaunchConfigurations"):
+            assert _resources_allowing(action) == ["*"], action
+        (resources,) = _resources_allowing("ecs:DescribeContainerInstances")
+        assert [_sub(r) for r in resources] == [f"arn:aws:ecs:us-east-1:{ACCOUNT}:container-instance/*",
+                                                f"arn:aws:ecs:us-west-2:{ACCOUNT}:container-instance/*"]
+
+    def test_the_role_gets_no_other_ec2_or_auto_scaling_action(self):
+        # The three reads above and nothing else: a wider grant such as ec2:Describe*, or any write, fails here.
+        actions = {a for s in _policy_statements(ROLE) for a in _as_list(s["Action"])}
+        assert {a for a in actions if a.split(":")[0] in ("ec2", "autoscaling")} == {
+            "ec2:DescribeInstances", "ec2:DescribeLaunchTemplateVersions", "autoscaling:DescribeLaunchConfigurations"}
 
     def test_the_role_cannot_request_a_quota_increase(self):
         # Warnings only. An increase request opens a support case in whatever account deploys the sample.
@@ -551,6 +581,19 @@ class TestReadme:
         for action in ("servicequotas:RequestServiceQuotaIncrease", "servicequotas:GetRequestedServiceQuotaChange"):
             assert f"`{action}`" in SECTION
             assert not _resources_allowing(action), f"the README says the role lacks {action}"
+        assert "and `iam:CreateServiceLinkedRole` in an account that has never requested a quota increase" in SECTION
+
+    def test_the_plan_evaluation_warning_is_described_as_the_role_has_it(self):
+        assert "**What plan evaluation shows.**" in SECTION
+        assert ("one warning naming `servicequotas:RequestServiceQuotaIncrease` and "
+                "`servicequotas:GetRequestedServiceQuotaChange`, the two permissions the role leaves out") in SECTION
+        for action in ("ecs:DescribeContainerInstances", "ec2:DescribeInstances", "ec2:DescribeLaunchTemplateVersions",
+                       "autoscaling:DescribeLaunchConfigurations"):
+            assert f"`{action}`" in SECTION
+            assert _resources_allowing(action), f"the README says the role has {action}"
+        assert "so that grant covers every task in the two Regions, not only the two clusters' tasks" in SECTION
+        (resources,) = _resources_allowing("ecs:DescribeTasks")
+        assert all(_sub(r).endswith(":task/*") for r in resources)
 
     def test_the_stated_objective_and_retention_are_the_templates(self):
         assert f"recovery time objective of {PLAN['RecoveryTimeObjectiveMinutes']} minutes" in SECTION

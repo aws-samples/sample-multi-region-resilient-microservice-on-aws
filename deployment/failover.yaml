@@ -165,16 +165,14 @@ Resources:
                   - "ecs:ListTasks"
                   - "elasticloadbalancing:DescribeTargetHealth"
                 Resource: "*"
+              # Every task in the two Regions, not only the two clusters' tasks: plan evaluation tests this read on a
+              # task outside any cluster (task/sq-permission-probe) and reports it missing unless the grant covers it.
               - Effect: Allow
                 Action:
                   - "ecs:DescribeTasks"
                 Resource:
-                  - !Sub
-                    - 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task/${ClusterName}/*'
-                    - ClusterName: !Select [1, !Split ["/", !Ref PrimaryClusterArn]]
-                  - !Sub
-                    - 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task/${ClusterName}/*'
-                    - ClusterName: !Select [1, !Split ["/", !Ref StandbyClusterArn]]
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task/*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task/*'
               # Service quota checks: ARC reads each scaled service's task definition and capacity providers to work
               # out which quotas it uses, then reads those quotas in both Regions. Reading only: without
               # servicequotas:RequestServiceQuotaIncrease ARC files no increase, and so opens no support case, in the
@@ -184,6 +182,25 @@ Resources:
                   - "ecs:DescribeTaskDefinition"
                   - "ecs:DescribeCapacityProviders"
                   - "servicequotas:GetServiceQuota"
+                Resource: "*"
+              # Plan evaluation also tests the reads a quota check needs for services on EC2 container instances
+              # (the instances, and an Auto Scaling group's launch template or launch configuration), although all six
+              # services here run on Fargate, and reports each one the role lacks. With them, its only warning names
+              # the two increase-request permissions the role leaves out. They let the role read every EC2 instance,
+              # launch template and launch configuration in the account, including the user data of launch templates
+              # and launch configurations. The EC2 and Auto Scaling actions take no resource ARN, so "*" is the only
+              # resource they accept.
+              - Effect: Allow
+                Action:
+                  - "ecs:DescribeContainerInstances"
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:container-instance/*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:container-instance/*'
+              - Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                  - "ec2:DescribeLaunchTemplateVersions"
+                  - "autoscaling:DescribeLaunchConfigurations"
                 Resource: "*"
               - Effect: Allow
                 Action:
