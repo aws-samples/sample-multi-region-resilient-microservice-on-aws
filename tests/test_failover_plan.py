@@ -7,7 +7,8 @@ so traffic moves before the database does. The plan carries the recovery time ob
 the permission for its execution role to start the plan and the eight alarm triggers that use it: a journey that
 fails in one Region, confirmed from the other while that one is healthy, deactivates the failing Region. Nothing
 here fails a database over with data loss on its own: the one Aurora block is a switchover, and the ungraceful
-choice stays a person's.
+choice stays a person's. The ui scale-up waits until the load balancer counts its new tasks healthy, and the plan
+checks the two Regions' service quotas, reporting a shortfall without requesting an increase.
 """
 
 import re
@@ -167,6 +168,71 @@ class TestDeactivateWorkflow:
     def test_the_plan_has_the_two_workflows_an_active_active_plan_needs(self):
         assert PLAN["RecoveryApproach"] == "activeActive"
         assert sorted(w["WorkflowTargetAction"] for w in PLAN["Workflows"]) == ["activate", "deactivate"]
+
+
+# --- target health and service quotas -----------------------------------------------------------
+
+ECS_TEMPLATE = _load_template(DEPLOYMENT / "ecs.yaml")
+
+
+def _services_behind_a_load_balancer():
+    """The services ecs.yaml registers with a load balancer target group, named as SERVICES names them."""
+    return {res["Properties"]["ServiceName"]["!Sub"].removesuffix("${Env}")
+            for res in ECS_TEMPLATE["Resources"].values()
+            if res["Type"] == "AWS::ECS::Service" and res["Properties"].get("LoadBalancers")}
+
+
+def _scaling_configs():
+    """service -> its EcsCapacityIncreaseConfig in the deactivate workflow."""
+    step = _workflow("deactivate")["Steps"][0]
+    return {c["Name"].removeprefix("scale-"): c["ExecutionBlockConfiguration"]["EcsCapacityIncreaseConfig"]
+            for c in step["ExecutionBlockConfiguration"]["ParallelConfig"]["Steps"]}
+
+
+def _resources_allowing(action):
+    """The Resource of each execution-role statement that allows the action."""
+    return [s["Resource"] for s in _policy_statements(ROLE) if action in _as_list(s["Action"])]
+
+
+class TestTargetHealthAndQuotas:
+
+    def test_ui_is_the_only_service_behind_a_load_balancer(self):
+        # The wait below is set for the services that have a target group. A service that gets one needs it too.
+        assert _services_behind_a_load_balancer() == {"ui"}
+
+    def test_exactly_the_services_behind_a_load_balancer_wait_for_target_health(self):
+        configs = _scaling_configs()
+        waiting = {name for name, config in configs.items() if config.get("WaitELBTargetGroupHealthy") == "enabled"}
+        assert waiting == _services_behind_a_load_balancer()
+        # The others leave it unset: ARC skips the check for a service without a target group.
+        assert all("WaitELBTargetGroupHealthy" not in configs[name] for name in set(configs) - waiting)
+
+    def test_the_role_can_find_the_tasks_and_read_their_target_health(self):
+        assert _resources_allowing("ecs:ListTasks") == ["*"]
+        assert _resources_allowing("elasticloadbalancing:DescribeTargetHealth") == ["*"]
+        (resources,) = _resources_allowing("ecs:DescribeTasks")
+        assert [r["!Sub"][0] for r in resources] == [
+            "arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task/${ClusterName}/*",
+            "arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task/${ClusterName}/*"]
+        assert [r["!Sub"][1]["ClusterName"] for r in resources] == [
+            {"!Select": [1, {"!Split": ["/", {"!Ref": "PrimaryClusterArn"}]}]},
+            {"!Select": [1, {"!Split": ["/", {"!Ref": "StandbyClusterArn"}]}]}]
+
+    def test_the_plan_checks_service_quotas_and_says_so_explicitly(self):
+        # Unset, the setting is the service's default for the plan's creation date, and an update keeps it.
+        assert PLAN["ServiceQuotaChecksEnabled"] is True
+
+    def test_the_role_can_read_what_the_quota_check_reads(self):
+        for action in ("servicequotas:GetServiceQuota", "ecs:DescribeTaskDefinition", "ecs:DescribeCapacityProviders"):
+            assert _resources_allowing(action) == ["*"], action
+        assert _resources_allowing("ecs:DescribeServices") and _resources_allowing("ecs:DescribeClusters")
+
+    def test_the_role_cannot_request_a_quota_increase(self):
+        # Warnings only. An increase request opens a support case in whatever account deploys the sample.
+        text = yaml.dump(RESOURCES)
+        for action in ("servicequotas:RequestServiceQuotaIncrease", "servicequotas:GetRequestedServiceQuotaChange",
+                       "iam:CreateServiceLinkedRole"):
+            assert action not in text, action
 
 
 # --- recovery objective, associated alarms ------------------------------------------------------
@@ -472,6 +538,19 @@ class TestReadme:
 
     def test_the_numbers_note_under_the_diagram_gives_the_real_order(self):
         assert "The plan runs them in the order 1, 2, 4, 3" in README
+
+    def test_the_target_health_wait_is_described_for_the_services_that_have_it(self):
+        assert _services_behind_a_load_balancer() == {"ui"}
+        assert "For ui, the only service behind the load balancer, the step also waits until the new tasks pass the target group's health check" in SECTION
+        assert "These runs predate the scale-up waiting for ui's health check." in SECTION
+
+    def test_the_quota_checks_are_described_as_the_template_has_them(self):
+        assert PLAN["ServiceQuotaChecksEnabled"] is True
+        assert "**Service quotas in the Region that stays.**" in SECTION
+        assert "The execution role can read quotas and not request them, so ARC never files an increase" in SECTION
+        for action in ("servicequotas:RequestServiceQuotaIncrease", "servicequotas:GetRequestedServiceQuotaChange"):
+            assert f"`{action}`" in SECTION
+            assert not _resources_allowing(action), f"the README says the role lacks {action}"
 
     def test_the_stated_objective_and_retention_are_the_templates(self):
         assert f"recovery time objective of {PLAN['RecoveryTimeObjectiveMinutes']} minutes" in SECTION
