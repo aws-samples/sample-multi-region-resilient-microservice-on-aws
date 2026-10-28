@@ -117,7 +117,7 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("action", choices=devops_agent.ACTIONS)
     g.add_argument("--space-arn", default="", help="the Agent Space's ARN (connect needs it)")
     g.add_argument("--services", default="",
-                   help="the services to connect (connect needs it): names from "
+                   help="the services to connect (connect and check need it): names from "
                         f"{', '.join(devops_agent.SERVICE_NAMES)}, separated by spaces or commas, or {devops_agent.ALL}. "
                         "Connecting starts one paid investigation for each finding of each service")
     g.add_argument("--if-supported", action="store_true",
@@ -312,6 +312,17 @@ def _failback_command(aws: AwsCli, args: argparse.Namespace, sleep: Callable[[fl
                         lambda line: sys.stderr.write(line + "\n"))
 
 
+def _devops_agent_check(aws: AwsCli, args: argparse.Namespace) -> int:
+    """check: exit 0 when connect would not refuse these services or this AWS CLI. It reads nothing from the deployment
+    (make deploy DEVOPS_AGENT_CONNECT=<services> runs it before the first stack exists) and writes nothing."""
+    names = devops_agent.check(aws, args.services)
+    shown = f"all {len(devops_agent.SERVICE_NAMES)} services" if names == [devops_agent.ALL] else ", ".join(names)
+    _say(f"DevOps Agent: after the deploy, {shown} will be connected to the Agent Space. This AWS CLI can do that.")
+    _say("Connecting starts one paid DevOps Agent investigation for each finding of each service; "
+         "the counts are shown before anything is changed.")
+    return EXIT_OK
+
+
 def _devops_agent_command(aws: AwsCli, env: Environment, args: argparse.Namespace, sleep: Callable[[float], None],
                           clock: Callable[[], float]) -> int:
     """connect and disconnect exit 3 when a service is left in a state the output names; status only reads."""
@@ -378,6 +389,8 @@ def main(argv: Optional[List[str]] = None, aws: Optional[AwsCli] = None, now_sec
             return EXIT_OK
         if args.command == "failback":
             return _failback_command(aws, args, sleep, clock, now)
+        if args.command == "devops-agent" and args.action == "check":
+            return _devops_agent_check(aws, args)  # before load_environment: on a first deploy there is no ngrh stack yet
         if args.command == "preflight":  # check 1: the credential sentinel
             try:
                 aws.account_id()
