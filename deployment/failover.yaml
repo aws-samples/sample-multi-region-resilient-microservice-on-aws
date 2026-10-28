@@ -158,6 +158,50 @@ Resources:
                 Action:
                   - "ecs:ListServices"
                 Resource: "*"
+              # The ui scaling step waits for target health: ARC lists the service's tasks, reads each task's IP
+              # address, and reads the health of those targets in the service's target group.
+              - Effect: Allow
+                Action:
+                  - "ecs:ListTasks"
+                  - "elasticloadbalancing:DescribeTargetHealth"
+                Resource: "*"
+              # Every task in the two Regions, not only the two clusters' tasks: plan evaluation tests this read on a
+              # task outside any cluster (task/sq-permission-probe) and reports it missing unless the grant covers it.
+              - Effect: Allow
+                Action:
+                  - "ecs:DescribeTasks"
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:task/*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:task/*'
+              # Service quota checks: ARC reads each scaled service's task definition and capacity providers to work
+              # out which quotas it uses, then reads those quotas in both Regions. Reading only: without
+              # servicequotas:RequestServiceQuotaIncrease ARC files no increase, and so opens no support case, in the
+              # account that deploys the sample.
+              - Effect: Allow
+                Action:
+                  - "ecs:DescribeTaskDefinition"
+                  - "ecs:DescribeCapacityProviders"
+                  - "servicequotas:GetServiceQuota"
+                Resource: "*"
+              # Plan evaluation also tests the reads a quota check needs for services on EC2 container instances
+              # (the instances, and an Auto Scaling group's launch template or launch configuration), although all six
+              # services here run on Fargate, and reports each one the role lacks. With them, its only warning names
+              # the two increase-request permissions the role leaves out. They let the role read every EC2 instance,
+              # launch template and launch configuration in the account, including the user data of launch templates
+              # and launch configurations. The EC2 and Auto Scaling actions take no resource ARN, so "*" is the only
+              # resource they accept.
+              - Effect: Allow
+                Action:
+                  - "ecs:DescribeContainerInstances"
+                Resource:
+                  - !Sub 'arn:aws:ecs:${PrimaryRegion}:${AWS::AccountId}:container-instance/*'
+                  - !Sub 'arn:aws:ecs:${StandbyRegion}:${AWS::AccountId}:container-instance/*'
+              - Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                  - "ec2:DescribeLaunchTemplateVersions"
+                  - "autoscaling:DescribeLaunchConfigurations"
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - "application-autoscaling:DescribeScalableTargets"
@@ -230,6 +274,11 @@ Resources:
       # ARC reports each execution against this objective: the time from the start of the execution until the
       # application health alarms below are green.
       RecoveryTimeObjectiveMinutes: 10
+      # ARC compares the two Regions' quotas for what the scaling steps launch (such as Fargate vCPUs), within 30
+      # minutes of a create or update and then daily, and lists a quota that is lower in one Region as a warning. Set
+      # here because the default depends on when the plan was created, and an update keeps whatever the plan had. The
+      # role can read quotas but not request them, so ARC never files an increase on its own.
+      ServiceQuotaChecksEnabled: true
       ReportConfiguration:
         ReportOutput:
           # The bucket and prefix ReportsBucket holds; the execution role may write under executions/.
@@ -534,6 +583,11 @@ Resources:
                           TargetPercent: 200
                           CapacityMonitoringApproach: containerInsightsMaxInLast24Hours
                           TimeoutMinutes: 15
+                          # Done only when the load balancer counts the new ui tasks healthy, not when they run, so
+                          # DNS never moves onto tasks the load balancer won't send requests to. ui is the only
+                          # service behind a target group; the others are reached through Service Connect, and ARC
+                          # skips the check for a service without one.
+                          WaitELBTargetGroupHealthy: enabled
             - Name: shift-dns-traffic-away
               ExecutionBlockType: Route53HealthCheck
               ExecutionBlockConfiguration:

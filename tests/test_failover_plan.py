@@ -7,9 +7,11 @@ so traffic moves before the database does. The plan carries the recovery time ob
 the permission for its execution role to start the plan and the eight alarm triggers that use it: a journey that
 fails in one Region, confirmed from the other while that one is healthy, deactivates the failing Region. Nothing
 here fails a database over with data loss on its own: the one Aurora block is a switchover, and the ungraceful
-choice stays a person's.
+choice stays a person's. The ui scale-up waits until the load balancer counts its new tasks healthy, and the plan
+checks the two Regions' service quotas, reporting a shortfall without requesting an increase.
 """
 
+import fnmatch
 import re
 import sys
 from pathlib import Path
@@ -167,6 +169,100 @@ class TestDeactivateWorkflow:
     def test_the_plan_has_the_two_workflows_an_active_active_plan_needs(self):
         assert PLAN["RecoveryApproach"] == "activeActive"
         assert sorted(w["WorkflowTargetAction"] for w in PLAN["Workflows"]) == ["activate", "deactivate"]
+
+
+# --- target health and service quotas -----------------------------------------------------------
+
+ECS_TEMPLATE = _load_template(DEPLOYMENT / "ecs.yaml")
+
+
+def _services_behind_a_load_balancer():
+    """The services ecs.yaml registers with a load balancer target group, named as SERVICES names them."""
+    return {res["Properties"]["ServiceName"]["!Sub"].removesuffix("${Env}")
+            for res in ECS_TEMPLATE["Resources"].values()
+            if res["Type"] == "AWS::ECS::Service" and res["Properties"].get("LoadBalancers")}
+
+
+def _scaling_configs():
+    """service -> its EcsCapacityIncreaseConfig in the deactivate workflow."""
+    step = _workflow("deactivate")["Steps"][0]
+    return {c["Name"].removeprefix("scale-"): c["ExecutionBlockConfiguration"]["EcsCapacityIncreaseConfig"]
+            for c in step["ExecutionBlockConfiguration"]["ParallelConfig"]["Steps"]}
+
+
+def _resources_allowing(action):
+    """The Resource of each execution-role statement that allows the action."""
+    return [s["Resource"] for s in _policy_statements(ROLE) if action in _as_list(s["Action"])]
+
+
+class TestTargetHealthAndQuotas:
+
+    def test_ui_is_the_only_service_behind_a_load_balancer(self):
+        # The wait below is set for the services that have a target group. A service that gets one needs it too.
+        assert _services_behind_a_load_balancer() == {"ui"}
+
+    def test_exactly_the_services_behind_a_load_balancer_wait_for_target_health(self):
+        configs = _scaling_configs()
+        waiting = {name for name, config in configs.items() if config.get("WaitELBTargetGroupHealthy") == "enabled"}
+        assert waiting == _services_behind_a_load_balancer()
+        # The others leave it unset: ARC skips the check for a service without a target group.
+        assert all("WaitELBTargetGroupHealthy" not in configs[name] for name in set(configs) - waiting)
+
+    def test_the_role_can_find_the_tasks_and_read_their_target_health(self):
+        assert _resources_allowing("ecs:ListTasks") == ["*"]
+        assert _resources_allowing("elasticloadbalancing:DescribeTargetHealth") == ["*"]
+        (resources,) = _resources_allowing("ecs:DescribeTasks")
+        # Every task in the two Regions: plan evaluation tests the read on a task outside any cluster.
+        assert [_sub(r) for r in resources] == [f"arn:aws:ecs:us-east-1:{ACCOUNT}:task/*",
+                                                f"arn:aws:ecs:us-west-2:{ACCOUNT}:task/*"]
+
+    @pytest.mark.parametrize("action, kind", [("ecs:DescribeTasks", "task"),
+                                              ("ecs:DescribeContainerInstances", "container-instance")])
+    def test_the_grant_covers_the_name_plan_evaluation_tests_and_the_clusters_resources(self, action, kind):
+        (resources,) = _resources_allowing(action)
+        patterns = [_sub(r) for r in resources]
+
+        def allowed(arn):
+            # IAM's * matches any characters, slashes included, as fnmatch's does.
+            return any(fnmatch.fnmatchcase(arn, p) for p in patterns)
+
+        for region in REGIONS.values():
+            assert allowed(f"arn:aws:ecs:{region}:{ACCOUNT}:{kind}/sq-permission-probe")
+            assert allowed(f"arn:aws:ecs:{region}:{ACCOUNT}:{kind}/apps{ENV}-EcsCluster-AbCdEf123456/0123456789abcdef")
+        assert not allowed(f"arn:aws:ecs:eu-west-1:{ACCOUNT}:{kind}/sq-permission-probe")
+        assert not allowed(f"arn:aws:ecs:us-east-1:222222222222:{kind}/sq-permission-probe")
+
+    def test_the_plan_checks_service_quotas_and_says_so_explicitly(self):
+        # Unset, the setting is the service's default for the plan's creation date, and an update keeps it.
+        assert PLAN["ServiceQuotaChecksEnabled"] is True
+
+    def test_the_role_can_read_what_the_quota_check_reads(self):
+        for action in ("servicequotas:GetServiceQuota", "ecs:DescribeTaskDefinition", "ecs:DescribeCapacityProviders"):
+            assert _resources_allowing(action) == ["*"], action
+        assert _resources_allowing("ecs:DescribeServices") and _resources_allowing("ecs:DescribeClusters")
+
+    def test_the_role_has_the_ec2_side_reads_plan_evaluation_tests(self):
+        # Plan evaluation tests these for every ECS service, Fargate ones included, and names each one the role
+        # lacks. The EC2 and Auto Scaling actions take no resource ARN, so "*" is the only resource they accept.
+        for action in ("ec2:DescribeInstances", "ec2:DescribeLaunchTemplateVersions",
+                       "autoscaling:DescribeLaunchConfigurations"):
+            assert _resources_allowing(action) == ["*"], action
+        (resources,) = _resources_allowing("ecs:DescribeContainerInstances")
+        assert [_sub(r) for r in resources] == [f"arn:aws:ecs:us-east-1:{ACCOUNT}:container-instance/*",
+                                                f"arn:aws:ecs:us-west-2:{ACCOUNT}:container-instance/*"]
+
+    def test_the_role_gets_no_other_ec2_or_auto_scaling_action(self):
+        # The three reads above and nothing else: a wider grant such as ec2:Describe*, or any write, fails here.
+        actions = {a for s in _policy_statements(ROLE) for a in _as_list(s["Action"])}
+        assert {a for a in actions if a.split(":")[0] in ("ec2", "autoscaling")} == {
+            "ec2:DescribeInstances", "ec2:DescribeLaunchTemplateVersions", "autoscaling:DescribeLaunchConfigurations"}
+
+    def test_the_role_cannot_request_a_quota_increase(self):
+        # Warnings only. An increase request opens a support case in whatever account deploys the sample.
+        text = yaml.dump(RESOURCES)
+        for action in ("servicequotas:RequestServiceQuotaIncrease", "servicequotas:GetRequestedServiceQuotaChange",
+                       "iam:CreateServiceLinkedRole"):
+            assert action not in text, action
 
 
 # --- recovery objective, associated alarms ------------------------------------------------------
@@ -472,6 +568,32 @@ class TestReadme:
 
     def test_the_numbers_note_under_the_diagram_gives_the_real_order(self):
         assert "The plan runs them in the order 1, 2, 4, 3" in README
+
+    def test_the_target_health_wait_is_described_for_the_services_that_have_it(self):
+        assert _services_behind_a_load_balancer() == {"ui"}
+        assert "For ui, the only service behind the load balancer, the step also waits until the new tasks pass the target group's health check" in SECTION
+        assert "These runs predate the scale-up waiting for ui's health check." in SECTION
+
+    def test_the_quota_checks_are_described_as_the_template_has_them(self):
+        assert PLAN["ServiceQuotaChecksEnabled"] is True
+        assert "**Service quotas in the Region that stays.**" in SECTION
+        assert "The execution role can read quotas and not request them, so ARC never files an increase" in SECTION
+        for action in ("servicequotas:RequestServiceQuotaIncrease", "servicequotas:GetRequestedServiceQuotaChange"):
+            assert f"`{action}`" in SECTION
+            assert not _resources_allowing(action), f"the README says the role lacks {action}"
+        assert "and `iam:CreateServiceLinkedRole` in an account that has never requested a quota increase" in SECTION
+
+    def test_the_plan_evaluation_warning_is_described_as_the_role_has_it(self):
+        assert "**What plan evaluation shows.**" in SECTION
+        assert ("one warning naming `servicequotas:RequestServiceQuotaIncrease` and "
+                "`servicequotas:GetRequestedServiceQuotaChange`, the two permissions the role leaves out") in SECTION
+        for action in ("ecs:DescribeContainerInstances", "ec2:DescribeInstances", "ec2:DescribeLaunchTemplateVersions",
+                       "autoscaling:DescribeLaunchConfigurations"):
+            assert f"`{action}`" in SECTION
+            assert _resources_allowing(action), f"the README says the role has {action}"
+        assert "so that grant covers every task in the two Regions, not only the two clusters' tasks" in SECTION
+        (resources,) = _resources_allowing("ecs:DescribeTasks")
+        assert all(_sub(r).endswith(":task/*") for r in resources)
 
     def test_the_stated_objective_and_retention_are_the_templates(self):
         assert f"recovery time objective of {PLAN['RecoveryTimeObjectiveMinutes']} minutes" in SECTION
