@@ -1,4 +1,4 @@
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261026.1
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023.12.20261102.0
 
 # We tell DNF not to install Recommends and Suggests packages, which are
 # weak dependencies in DNF terminology, thus keeping our installed set of
