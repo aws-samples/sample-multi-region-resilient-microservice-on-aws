@@ -33,6 +33,10 @@
          parse DoS, fixed in 2.21.6). 2.21.4 already carries the
          CVE-2026-54512, CVE-2026-54513 and GHSA-r7wm-3cxj-wff9 fixes. -->
     <jackson-bom.version>2.21.7</jackson-bom.version>
+    <!-- Override Spring Boot 3.5.16 BOM (2.24.3) to patch CVE-2026-34478,
+         CVE-2026-34479 and CVE-2026-34480 (log4j-core, HIGH), fixed in
+         2.25.4. 2.25.5 is the log4j that Spring Boot 4.0.9 manages. -->
+    <log4j2.version>2.25.5</log4j2.version>
   </properties>
 
   <dependencies>
