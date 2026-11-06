@@ -35,6 +35,8 @@ the properties:
   fixed in 2.25.4. The BOM's 2.24.3 is below that, so each pom overrides ``log4j2.version``.
 * RabbitMQ Java client (orders): CVE-2026-106121 (through 5.36.0) and CVE-2026-106122
   (through 5.35.0) are fixed in 5.37.0, which replaces the 5.34.0 floor.
+* golang.org/x/net (catalog): CVE-2026-78661 is fixed in 0.62.0. catalog does not import
+  x/net itself; go.mod carries it as an indirect requirement, so ``go get`` is what moves it.
 
 Run with:  pytest tests/test_dependency_security_floors.py -v
 """
@@ -50,10 +52,12 @@ REPO_ROOT = Path(__file__).parent.parent
 ORDERS_POM = REPO_ROOT / "source" / "orders" / "pom.xml"
 CHECKOUT_LOCK = REPO_ROOT / "source" / "checkout" / "package-lock.json"
 POMS = {name: REPO_ROOT / "source" / name / "pom.xml" for name in ("cart", "orders", "ui")}
+CATALOG_GO_MOD = REPO_ROOT / "source" / "catalog" / "go.mod"
 
 RABBIT_CLIENT_FLOOR = (5, 37, 0)
 NETTY_FLOOR = (4, 2, 17)
 LOG4J2_FLOOR = (2, 25, 4)
+X_NET_FLOOR = (0, 62, 0)
 PROXY_ADDR_FLOOR = (2, 0, 8)
 
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -123,4 +127,13 @@ def test_log4j_core_is_overridden_to_a_release_that_fixes_cve_2026_34478(service
     assert _version(value) >= LOG4J2_FLOOR, (
         f"source/{service}/pom.xml sets log4j2.version {value}, below {_dotted(LOG4J2_FLOOR)}, "
         f"which CVE-2026-34478, CVE-2026-34479 and CVE-2026-34480 need"
+    )
+
+
+def test_catalog_requires_x_net_at_a_release_that_fixes_cve_2026_78661():
+    match = re.search(r"^\s*golang\.org/x/net\s+v(\d+\.\d+\.\d+)\b", CATALOG_GO_MOD.read_text(), re.MULTILINE)
+    assert match, "catalog's go.mod no longer requires golang.org/x/net; drop this test if no dependency needs it"
+    assert _version(match.group(1)) >= X_NET_FLOOR, (
+        f"golang.org/x/net v{match.group(1)} in source/catalog/go.mod, below v{_dotted(X_NET_FLOOR)}, "
+        f"which CVE-2026-78661 (HIGH) needs"
     )
