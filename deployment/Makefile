@@ -533,7 +533,7 @@ monitoring: restore-reconciliation
 	UiLoadBalancerFullName=$(_STANDBY_ALB) UiTargetGroupFullName=$(_STANDBY_UI_TG) --s3-bucket $(_CANARY_BUCKET_STANDBY) \
 	--tags service=shared
 
-arc-dns-status: region-switch boto3-layer
+arc-dns-status: region-switch
 	@echo "Deploy ARC DNS status Lambda to both regions"
 	# Resolve the plan ARN from the region-switch stack output rather than a
 	# list-plans name filter: the plan is named by failover.yaml (not
@@ -557,24 +557,6 @@ arc-dns-status: region-switch boto3-layer
 	--stack-name arc-dns-status${ENV} --capabilities CAPABILITY_IAM \
 	--parameter-overrides Env=${ENV} PlanArn=$(_PLAN_ARN) HostedZoneId=$(_HZ_ID) RecordName=$(_RECORD) KmsKey=retail-store-ar${ENV} \
 	--tags service=shared
-
-boto3-layer:
-	@echo "Ensuring boto3-latest Lambda layer exists in both regions"
-	@for region in $(PRIMARY_REGION) $(STANDBY_REGION); do \
-		if ! aws lambda get-layer-version --layer-name boto3-latest --version-number 1 --region $$region >/dev/null 2>&1; then \
-			echo "  Publishing boto3-latest layer in $$region..."; \
-			TMPDIR=$$(mktemp -d); \
-			mkdir -p $$TMPDIR/python; \
-			pip3 install boto3 -t $$TMPDIR/python --quiet; \
-			(cd $$TMPDIR && zip -r $$TMPDIR/boto3-latest.zip python -q); \
-			aws lambda publish-layer-version --layer-name boto3-latest \
-				--zip-file fileb://$$TMPDIR/boto3-latest.zip \
-				--compatible-runtimes python3.12 --region $$region --no-cli-pager; \
-			rm -rf $$TMPDIR; \
-		else \
-			echo "  boto3-latest layer already exists in $$region"; \
-		fi; \
-	done
 
 secrets-rotation: primary_region_catalog-db
 	@echo "Creating secrets rotation resources in ${PRIMARY_REGION}"

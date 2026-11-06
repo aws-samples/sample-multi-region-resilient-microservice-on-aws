@@ -69,8 +69,7 @@ Resources:
       Role: !GetAtt DnsStatusRole.Arn
       Timeout: 30
       ReservedConcurrentExecutions: 1
-      Layers:
-        - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:boto3-latest:1
+      # No layer: the boto3 that the python3.12 runtime ships has the arc-region-switch client.
       Environment:
         Variables:
           PLAN_ARN: !Ref PlanArn
