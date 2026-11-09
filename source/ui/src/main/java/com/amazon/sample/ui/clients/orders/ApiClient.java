@@ -287,7 +287,7 @@ public class ApiClient {
      * @return ApiClient this client
      */
     public ApiClient addDefaultHeader(String name, String value) {
-        if (defaultHeaders.containsKey(name)) {
+        if (defaultHeaders.containsHeader(name)) {
             defaultHeaders.remove(name);
         }
         defaultHeaders.add(name, value);
@@ -498,7 +498,7 @@ public class ApiClient {
         } else if(MediaType.MULTIPART_FORM_DATA.equals(contentType)) {
             return BodyInserters.fromMultipartData(formParams);
         } else {
-            return obj != null ? BodyInserters.fromObject(obj) : null;
+            return obj != null ? BodyInserters.fromValue(obj) : null;
         }
     }
 
@@ -549,7 +549,7 @@ public class ApiClient {
     private WebClient.RequestBodySpec prepareRequest(String path, HttpMethod method, Map<String, Object> pathParams, MultiValueMap<String, String> queryParams, Object body, HttpHeaders headerParams, MultiValueMap<String, String> cookieParams, MultiValueMap<String, Object> formParams, List<MediaType> accept, MediaType contentType, String[] authNames) {
         updateParamsForAuth(authNames, queryParams, headerParams, cookieParams);
 
-        final UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(basePath).path(path);
+        final UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(basePath).path(path);
         if (queryParams != null) {
             builder.queryParams(queryParams);
         }
@@ -577,7 +577,7 @@ public class ApiClient {
      * @param requestBuilder The current request
      */
     protected void addHeadersToRequest(HttpHeaders headers, WebClient.RequestBodySpec requestBuilder) {
-        for (Entry<String, List<String>> entry : headers.entrySet()) {
+        for (Entry<String, List<String>> entry : headers.headerSet()) {
             List<String> values = entry.getValue();
             for(String value : values) {
                 if (value != null) {
@@ -662,7 +662,7 @@ public class ApiClient {
         }
 
         private void logResponse(ClientHttpResponse response) throws IOException {
-            log.info("HTTP Status Code: " + response.getRawStatusCode());
+            log.info("HTTP Status Code: " + response.getStatusCode().value());
             log.info("Status Text: " + response.getStatusText());
             log.info("HTTP Headers: " + headersToString(response.getHeaders()));
             log.info("Response Body: " + bodyToString(response.getBody()));
@@ -670,7 +670,7 @@ public class ApiClient {
 
         private String headersToString(HttpHeaders headers) {
             StringBuilder builder = new StringBuilder();
-            for(Entry<String, List<String>> entry : headers.entrySet()) {
+            for(Entry<String, List<String>> entry : headers.headerSet()) {
                 builder.append(entry.getKey()).append("=[");
                 for(String value : entry.getValue()) {
                     builder.append(value).append(",");

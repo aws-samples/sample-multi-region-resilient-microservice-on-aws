@@ -124,7 +124,7 @@ public class Clients {
 
     private static ExchangeFilterFunction logResponse() {
         return ExchangeFilterFunction.ofResponseProcessor(clientResponse -> {
-            log.info("Response: {} {}", clientResponse.rawStatusCode(), clientResponse.bodyToMono(String.class));
+            log.info("Response: {} {}", clientResponse.statusCode().value(), clientResponse.bodyToMono(String.class));
             return Mono.just(clientResponse);
         });
     }
