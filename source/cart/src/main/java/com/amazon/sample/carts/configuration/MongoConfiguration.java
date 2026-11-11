@@ -21,7 +21,7 @@ package com.amazon.sample.carts.configuration;
 import com.amazon.sample.carts.services.CartService;
 import com.amazon.sample.carts.services.MongoCartService;
 import org.springframework.boot.autoconfigure.AutoConfigureBefore;
-import org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration;
+import org.springframework.boot.mongodb.autoconfigure.MongoAutoConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;

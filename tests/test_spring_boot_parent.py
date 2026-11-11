@@ -13,10 +13,20 @@ carried the fixed versions since 2026-06-10, but the parent was pinned at
 3.5.14 because ``.github/dependabot.yml`` ignored every update to it, patch
 releases included, after the 4.x bumps broke the services in July.
 
-These tests pin the two facts that let that happen: the Maven services share
-one parent version at or above the release carrying those fixes, and
+On 2026-11-06 Inspector reported CRITICAL findings in Spring Framework 6.2.19
+(CVE-2026-47884, CVE-2026-47890, CVE-2026-47892) for the services running in
+test2. Spring Boot 3.5.16 is the last open-source 3.5 release and manages that
+Spring Framework; the open-source fix is 7.0.9. The services therefore build on
+the 4.0 line. 4.0.9 is the first 4.0 release whose BOM also carries the Tomcat
+and Jackson fixes the poms used to override by hand (4.0.8 manages Spring
+Framework 7.0.9 but Tomcat 11.0.24 and Jackson 3.1.5). 4.1.0 manages Spring
+Framework 7.0.8, which the advisories still cover, so the parent stays below it.
+
+These tests pin the facts that let the earlier gap happen: the Maven services
+share one parent version at or above the release carrying those fixes, and
 Dependabot may propose patch releases of the parent (major and minor bumps
-stay blocked and need a deliberate migration).
+stay blocked and need a deliberate migration). They also keep the parent in
+the 4.0 line until a 4.1 release carries the Spring Framework fix.
 
 Run with:  pytest tests/test_spring_boot_parent.py -v
 """
@@ -36,9 +46,14 @@ PARENT_GROUP = "org.springframework.boot"
 PARENT_ARTIFACT = "spring-boot-starter-parent"
 PARENT_DEPENDENCY = f"{PARENT_GROUP}:{PARENT_ARTIFACT}"
 
-# Spring Boot 3.5.16 manages Spring Framework 6.2.19 and Micrometer 1.15.12,
-# the releases that fix the CVEs listed in the module docstring.
-MINIMUM_PARENT_VERSION = (3, 5, 16)
+# Spring Boot 4.0.9 manages Spring Framework 7.0.10 (CVE-2026-47884, CVE-2026-47890 and
+# CVE-2026-47892 are fixed in 7.0.9), Micrometer 1.16.8 (CVE-2026-40983 and CVE-2026-40984
+# reach 1.16.5), Tomcat 11.0.27 and Jackson 3.1.7 / 2.21.7. The Tomcat and Jackson floors
+# live in tests/test_dependency_security_floors.py.
+MINIMUM_PARENT_VERSION = (4, 0, 9)
+
+# Spring Boot 4.1.0 manages Spring Framework 7.0.8, which the same advisories still cover.
+PARENT_VERSION_CEILING = (4, 1, 0)
 
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
@@ -66,6 +81,10 @@ def _version_tuple(version: str) -> tuple[int, int, int]:
     match = VERSION_RE.match(version)
     assert match, f"parent version {version!r} is not MAJOR.MINOR.PATCH"
     return tuple(int(part) for part in match.groups())
+
+
+def _dotted(version: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in version)
 
 
 def _maven_updates() -> list[dict]:
@@ -101,8 +120,22 @@ def test_spring_boot_parent_carries_the_framework_and_micrometer_fixes(pom):
     _group, _artifact, version = _parent(pom)
     assert _version_tuple(version) >= MINIMUM_PARENT_VERSION, (
         f"{pom.relative_to(REPO_ROOT)} builds on Spring Boot {version}; "
-        f"{'.'.join(map(str, MINIMUM_PARENT_VERSION))} or later is needed for "
-        "Spring Framework 6.2.19 and Micrometer 1.15.12"
+        f"{_dotted(MINIMUM_PARENT_VERSION)} or later is needed for Spring Framework 7.0.9 or later "
+        "(CVE-2026-47884, CVE-2026-47890, CVE-2026-47892), Micrometer 1.16.6 or later "
+        "(CVE-2026-40983, CVE-2026-40984), and the Tomcat and Jackson releases that "
+        "tests/test_dependency_security_floors.py checks"
+    )
+
+
+@pytest.mark.parametrize("pom", _pom_paths(), ids=lambda p: p.parent.name)
+def test_spring_boot_parent_stays_in_the_4_0_line(pom):
+    """4.1.0 manages Spring Framework 7.0.8, so it brings the advisories back."""
+    _group, _artifact, version = _parent(pom)
+    assert _version_tuple(version) < PARENT_VERSION_CEILING, (
+        f"{pom.relative_to(REPO_ROOT)} builds on Spring Boot {version}. The 4.1.0 BOM manages Spring "
+        "Framework 7.0.8, which CVE-2026-47884, CVE-2026-47890 and CVE-2026-47892 still cover. Moving "
+        "to 4.1 means reading its BOM first: raise PARENT_VERSION_CEILING here and add the release to "
+        "BOM_MANAGED in tests/test_dependency_security_floors.py once the BOM carries the fixes"
     )
 
 

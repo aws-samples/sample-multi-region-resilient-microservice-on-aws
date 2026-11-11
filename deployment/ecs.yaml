@@ -824,7 +824,7 @@ Resources:
               awslogs-stream-prefix: ecs
         -
           Name: init
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v2.29.0'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v2.32.0'
           Essential: false
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
@@ -995,7 +995,7 @@ Resources:
               awslogs-stream-prefix: ecs
         -
           Name: init
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v2.29.0'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v2.32.0'
           Essential: false
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
@@ -1692,7 +1692,7 @@ Resources:
               awslogs-stream-prefix: ecs
         -
           Name: init
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-node${Env}:v0.12.0'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-node${Env}:v0.13.0'
           Essential: false
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation-node
@@ -1900,7 +1900,7 @@ Resources:
               awslogs-stream-prefix: ecs
         -
           Name: init
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v2.29.0'
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/adot-autoinstrumentation-java${Env}:v2.32.0'
           Essential: false
           MountPoints: 
             - SourceVolume: opentelemetry-auto-instrumentation
