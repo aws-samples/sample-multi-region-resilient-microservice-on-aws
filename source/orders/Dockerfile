@@ -18,7 +18,10 @@ RUN ./mvnw -DskipTests package -q && mv ./target/orders-0.0.1-SNAPSHOT.jar /app.
 # Package Stage
 FROM public.ecr.aws/docker/library/amazoncorretto:17-al2023
 
-RUN dnf install -q -y \
+# Amazon Linux 2023 repositories are versioned: a plain dnf upgrade only reaches the release the base
+# image was built from. --releasever=latest takes the newest security updates when the image is built.
+RUN dnf upgrade -q -y --releasever=latest && \
+    dnf install -q -y \
     shadow-utils wget && \
     dnf clean all
 

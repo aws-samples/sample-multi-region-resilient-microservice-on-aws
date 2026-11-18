@@ -12,6 +12,8 @@
 # base layers and packages current). tests/test_fis_sidecar.py holds this file and the buildspec's
 # copy equal, and holds the repave to rebuilding the image rather than copying the bare base over it.
 FROM public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest
-RUN dnf upgrade -y && dnf install -y jq procps awscli curl-minimal util-linux && dnf clean all
+# Amazon Linux 2023 repositories are versioned: a plain dnf upgrade only reaches the release the SSM agent
+# image was built from. --releasever=latest takes the newest security updates when the image is built.
+RUN dnf upgrade -y --releasever=latest && dnf install -y jq procps awscli curl-minimal util-linux && dnf clean all
 RUN dnf install -y at bind-utils lsof iproute iproute-tc && dnf clean all
 RUN dnf install -y python3 python3-requests && dnf clean all

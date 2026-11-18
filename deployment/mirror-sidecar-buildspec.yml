@@ -43,7 +43,7 @@ phases:
         REPO=amazon-ssm-agent${ENV_SUFFIX}
         {
           echo "FROM public.ecr.aws/amazon-ssm-agent/amazon-ssm-agent:latest"
-          echo "RUN dnf upgrade -y && dnf install -y jq procps awscli curl-minimal util-linux && dnf clean all"
+          echo "RUN dnf upgrade -y --releasever=latest && dnf install -y jq procps awscli curl-minimal util-linux && dnf clean all"
           echo "RUN dnf install -y at bind-utils lsof iproute iproute-tc && dnf clean all"
           echo "RUN dnf install -y python3 python3-requests && dnf clean all"
         } > Dockerfile.ssm-agent
